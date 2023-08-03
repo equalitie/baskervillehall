@@ -1,0 +1,45 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-session"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-session"
+spec:
+  replicas: 3
+  serviceName: "baskervillehall-session"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-session"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-session"
+    spec:
+      containers:
+      - name: "baskervillehall-session"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "5Gi"
+            cpu: "250m"
+          limits:
+            memory: "20Gi"
+            cpu: "2000m"
+        command:
+          - python
+        args:
+          - /usr/local/baskervillehall/src/baskervillehall/main.py
+          - session
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name

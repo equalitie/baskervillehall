@@ -1,0 +1,3 @@
+FROM equalitie/baskervillehall:base
+
+COPY ./src /usr/local/baskervillehall/src
