@@ -3,6 +3,7 @@ import logging
 
 import os
 
+from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
 
@@ -107,11 +108,39 @@ def main():
         trainer = BaskervillehallTrainer(
             **trainer_parameters,
             kafka_connection=kafka_connection,
+            s3_connection=s3_connection,
             logger=logger
         )
         trainer.run()
     elif args.pipeline == 'predict':
-        pass
+        predictor_parameters = {
+            'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
+            'partition': partition,
+            'num_partitions': int(os.environ.get('NUM_PARTITIONS')),
+            'topic_commands': os.environ.get('TOPIC_COMMANDS'),
+            'topic_reports': os.environ.get('TOPIC_REPORTS'),
+            'kafka_group_id': os.environ.get('GROUP_ID_PREDICTOR'),
+            'model_reload_in_minutes': int(os.environ.get('PREDICTOR_MODEL_RELOAD_IN_MINUTES')),
+            'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
+            'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
+            's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
+            'white_list_refresh_in_minutes': int(os.environ.get('WHITELIST_REFRESH_IN_MINUTES')),
+            'whitelist_ip': os.environ.get('WHITELIST_IP'),
+            'max_models': int(os.environ.get('MAX_MODELS')),
+            'pending_challenge_ttl_in_minutes': int(os.environ.get('PENDING_CHALLENGE_TTL_IN_MINUTES')),
+            'passed_challenge_ttl_in_minutes': int(os.environ.get('PASSED_CHALLENGE_TTL_IN_MINUTES')),
+            'maxsize_passed_challenge': int(os.environ.get('MAXSIZE_PASSED_CHALLENGE')),
+            'maxsize_pending_challenge': int(os.environ.get('MAXSIZE_PENDING_CHALLENGE')),
+        }
+
+        predictor = BaskervillehallPredictor(
+            **predictor_parameters,
+            kafka_connection=kafka_connection,
+            s3_connection=s3_connection,
+            logger=logger
+        )
+        predictor.run()
+
     else:
         logger.error('Pipeline is not specified. Use session, predict or train')
 

@@ -63,12 +63,14 @@ class BaskervillehallIsolationForest(object):
         self.categorical_encoders = []
         for i in range(len(categorical_features[0])):
             encoder = LabelEncoder()
-            categorical_vectors.append(encoder.fit_transform(
+            classes = [categorical_features[k][i] for k in range(len(categorical_features))]
+            classes.append('_other')
+            encoder.fit(classes)
+            categorical_vectors.append(encoder.transform(
                 [categorical_features[k][i] for k in range(len(categorical_features))]))
             self.categorical_encoders.append(encoder)
 
         categorical_vectors = np.array(categorical_vectors).transpose()
-
         Y = np.concatenate((features, categorical_vectors), axis=1)
 
         self.mean = Y.mean(axis=0)
@@ -89,12 +91,13 @@ class BaskervillehallIsolationForest(object):
 
     def score(self, features, categorical_features):
         assert (features.shape[0] == len(categorical_features))
-        assert(len(categorical_features[0]) == len(self.categorical_encoders))
+        assert (len(categorical_features[0]) == len(self.categorical_encoders))
 
         categorical_vectors = []
         for i in range(len(self.categorical_encoders)):
             categorical_vectors.append(self.categorical_encoders[i].transform(
-                [categorical_features[k][i] for k in range(len(categorical_features))]
+                [categorical_features[k][i] if categorical_features[k][i] in self.categorical_encoders[i].classes_ else
+                     '_other' for k in range(len(categorical_features))]
             ))
 
         categorical_vectors = np.array(categorical_vectors).transpose()

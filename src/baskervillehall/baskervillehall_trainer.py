@@ -6,6 +6,7 @@ import numpy as np
 
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.host_selector import HostSelector
+from baskervillehall.model_io import ModelIO
 from kafka import KafkaConsumer, TopicPartition
 
 
@@ -73,12 +74,12 @@ class BaskervillehallTrainer(object):
         self.min_number_of_queries = min_number_of_queries
 
         self.n_estimators = n_estimators
-        self.max_samples = max()
+        self.max_samples = max_samples
         self.contamination = contamination
         self.max_features = max_features
         self.bootstrap = bootstrap
         self.n_jobs = n_jobs
-        self.random_state = None,
+        self.random_state = random_state
 
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.model_ttl_in_minutes = model_ttl_in_minutes
@@ -91,7 +92,7 @@ class BaskervillehallTrainer(object):
         self.dataset_delay_from_now_in_minutes = dataset_delay_from_now_in_minutes
 
     def run(self):
-        # model_io = ModelIO(**self.s3_connection, logger=self.logger)
+        model_io = ModelIO(**self.s3_connection, logger=self.logger)
 
         consumer = KafkaConsumer(
             **self.kafka_connection,
@@ -149,7 +150,6 @@ class BaskervillehallTrainer(object):
                             if len(value['queries']) < self.min_number_of_queries:
                                 continue
 
-                            ip = value['ip']
                             vector = BaskervillehallIsolationForest.get_vector_from_feature_map(self.feature_names,
                                                                                                 value['features'])
 
@@ -186,11 +186,11 @@ class BaskervillehallTrainer(object):
                 del features
                 del categorical_features
 
-        #         if model is not None:
-        #             self.logger.info(
-        #                 f'@@@@@@@@@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
-        #             model_io.save(model, host, self.s3_path)
-        # except Exception as ex:
+                if model is not None:
+                    self.logger.info(
+                        f'@@@@@@@@@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
+                    model_io.save(model, self.s3_path, host)
+        except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')
 
         finally:

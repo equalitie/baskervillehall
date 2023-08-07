@@ -1,0 +1,65 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-predictor"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-predictor"
+spec:
+  replicas: 3
+  serviceName: "baskervillehall-predictor"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-predictor"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-predictor"
+    spec:
+      containers:
+      - name: "baskervillehall-predictor"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "150m"
+          limits:
+            memory: "3Gi"
+            cpu: "200m"
+        command:
+          - python
+        args:
+          - /usr/local/baskervillehall/src/baskervillehall/main.py
+          - predict
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: S3_ACCESS
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_access
+        - name: S3_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_secret
+        - name: S3_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_endpoint
+        - name: S3_REGION
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_region

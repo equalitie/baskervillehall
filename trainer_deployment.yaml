@@ -1,0 +1,65 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-trainer"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-trainer"
+spec:
+  replicas: 3
+  serviceName: "baskervillehall-trainer"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-trainer"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-trainer"
+    spec:
+      containers:
+      - name: "baskervillehall-trainer"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "5Gi"
+            cpu: "250m"
+          limits:
+            memory: "20Gi"
+            cpu: "2000m"
+        command:
+          - python
+        args:
+          - /usr/local/baskervillehall/src/baskervillehall/main.py
+          - train
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: S3_ACCESS
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_access
+        - name: S3_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_secret
+        - name: S3_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_endpoint
+        - name: S3_REGION
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_region
