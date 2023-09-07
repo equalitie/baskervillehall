@@ -1,0 +1,45 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-counter"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-counter"
+spec:
+  replicas: 3
+  serviceName: "baskervillehall-counter"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-counter"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-counter"
+    spec:
+      containers:
+      - name: "baskervillehall-counter"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "50m"
+          limits:
+            memory: "1Gi"
+            cpu: "300m"
+        command:
+          - python
+        args:
+          - /usr/local/baskervillehall/src/baskervillehall/main.py
+          - counter
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name

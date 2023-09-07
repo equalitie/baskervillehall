@@ -12,6 +12,7 @@ class WhitelistURL(object):
         self.prefixes = []
         self.matches = []
         self.stars = []
+        self.double_stars = []
         self.whitelist_default = whitelist_default
 
     def _refresh(self):
@@ -35,7 +36,11 @@ class WhitelistURL(object):
                         if star_pos == len(url) - 1:
                             self.prefixes.append(url[:-1])
                         else:
-                            self.stars.append((url[:star_pos], url[star_pos + 1:]))
+                            star_pos2 = url.rfind('*')
+                            if star_pos == star_pos2:
+                                self.stars.append((url[:star_pos], url[star_pos + 1:]))
+                            else:
+                                self.double_stars.append((url[:star_pos], url[star_pos + 1:-1]))
 
     def is_host_whitelisted(self, host):
         self._refresh()
@@ -56,6 +61,9 @@ class WhitelistURL(object):
 
         for star in self.stars:
             if url and url.startswith(star[0]) and url.endswith(star[1]):
+                return True
+        for star in self.double_stars:
+            if url and url.startswith(star[0]) and star[1] in url[len(star[0]):]:
                 return True
 
         return False

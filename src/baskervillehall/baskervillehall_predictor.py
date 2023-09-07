@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from cachetools import TTLCache
@@ -9,6 +10,7 @@ from baskervillehall.model_storage import ModelStorage
 from baskervillehall.whitelist_ip import WhitelistIP
 import json
 import numpy as np
+from datetime import datetime
 
 
 class BaskervillehallPredictor(object):
@@ -28,6 +30,7 @@ class BaskervillehallPredictor(object):
             max_models=10000,
             min_session_duration=20,
             min_number_of_queries=2,
+            batch_size=500,
             pending_challenge_ttl_in_minutes=30,
             maxsize_pending_challenge=10000000,
             passed_challenge_ttl_in_minutes=600,
@@ -57,13 +60,17 @@ class BaskervillehallPredictor(object):
         self.passed_challenge_ttl_in_minutes = passed_challenge_ttl_in_minutes
         self.maxsize_pending_challenge = maxsize_pending_challenge
         self.maxsize_passed_challenge = maxsize_passed_challenge
+        self.batch_size = batch_size
+
+    @staticmethod
+    def _is_debug_enabled(value):
+        return value['ua'] == 'Baskervillehall'
 
     def run(self):
         model_storage = ModelStorage(
             self.s3_connection,
             self.s3_path,
             reload_in_minutes=self.model_reload_in_minutes ,
-            max_models=self.max_models,
             logger=self.logger)
         model_storage.start()
 
@@ -90,7 +97,7 @@ class BaskervillehallPredictor(object):
 
         producer = KafkaProducer(**self.kafka_connection)
 
-        self.logger.info(f'Starting predicting on topic {self.topic_sessions}')
+        self.logger.info(f'Starting predicting on topic {self.topic_sessions}, partition {self.partition}')
 
         whitelist_ip = WhitelistIP(self.whitelist_ip, logger=self.logger,
                                    refresh_period_in_seconds=60 * self.white_list_refresh_in_minutes)
@@ -98,10 +105,11 @@ class BaskervillehallPredictor(object):
         try:
             consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
             while True:
-                raw_messages = consumer.poll(timeout_ms=1000, max_records=5000)
+                raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
                 for topic_partition, messages in raw_messages.items():
+                    batch = defaultdict(list)
+                    self.logger.info(f'Batch size {len(messages)}')
                     for message in messages:
-
                         if not message.value:
                             continue
 
@@ -109,51 +117,84 @@ class BaskervillehallPredictor(object):
                         ip = value['ip']
                         host = message.key.decode("utf-8")
 
-                        if whitelist_ip.is_in_whitelist(host, ip):
-                            continue
+                        debug = self._is_debug_enabled(value)
+                        if debug:
+                            self.logger.info(value.get('ua'))
 
-                        session_id = value['session_id']
-
-                        model = model_storage.get_model(host)
-                        if model is None:
+                        if whitelist_ip.is_in_whitelist(host, value['ip']):
+                            if debug:
+                                self.logger.info(f'ip {ip} whitelisted')
                             continue
 
                         if value['duration'] < self.min_session_duration:
+                            if debug:
+                                self.logger.info(f'ip {ip} value[duration] < self.min_session_duration')
                             continue
                         if len(value['queries']) < self.min_number_of_queries:
+                            if debug:
+                                self.logger.info(f'ip {ip} < min_number_of_queries')
                             continue
 
-                        vector = BaskervillehallIsolationForest.get_vector_from_feature_map(model.feature_names,
-                                                                                            value['features'])
+                        batch[host].append(value)
 
-                        features = np.array([vector])
-                        categorical_features = [[value['country']]]
+                    for host, values in batch.items():
+                        model = model_storage.get_model(host)
+                        if model is None:
+                            continue
+                        categorical_features = []
+                        features = []
+                        for i in range(len(values)):
+                            categorical_features.append([values[i]['country']])
+                            features.append(BaskervillehallIsolationForest.get_vector_from_feature_map(
+                                model.feature_names, values[i]['features']))
 
-                        prediction = model.score(features, categorical_features)[0] < 0
+                        features = np.array(features)
 
-                        if prediction:
-                            if ip_storage.is_challenge_passed(ip):
-                                continue
+                        ts = datetime.now()
+                        scores = model.score(features, categorical_features)
+                        self.logger.info(f'score() time = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
+                                         f'{features.shape[0]} items')
 
-                            if (ip, session_id) in pending_challenge_ips:
-                                continue
-                            pending_challenge_ips[(ip, session_id)] = True
+                        for i in range(scores.shape[0]):
+                            score = scores[i]
+                            prediction = score < 0
+                            value = values[i]
+                            debug = self._is_debug_enabled(value)
+                            ip = value['ip']
+                            end = value['end']
 
-                            self.logger.info(f'Challenging ip={ip}, session_id={session_id}, host={host}.')
-                            message = json.dumps(
-                                {
-                                    'Name': 'challenge_ip',
-                                    'Value': f'{ip}_testing',
-                                    'session_id': session_id,
-                                    'host': host,
-                                    'source': 'baskervillehall',
-                                    'start': value['start'],
-                                    'end': value['end'],
-                                    'duration': value['duration']
-                                }
-                            ).encode('utf-8')
-                            producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
-                            producer.flush()
+                            if debug:
+                                ua = value['ua']
+                                self.logger.info(f'777 ip={ip}, prediction = {prediction}, score = {score}, ua={ua}, end={end}')
+                            if prediction:
+                                session_id = value['session_id']
+                                if ip_storage.is_challenge_passed(session_id):
+                                    if debug:
+                                        self.logger.info(f'ip = {ip} is in challenged_passed_storage')
+                                    continue
+
+                                if (ip, session_id) in pending_challenge_ips:
+                                    if debug:
+                                        self.logger.info(f'ip = {ip} is in challenged_pending_storage')
+                                    continue
+                                pending_challenge_ips[(ip, session_id)] = True
+
+                                self.logger.info(f'Challenging ip={ip}, '
+                                                 f'session_id={session_id}, host={host}, end={end}.')
+                                message = json.dumps(
+                                    {
+                                        'Name': 'challenge_ip',
+                                        'Value': f'{ip}',
+                                        'session_id': session_id,
+                                        'host': host,
+                                        'source': 'baskervillehall',
+                                        'start': value['start'],
+                                        'end': value['end'],
+                                        'duration': value['duration']
+                                    }
+                                ).encode('utf-8')
+                                producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                    producer.flush()
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

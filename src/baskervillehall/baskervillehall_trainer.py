@@ -32,6 +32,7 @@ class BaskervillehallTrainer(object):
 
             host_waiting_sleep_time_in_seconds=5,
             model_ttl_in_minutes=120,
+            new_model_wildcard_period=2,
             dataset_delay_from_now_in_minutes=60,
             kafka_connection=None,
             s3_connection=None,
@@ -83,6 +84,7 @@ class BaskervillehallTrainer(object):
 
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.model_ttl_in_minutes = model_ttl_in_minutes
+        self.new_model_wildcard_period = new_model_wildcard_period
         self.kafka_connection = kafka_connection
         self.kafka_group_id = kafka_group_id
         self.s3_connection = s3_connection
@@ -101,7 +103,9 @@ class BaskervillehallTrainer(object):
         )
 
         host_selector = HostSelector(
-            ttl_in_minutes=self.model_ttl_in_minutes
+            ttl_in_minutes=self.model_ttl_in_minutes,
+            new_model_wildcard_period=self.new_model_wildcard_period,
+            logger=self.logger
         )
         self.logger.info(self.kafka_connection['bootstrap_servers'])
         self.logger.info(f'Starting training on topic {self.topic_sessions}')
@@ -161,7 +165,7 @@ class BaskervillehallTrainer(object):
                                 categorical_features.popleft()
 
                 if len(features) <= self.min_dataset_size:
-                    self.logger.info(f'Skipping training. Too few sessions: {len(features)}. '
+                    self.logger.info(f'Skipping training. Too few sessions: {len(features)}. Host = {host}.'
                                      f'The minimum is {self.min_dataset_size}')
                     continue
 

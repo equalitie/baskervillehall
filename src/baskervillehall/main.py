@@ -3,6 +3,7 @@ import logging
 
 import os
 
+from baskervillehall.baskervillehall_counter import BaskervillehallCounter
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
@@ -89,6 +90,7 @@ def main():
     elif args.pipeline == 'train':
         trainer_parameters = {
             'feature_names': os.environ.get('FEATURE_NAMES').split(','),
+            'new_model_wildcard_period': int(os.environ.get('NEW_MODEL_WILDCARD_PERIOD')),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'num_sessions': int(os.environ.get('NUM_SESSIONS')),
@@ -123,10 +125,10 @@ def main():
             'model_reload_in_minutes': int(os.environ.get('PREDICTOR_MODEL_RELOAD_IN_MINUTES')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
+            'batch_size': int(os.environ.get('BATCH_SIZE')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
             'white_list_refresh_in_minutes': int(os.environ.get('WHITELIST_REFRESH_IN_MINUTES')),
             'whitelist_ip': os.environ.get('WHITELIST_IP'),
-            'max_models': int(os.environ.get('MAX_MODELS')),
             'pending_challenge_ttl_in_minutes': int(os.environ.get('PENDING_CHALLENGE_TTL_IN_MINUTES')),
             'passed_challenge_ttl_in_minutes': int(os.environ.get('PASSED_CHALLENGE_TTL_IN_MINUTES')),
             'maxsize_passed_challenge': int(os.environ.get('MAXSIZE_PASSED_CHALLENGE')),
@@ -140,7 +142,24 @@ def main():
             logger=logger
         )
         predictor.run()
+    elif args.pipeline == 'counter':
+        kafka_connection = {
+            'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_COUNTER')
+        }
+        counter_parameters = {
+            'topic': os.environ.get('TOPIC_COUNTER'),
+            'partition': partition,
+            'kafka_group_id': os.environ.get('GROUP_ID_COUNTER'),
+            'batch_size': int(os.environ.get('BATCH_SIZE')),
+            'window': int(os.environ.get('WINDOW_COUNTER'))
+        }
 
+        counter = BaskervillehallCounter(
+            **counter_parameters,
+            kafka_connection=kafka_connection,
+            logger=logger
+        )
+        counter.run()
     else:
         logger.error('Pipeline is not specified. Use session, predict or train')
 

@@ -16,7 +16,7 @@ class TestModel(unittest.TestCase):
         random.seed(777)
         num_records = 1000
 
-        num_features = 10
+        num_features = 5
 
         categories = [
             ['a','b','c','d','e','f'],

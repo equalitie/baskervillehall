@@ -8,26 +8,27 @@ class WhitelistIP(object):
         self.ips = None
         self.logger = logger
         self.host_ips = None
+        self.global_ips = None
 
     def get_ips(self):
         data, fresh = self.reader.get()
         if data and fresh:
             self.host_ips = {}
+            self.global_ips = set([ip.split('/')[0] for ip in data.get('global', [])])
             for k, v in data.items():
                 if k == 'global' or k == 'global_updated_at':
                     continue
-                ips = []
-                for ip in v:
-                    ips.append(ip.split('/')[0])
-                ips = list(set(ips))
-                self.host_ips[k] = self.host_ips.get(k, []) + ips
-        return self.host_ips
+                self.host_ips[k] = set([ip.split('/')[0] for ip in v])
+        return self.host_ips, self.global_ips
 
     def is_in_whitelist(self, host, ip):
-        ips = self.get_ips()
-        if not ips:
-            return False
-        if host not in ips:
-            return False
-        return ip in ips[host]
+        host_ips, global_ips = self.get_ips()
+        if global_ips:
+            if ip in global_ips:
+                return True
+        if host_ips:
+            if host not in host_ips:
+                return False
+            return ip in host_ips[host]
+        return False
 

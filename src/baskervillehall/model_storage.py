@@ -1,8 +1,7 @@
 import logging
 import threading
 import time
-
-from cachetools import TTLCache
+from datetime import datetime
 
 from baskervillehall.model_io import ModelIO
 
@@ -14,27 +13,28 @@ class ModelStorage(object):
             s3_connection,
             s3_path,
             reload_in_minutes=10,
-            max_models=10000,
             logger=None
     ):
         super().__init__()
         self.s3_path = s3_path
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
-        self.models = TTLCache(maxsize=max_models, ttl=reload_in_minutes*60)
+        self.models = {}
         self.model_io = ModelIO(**s3_connection, logger=self.logger)
         self.thread = None
+        self.reload_in_minutes = reload_in_minutes
         self.lock = threading.Lock()
         self.requests = set()
 
+    def _is_expired(self, ts):
+        return (datetime.now() - ts).total_seconds() > self.reload_in_minutes * 60
+
     def get_model(self, host):
         with self.lock:
-            try:
-                model = self.models[host]
-            except KeyError as e:
-                model = None
-
-            if model:
-                if host in self.requests:
+            model, ts = self.models.get(host, (None, None))
+            if model and ts:
+                if self._is_expired(ts):
+                    self.requests.add(host)
+                elif host in self.requests:
                     self.requests.remove(host)
                 return model
 
@@ -55,10 +55,9 @@ class ModelStorage(object):
             if model is None:
                 with self.lock:
                     self.requests.add(host)
-                time.sleep(1)
                 continue
             with self.lock:
-                self.models[host] = model
+                self.models[host] = (model, datetime.now())
                 self.logger.info(f'Loaded model for host {host}. Total models = {len(self.models.keys())}')
 
     def start(self):

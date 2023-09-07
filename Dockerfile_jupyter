@@ -1,0 +1,15 @@
+FROM jupyter/scipy-notebook:python-3.11.4
+
+COPY ./requirements.txt /home/jovyan/baskervillehall/requirements.txt
+RUN pip install -r /home/jovyan/baskervillehall/requirements.txt
+
+COPY ./src /home/jovyan/baskervillehall/src
+COPY ./setup.py /home/jovyan/baskervillehall/setup.py
+COPY ./README.md /home/jovyan/baskervillehall/README.md
+
+USER root
+WORKDIR /home/jovyan/baskervillehall
+RUN pip install .
+USER jovyan
+
+

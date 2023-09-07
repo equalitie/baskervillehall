@@ -1,6 +1,7 @@
 import copy
 from collections import defaultdict
 
+from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -56,76 +57,6 @@ class BaskervillehallSession(object):
             timestamp = datetime.strptime(data['datestamp'], '%Y-%m-%dT%H:%M:%S.%fZ')
         return timestamp, data
 
-    def get_features(self, session):
-        requests = session['requests']
-        features = {}
-
-        hits = float(len(requests))
-        intervals = []
-        num_4xx = 0
-        num_5xx = 0
-        url_map = defaultdict(int)
-        query_map = defaultdict(int)
-        num_html = 0
-        num_image = 0
-        num_js = 0
-        num_css = 0
-        slash_counts = []
-        payloads = []
-        for i in range(len(requests)):
-            request = requests[i]
-            if i < len(requests) - 1:
-                intervals.append((requests[i+1]['ts'] - request['ts']).total_seconds())
-            code = request['code']
-            if code // 100 == 4:
-                num_4xx += 1
-            if code // 100 == 5:
-                num_5xx += 1
-            url = request['url']
-            payloads.append(request['payload'] + 1.0)
-            slash_counts.append(len(url.split('/'))-1)
-            url_map[url] += 1
-            query_map[request['query']] += 1
-            content_type = request['type']
-            if content_type == 'text/html' or \
-                    content_type == 'text/html; charset=UTF-8' or \
-                    content_type == 'text/html; charset=utf-8':
-                num_html += 1
-            elif 'image' in content_type:
-                num_image += 1
-            elif 'javascript' in content_type:
-                num_js += 1
-            elif content_type == 'text/css' or \
-                    content_type == 'text/css; charset=UTF-8' or \
-                    content_type == 'text/css; charset=utf-8':
-                num_css += 1
-
-        intervals = np.array(intervals)
-        unique_path = float(len(url_map.keys()))
-        unique_query = float(len(query_map.keys()))
-        session_duration = session['duration']
-
-        features['request_rate'] = hits / session_duration * 60
-        mean_intervals = np.mean(intervals)
-        features['request_interval_average'] = mean_intervals
-        features['request_interval_std'] = np.sqrt(np.mean((intervals-mean_intervals)**2))
-        features['response4xx_to_request_ratio'] = num_4xx / hits
-        features['response5xx_to_request_ratio'] = num_5xx / hits
-        features['top_page_to_request_ratio'] = max(url_map.values()) / hits
-        features['unique_path_rate'] = unique_path / session_duration * 60
-        features['unique_path_to_request_ratio'] = unique_path / hits
-        features['unique_query_rate'] = unique_query  / session_duration * 60
-        features['unique_query_to_unique_path_ratio'] = unique_query / unique_path
-        features['image_to_html_ratio'] = float(num_image) / num_html if num_html > 0 else 10.0
-        features['js_to_html_ratio'] = float(num_js) / num_html if num_html > 0 else 10.0
-        features['css_to_html_ratio'] = float(num_css) / num_html if num_html > 0 else 10.0
-        mean_depth = np.mean(slash_counts)
-        features['path_depth_average'] = mean_depth
-        features['path_depth_std'] = np.sqrt(np.mean((slash_counts-mean_depth)**2))
-        features['payload_size_log_average'] = np.mean(np.log(payloads))
-
-        return features
-
     def flush_session(self, producer, session_id, session):
         if session['duration'] == 0:
             return
@@ -137,6 +68,7 @@ class BaskervillehallSession(object):
 
         message = {
             'host': session['host'],
+            'ua': session['ua'],
             'country': session['country'],
             'session_id': session_id,
             'ip': session['ip'],
@@ -144,13 +76,16 @@ class BaskervillehallSession(object):
             'end': session['end'].strftime(self.date_time_format),
             'duration': session['duration'],
             'queries': requests_formatted,
-            'features': self.get_features(session)
+            'features': BaskervillehallIsolationForest.get_features(session)
         }
         producer.send(
             self.topic_sessions,
             key=bytearray(session['host'], encoding='utf8'),
             value=json.dumps(message).encode('utf-8')
         )
+        producer.flush()
+        if session['ua'] == 'Baskervillehall':
+            self.logger.info(json.dumps(message, indent=2))
 
     def run(self):
         whitelist_url = WhitelistURL(url=self.whitelist_url,
@@ -217,6 +152,7 @@ class BaskervillehallSession(object):
 
                         if create_new_session:
                             sessions[session_id] = {
+                                'ua': data.get('client_ua', {}),
                                 'host': host,
                                 'country': data.get('geoip', {}).get('country_code2', ''),
                                 'ip': ip,
@@ -235,9 +171,10 @@ class BaskervillehallSession(object):
                             if duration > self.window_duration * 60:
                                 if 'flush_ts' not in session:
                                     self.flush_session(producer, session_id, session)
+                                    session['flush_ts'] = ts
                                 elif (ts - session['flush_ts']).total_seconds() > self.window_duration * 60:
                                     self.flush_session(producer, session_id, session)
-                                session['flush_ts'] = ts
+                                    session['flush_ts'] = ts
 
                         time_now = datetime.now()
                         if (time_now - garbage_collection_time).total_seconds() > self.garbage_collection_period * 60:
