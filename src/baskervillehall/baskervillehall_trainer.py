@@ -30,14 +30,17 @@ class BaskervillehallTrainer(object):
             n_jobs=None,
             random_state=None,
 
-            host_waiting_sleep_time_in_seconds=5,
+            train_batch_size = 5,
             model_ttl_in_minutes=120,
-            new_model_wildcard_period=2,
             dataset_delay_from_now_in_minutes=60,
             kafka_connection=None,
             s3_connection=None,
             s3_path='/',
-            min_dataset_size=500,
+            min_dataset_size=100,
+            small_dataset_size=500,
+            kafka_timeout_ms=1000,
+            kafka_max_size=5000,
+            wait_time_minutes=5,
             logger=None
     ):
         super().__init__()
@@ -81,16 +84,19 @@ class BaskervillehallTrainer(object):
         self.bootstrap = bootstrap
         self.n_jobs = n_jobs
         self.random_state = random_state
+        self.wait_time_minutes = wait_time_minutes
 
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.model_ttl_in_minutes = model_ttl_in_minutes
-        self.new_model_wildcard_period = new_model_wildcard_period
+        self.train_batch_size = train_batch_size
         self.kafka_connection = kafka_connection
         self.kafka_group_id = kafka_group_id
+        self.kafka_timeout_ms = kafka_timeout_ms
+        self.kafka_max_size = kafka_max_size
         self.s3_connection = s3_connection
         self.s3_path = s3_path
-        self.host_waiting_sleep_time_in_seconds = host_waiting_sleep_time_in_seconds
         self.min_dataset_size = min_dataset_size
+        self.small_dataset_size = small_dataset_size
         self.dataset_delay_from_now_in_minutes = dataset_delay_from_now_in_minutes
 
     def run(self):
@@ -104,7 +110,6 @@ class BaskervillehallTrainer(object):
 
         host_selector = HostSelector(
             ttl_in_minutes=self.model_ttl_in_minutes,
-            new_model_wildcard_period=self.new_model_wildcard_period,
             logger=self.logger
         )
         self.logger.info(self.kafka_connection['bootstrap_servers'])
@@ -113,86 +118,96 @@ class BaskervillehallTrainer(object):
         try:
             consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
             while True:
-                self.logger.info('Getting next host...')
+                self.logger.info('Getting next hosts...')
                 time_now = int(time.time())
-                host = host_selector.get_next_host(consumer)
-                if host is None:
-                    self.logger.info(
-                        f'No next host available, waiting {self.host_waiting_sleep_time_in_seconds} seconds...')
-                    time.sleep(self.host_waiting_sleep_time_in_seconds)
-                    consumer.seek_to_beginning()
+                hosts = host_selector.get_next_hosts(consumer, self.train_batch_size)
+                if len(hosts) == 0:
+                    self.logger.info(f'All models have been trained. Waiting {self.wait_time_minutes} minutes...')
+                    time.sleep(self.wait_time_minutes*60)
                     continue
 
-                self.logger.info(f'-------- host: {host}')
-
+                self.logger.info(f'Batch: {hosts}')
                 self.logger.info('Reading sessions ...')
-                features = deque([])
-                categorical_features = deque([])
                 consumer.seek_to_beginning()
-                host_complete = False
-                while not host_complete:
-                    raw_messages = consumer.poll(timeout_ms=1000, max_records=5000)
+                batch_complete = False
+                batch = {
+                    host: {
+                        'features': [],
+                        'categorical_features': []
+                    } for host in hosts
+                }
+                while not batch_complete:
+                    raw_messages = consumer.poll(timeout_ms=self.kafka_timeout_ms, max_records=self.kafka_max_size)
                     for topic_partition, messages in raw_messages.items():
-                        if host_complete:
+                        if batch_complete:
                             break
                         for message in messages:
                             # prevent from getting messages too close to the current time
                             if (time_now - message.timestamp / 1000) / 60 < self.dataset_delay_from_now_in_minutes:
                                 self.logger.info('Topic offset reached the current time...')
-                                host_complete = True
+                                batch_complete = True
                                 break
 
                             if not message.value:
                                 continue
 
                             value = json.loads(message.value.decode("utf-8"))
-
-                            if message.key.decode("utf-8") != host:
+                            host = message.key.decode("utf-8")
+                            if host not in batch:
                                 continue
                             if value['duration'] < self.min_session_duration:
                                 continue
                             if len(value['queries']) < self.min_number_of_queries:
                                 continue
 
+                            if len(batch[host]['features']) >= self.num_sessions:
+                                batch_complete = True
+                                for _, dataset in batch.items():
+                                    if len(dataset['features']) < self.num_sessions:
+                                        batch_complete = False
+                                        break
+                                if batch_complete:
+                                    break
+                                else:
+                                    continue
+
                             vector = BaskervillehallIsolationForest.get_vector_from_feature_map(self.feature_names,
                                                                                                 value['features'])
 
-                            features.append(vector)
-                            categorical_features.append([value['country']])
+                            batch[host]['features'].append(vector)
+                            batch[host]['categorical_features'].append([value['country']])
 
-                            if len(features) >= self.num_sessions:
-                                features.popleft()
-                                categorical_features.popleft()
+                for host, dataset in batch.items():
+                    features = dataset['features']
+                    categorical_features = dataset['categorical_features']
+                    self.logger.info(f'Training host {host}, dataset size {len(features)}')
 
-                if len(features) <= self.min_dataset_size:
-                    self.logger.info(f'Skipping training. Too few sessions: {len(features)}. Host = {host}.'
-                                     f'The minimum is {self.min_dataset_size}')
-                    continue
+                    if len(features) <= self.min_dataset_size:
+                        self.logger.info(f'Skipping training. Too few sessions: {len(features)}. Host = {host}.'
+                                         f'The minimum is {self.min_dataset_size}')
+                        continue
 
-                model = BaskervillehallIsolationForest(
-                    n_estimators=self.n_estimators,
-                    max_samples=self.max_samples,
-                    contamination=self.contamination,
-                    max_features=self.max_features,
-                    bootstrap=self.bootstrap,
-                    n_jobs=self.n_jobs,
-                    random_state=self.random_state,
-                    logger=self.logger,
-                )
+                    small_dataset = len(features) <= self.small_dataset_size
+                    model = BaskervillehallIsolationForest(
+                        n_estimators=len(features) if small_dataset else self.n_estimators,
+                        max_samples=self.max_samples,
+                        contamination=self.contamination * 2 if small_dataset else self.contamination,
+                        max_features=self.max_features,
+                        bootstrap=self.bootstrap,
+                        n_jobs=self.n_jobs,
+                        random_state=self.random_state,
+                        logger=self.logger,
+                    )
 
-                features = np.array(features)
-                model.fit(
-                    features=features,
-                    feature_names=self.feature_names,
-                    categorical_features=categorical_features,
-                    categorical_feature_names=['country']
-                )
-                del features
-                del categorical_features
+                    features = np.array(features)
+                    model.fit(
+                        features=features,
+                        feature_names=self.feature_names,
+                        categorical_features=categorical_features,
+                        categorical_feature_names=['country']
+                    )
 
-                if model is not None:
-                    self.logger.info(
-                        f'@@@@@@@@@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
+                    self.logger.info(f'@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
                     model_io.save(model, self.s3_path, host)
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

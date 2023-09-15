@@ -22,6 +22,11 @@ singleuser:
   # which performs further customization on startup.
   cmd: null
 
+  networkPolicy:
+    egressAllowRules:
+      privateIPs: true
+      cloudMetadataServer: true
+
 #hub:
 #  extraConfig:
 #    10-secretToEnv: |

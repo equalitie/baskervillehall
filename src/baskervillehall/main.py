@@ -90,9 +90,9 @@ def main():
     elif args.pipeline == 'train':
         trainer_parameters = {
             'feature_names': os.environ.get('FEATURE_NAMES').split(','),
-            'new_model_wildcard_period': int(os.environ.get('NEW_MODEL_WILDCARD_PERIOD')),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
+            'train_batch_size': int(os.environ.get('TRAIN_BATCH_SIZE')),
             'num_sessions': int(os.environ.get('NUM_SESSIONS')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
@@ -101,11 +101,13 @@ def main():
             'contamination': float(os.environ.get('CONTAMINATION')),
             'max_features': float(os.environ.get('MAX_FEATURES')),
             'random_state': int(os.environ.get('RANDOM_STATE')),
-            'host_waiting_sleep_time_in_seconds': int(os.environ.get('HOST_WAITING_SLEEP_TIME_IN_SECONDS')),
             'model_ttl_in_minutes': int(os.environ.get('MODEL_TTL_IN_MINUTES')),
             'dataset_delay_from_now_in_minutes': int(os.environ.get('DATASET_DELAY_FROM_NOW_IN_MINUTES')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
-            'min_dataset_size': int(os.environ.get('MIN_DATASET_SIZE')),                                                                                                                                                                                                                                                                                     'kafka_group_id': os.environ.get('GROUP_ID_TRAINER'),
+            'min_dataset_size': int(os.environ.get('MIN_DATASET_SIZE')),
+            'small_dataset_size': int(os.environ.get('SMALL_DATASET_SIZE')),
+            'kafka_group_id': os.environ.get('GROUP_ID_TRAINER'),
+            'wait_time_minutes': int(os.environ.get('TRAINER_WAIT_TIME_MINUTES'))
         }
         trainer = BaskervillehallTrainer(
             **trainer_parameters,
