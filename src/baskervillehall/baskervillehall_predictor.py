@@ -25,6 +25,7 @@ class BaskervillehallPredictor(object):
             kafka_connection={'bootstrap_servers': 'localhost:9092'},
             s3_connection={},
             s3_path='/',
+            datetime_format='%Y-%m-%d %H:%M:%S',
             white_list_refresh_in_minutes=5,
             model_reload_in_minutes=10,
             max_models=10000,
@@ -61,6 +62,7 @@ class BaskervillehallPredictor(object):
         self.maxsize_pending_challenge = maxsize_pending_challenge
         self.maxsize_passed_challenge = maxsize_passed_challenge
         self.batch_size = batch_size
+        self.date_time_format = datetime_format
 
     @staticmethod
     def _is_debug_enabled(value):
@@ -113,40 +115,45 @@ class BaskervillehallPredictor(object):
                         if not message.value:
                             continue
 
-                        value = json.loads(message.value.decode("utf-8"))
-                        ip = value['ip']
+                        session = json.loads(message.value.decode("utf-8"))
+                        ip = session['ip']
                         host = message.key.decode("utf-8")
 
-                        debug = self._is_debug_enabled(value)
+                        debug = self._is_debug_enabled(session)
                         if debug:
-                            self.logger.info(value.get('ua'))
+                            self.logger.info(session.get('ua'))
 
-                        if whitelist_ip.is_in_whitelist(host, value['ip']):
+                        if whitelist_ip.is_in_whitelist(host, session['ip']):
                             if debug:
                                 self.logger.info(f'ip {ip} whitelisted')
                             continue
 
-                        if value['duration'] < self.min_session_duration:
+                        if session['duration'] < self.min_session_duration:
                             if debug:
                                 self.logger.info(f'ip {ip} value[duration] < self.min_session_duration')
                             continue
-                        if len(value['queries']) < self.min_number_of_queries:
+                        if len(session['requests']) < self.min_number_of_queries:
                             if debug:
                                 self.logger.info(f'ip {ip} < min_number_of_queries')
                             continue
 
-                        batch[host].append(value)
+                        batch[host].append(session)
 
-                    for host, values in batch.items():
+                    for host, sessions in batch.items():
                         model = model_storage.get_model(host)
                         if model is None:
                             continue
                         categorical_features = []
                         features = []
-                        for i in range(len(values)):
-                            categorical_features.append([values[i]['country']])
-                            features.append(BaskervillehallIsolationForest.get_vector_from_feature_map(
-                                model.feature_names, values[i]['features']))
+                        for i in range(len(sessions)):
+                            categorical_features.append([sessions[i]['country']])
+                            features.append(
+                                BaskervillehallIsolationForest.get_vector_from_feature_map(
+                                    model.feature_names,
+                                    BaskervillehallIsolationForest.calculate_features(sessions[i],
+                                                                                      self.date_time_format)
+                                )
+                            )
 
                         features = np.array(features)
 
@@ -158,16 +165,16 @@ class BaskervillehallPredictor(object):
                         for i in range(scores.shape[0]):
                             score = scores[i]
                             prediction = score < 0
-                            value = values[i]
-                            debug = self._is_debug_enabled(value)
-                            ip = value['ip']
-                            end = value['end']
+                            session = sessions[i]
+                            debug = self._is_debug_enabled(session)
+                            ip = session['ip']
+                            end = session['end']
 
                             if debug:
-                                ua = value['ua']
+                                ua = session['ua']
                                 self.logger.info(f'777 ip={ip}, prediction = {prediction}, score = {score}, ua={ua}, end={end}')
                             if prediction:
-                                session_id = value['session_id']
+                                session_id = session['session_id']
                                 if ip_storage.is_challenge_passed(session_id):
                                     if debug:
                                         self.logger.info(f'ip = {ip} is in challenged_passed_storage')
@@ -188,9 +195,9 @@ class BaskervillehallPredictor(object):
                                         'session_id': session_id,
                                         'host': host,
                                         'source': 'baskervillehall',
-                                        'start': value['start'],
-                                        'end': value['end'],
-                                        'duration': value['duration']
+                                        'start': session['start'],
+                                        'end': session['end'],
+                                        'duration': session['duration']
                                     }
                                 ).encode('utf-8')
                                 producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))

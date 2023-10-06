@@ -4,6 +4,7 @@ from collections import defaultdict
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import IsolationForest
+from datetime import datetime
 
 
 class BaskervillehallIsolationForest(object):
@@ -48,10 +49,10 @@ class BaskervillehallIsolationForest(object):
         return (Y - self.mean) / self.std
 
     @staticmethod
-    def get_features(session):
-        requests = session['requests']
-        features = {}
+    def calculate_features(session, datetime_format):
 
+        features = {}
+        requests = session.get('requests', session.get('queries')) # REMOVE!!! this is temporal for backward compatibility
         hits = float(len(requests))
         intervals = []
         num_4xx = 0
@@ -64,10 +65,16 @@ class BaskervillehallIsolationForest(object):
         num_css = 0
         slash_counts = []
         payloads = []
+
+        if len(requests) > 0 and isinstance(requests[0]['ts'], str):
+            timestamps = [datetime.strptime(r['ts'], datetime_format) for r in requests]
+        else:
+            timestamps = [r['ts'] for r in requests]
+
         for i in range(len(requests)):
             request = requests[i]
             if i < len(requests) - 1:
-                intervals.append((requests[i+1]['ts'] - request['ts']).total_seconds())
+                intervals.append((timestamps[i+1] - timestamps[i]).total_seconds())
             code = request['code']
             if code // 100 == 4:
                 num_4xx += 1
@@ -115,6 +122,7 @@ class BaskervillehallIsolationForest(object):
         features['path_depth_average'] = mean_depth
         features['path_depth_std'] = np.sqrt(np.mean((slash_counts-mean_depth)**2))
         features['payload_size_log_average'] = np.mean(np.log(payloads))
+        features['fresh_session'] = 1 if session.get('fresh_session', False) else 0
 
         return features
 
@@ -147,6 +155,7 @@ class BaskervillehallIsolationForest(object):
 
         self.mean = Y.mean(axis=0)
         self.std = Y.std(axis=0)
+        self.std[self.std == 0] = 1
         Z = self._normalize(Y)
 
         self.isolation_forest = IsolationForest(

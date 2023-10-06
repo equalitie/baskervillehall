@@ -29,6 +29,7 @@ class BaskervillehallTrainer(object):
             bootstrap=False,
             n_jobs=None,
             random_state=None,
+            datetime_format='%Y-%m-%d %H:%M:%S',
 
             train_batch_size = 5,
             model_ttl_in_minutes=120,
@@ -67,7 +68,8 @@ class BaskervillehallTrainer(object):
                 'css_to_html_ratio',
                 'path_depth_average',
                 'path_depth_std',
-                'payload_size_log_average'
+                'payload_size_log_average',
+                'fresh_session'
             ]
 
         self.feature_names = feature_names
@@ -76,6 +78,7 @@ class BaskervillehallTrainer(object):
         self.num_sessions = num_sessions
         self.min_session_duration = min_session_duration
         self.min_number_of_queries = min_number_of_queries
+        self.date_time_format = datetime_format
 
         self.n_estimators = n_estimators
         self.max_samples = max_samples
@@ -151,13 +154,16 @@ class BaskervillehallTrainer(object):
                             if not message.value:
                                 continue
 
-                            value = json.loads(message.value.decode("utf-8"))
+                            session = json.loads(message.value.decode("utf-8"))
                             host = message.key.decode("utf-8")
                             if host not in batch:
                                 continue
-                            if value['duration'] < self.min_session_duration:
+                            if session['duration'] < self.min_session_duration:
                                 continue
-                            if len(value['queries']) < self.min_number_of_queries:
+                            if len(session.get('requests', session.get('queries'))) < self.min_number_of_queries:
+                                continue
+
+                            if session['session_id'] == '-':
                                 continue
 
                             if len(batch[host]['features']) >= self.num_sessions:
@@ -171,11 +177,12 @@ class BaskervillehallTrainer(object):
                                 else:
                                     continue
 
+                            features = BaskervillehallIsolationForest.calculate_features(session, self.date_time_format)
                             vector = BaskervillehallIsolationForest.get_vector_from_feature_map(self.feature_names,
-                                                                                                value['features'])
+                                                                                                features)
 
                             batch[host]['features'].append(vector)
-                            batch[host]['categorical_features'].append([value['country']])
+                            batch[host]['categorical_features'].append([session['country']])
 
                 for host, dataset in batch.items():
                     features = dataset['features']
