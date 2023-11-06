@@ -156,6 +156,10 @@ class BaskervillehallTrainer(object):
 
                             session = json.loads(message.value.decode("utf-8"))
                             host = message.key.decode("utf-8")
+
+                            if session['ip'] == '58.20.77.156':
+                                self.logger.info(session)
+
                             if host not in batch:
                                 continue
                             if session['duration'] < self.min_session_duration:
@@ -163,8 +167,10 @@ class BaskervillehallTrainer(object):
                             if len(session.get('requests', session.get('queries'))) < self.min_number_of_queries:
                                 continue
 
-                            if session['session_id'] == '-':
-                                continue
+
+
+                            # if session['session_id'] == '-' or session['session_id'] == '':
+                            #     continue
 
                             if len(batch[host]['features']) >= self.num_sessions:
                                 batch_complete = True

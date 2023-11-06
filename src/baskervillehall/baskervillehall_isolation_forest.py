@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import IsolationForest
 from datetime import datetime
+import math
 
 
 class BaskervillehallIsolationForest(object):
@@ -49,10 +50,12 @@ class BaskervillehallIsolationForest(object):
         return (Y - self.mean) / self.std
 
     @staticmethod
-    def calculate_features(session, datetime_format):
+    def calculate_features(session, datetime_format, grace_period=3):
 
         features = {}
-        requests = session.get('requests', session.get('queries')) # REMOVE!!! this is temporal for backward compatibility
+        requests = session.get('requests', [])
+        # for r in session['requests']:
+
         hits = float(len(requests))
         intervals = []
         num_4xx = 0
@@ -102,7 +105,14 @@ class BaskervillehallIsolationForest(object):
         intervals = np.array(intervals)
         unique_path = float(len(url_map.keys()))
         unique_query = float(len(query_map.keys()))
-        session_duration = session['duration']
+        session_duration = float(session['duration'])
+        if session_duration == 0.0:
+            session_duration = 1.0
+
+        entropy = 0.0
+        for url, count in url_map.items():
+            px = float(count)/len(url_map.keys())
+            entropy += - px * math.log(px, 2)
 
         features['request_rate'] = hits / session_duration * 60
         mean_intervals = np.mean(intervals)
@@ -122,7 +132,8 @@ class BaskervillehallIsolationForest(object):
         features['path_depth_average'] = mean_depth
         features['path_depth_std'] = np.sqrt(np.mean((slash_counts-mean_depth)**2))
         features['payload_size_log_average'] = np.mean(np.log(payloads))
-        features['fresh_session'] = 1 if session.get('fresh_session', False) else 0
+        features['fresh_session'] = 1 if session.get('fresh_sessions', False) else 0
+        features['entropy'] = entropy
 
         return features
 

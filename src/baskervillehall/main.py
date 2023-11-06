@@ -61,6 +61,7 @@ def main():
     }
 
     partition = int(os.environ.get('MY_POD_NAME').split('-')[-1])
+    debug_ip = os.environ.get('DEBUG_IP')
 
     s3_connection = {
         's3_endpoint': os.environ.get('S3_ENDPOINT'),
@@ -68,8 +69,6 @@ def main():
         's3_secret': os.environ.get('S3_SECRET'),
         's3_region': os.environ.get('S3_REGION'),
     }
-
-    whitelist_url_default = os.environ.get('WHITELIST_URL_DEFAULT').split(',')
 
     if args.pipeline == 'session':
         session_parameters = {
@@ -84,11 +83,15 @@ def main():
             'fresh_session_ttl_minutes': int(os.environ.get('FRESH_SESSION_TTL_MINUTES')),
             'ip_fresh_sessions_limit': int(os.environ.get('IP_FRESH_SESSIONS_LIMIT')),
             'fresh_session_grace_period': int(os.environ.get('FRESH_SESSION_GRACE_PERIOD')),
-            'datetime_format': os.environ.get('DATETIME_FORMAT')
+            'datetime_format': os.environ.get('DATETIME_FORMAT'),
+            'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
+            'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
         }
         sessionizer = BaskervillehallSession(
             **session_parameters,
             kafka_connection=kafka_connection,
+            debug_ip=debug_ip,
             logger=logger
         )
         sessionizer.run()
@@ -149,6 +152,7 @@ def main():
             **predictor_parameters,
             kafka_connection=kafka_connection,
             s3_connection=s3_connection,
+            debug_ip=debug_ip,
             logger=logger
         )
         predictor.run()
