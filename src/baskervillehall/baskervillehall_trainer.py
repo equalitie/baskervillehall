@@ -14,6 +14,7 @@ class BaskervillehallTrainer(object):
 
     def __init__(
             self,
+            warmup_period=5,
             feature_names=None,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             partition=0,
@@ -31,7 +32,7 @@ class BaskervillehallTrainer(object):
             random_state=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
 
-            train_batch_size = 5,
+            train_batch_size=5,
             model_ttl_in_minutes=120,
             dataset_delay_from_now_in_minutes=60,
             kafka_connection=None,
@@ -72,6 +73,7 @@ class BaskervillehallTrainer(object):
                 'fresh_session'
             ]
 
+        self.warmup_period = warmup_period
         self.feature_names = feature_names
         self.topic_sessions = topic_sessions
         self.partition = partition
@@ -126,7 +128,7 @@ class BaskervillehallTrainer(object):
                 hosts = host_selector.get_next_hosts(consumer, self.train_batch_size)
                 if len(hosts) == 0:
                     self.logger.info(f'All models have been trained. Waiting {self.wait_time_minutes} minutes...')
-                    time.sleep(self.wait_time_minutes*60)
+                    time.sleep(self.wait_time_minutes * 60)
                     continue
 
                 self.logger.info(f'Batch: {hosts}')
@@ -136,7 +138,20 @@ class BaskervillehallTrainer(object):
                 batch = {
                     host: {
                         'features': [],
-                        'categorical_features': []
+                        'categorical_features': [],
+                        'model': BaskervillehallIsolationForest(
+                            n_estimators=self.n_estimators,
+                            max_samples=self.max_samples,
+                            contamination=self.contamination,
+                            max_features=self.max_features,
+                            warmup_period=self.warmup_period,
+                            feature_names=self.feature_names,
+                            categorical_feature_names=['country'],
+                            bootstrap=self.bootstrap,
+                            n_jobs=self.n_jobs,
+                            random_state=self.random_state,
+                            logger=self.logger,
+                        )
                     } for host in hosts
                 }
                 while not batch_complete:
@@ -157,17 +172,12 @@ class BaskervillehallTrainer(object):
                             session = json.loads(message.value.decode("utf-8"))
                             host = message.key.decode("utf-8")
 
-                            if session['ip'] == '58.20.77.156':
-                                self.logger.info(session)
-
                             if host not in batch:
                                 continue
                             if session['duration'] < self.min_session_duration:
                                 continue
                             if len(session.get('requests', session.get('queries'))) < self.min_number_of_queries:
                                 continue
-
-
 
                             # if session['session_id'] == '-' or session['session_id'] == '':
                             #     continue
@@ -183,16 +193,14 @@ class BaskervillehallTrainer(object):
                                 else:
                                     continue
 
-                            features = BaskervillehallIsolationForest.calculate_features(session, self.date_time_format)
-                            vector = BaskervillehallIsolationForest.get_vector_from_feature_map(self.feature_names,
-                                                                                                features)
-
-                            batch[host]['features'].append(vector)
-                            batch[host]['categorical_features'].append([session['country']])
+                            model = batch[host]['model']
+                            batch[host]['features'].append(model.get_features(session, self.date_time_format))
+                            batch[host]['categorical_features'].append(model.get_categorical_features(session))
 
                 for host, dataset in batch.items():
                     features = dataset['features']
                     categorical_features = dataset['categorical_features']
+                    model = dataset['model']
                     self.logger.info(f'Training host {host}, dataset size {len(features)}')
 
                     if len(features) <= self.min_dataset_size:
@@ -200,24 +208,14 @@ class BaskervillehallTrainer(object):
                                          f'The minimum is {self.min_dataset_size}')
                         continue
 
-                    small_dataset = len(features) <= self.small_dataset_size
-                    model = BaskervillehallIsolationForest(
-                        n_estimators=len(features) if small_dataset else self.n_estimators,
-                        max_samples=self.max_samples,
-                        contamination=self.contamination * 2 if small_dataset else self.contamination,
-                        max_features=self.max_features,
-                        bootstrap=self.bootstrap,
-                        n_jobs=self.n_jobs,
-                        random_state=self.random_state,
-                        logger=self.logger,
-                    )
+                    if len(features) <= self.small_dataset_size:
+                        model.set_n_estimators(len(features))
+                        model.set_contamination(self.contamination * 2)
 
                     features = np.array(features)
                     model.fit(
                         features=features,
-                        feature_names=self.feature_names,
                         categorical_features=categorical_features,
-                        categorical_feature_names=['country']
                     )
 
                     self.logger.info(f'@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')

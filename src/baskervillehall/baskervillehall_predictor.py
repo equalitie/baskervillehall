@@ -157,14 +157,8 @@ class BaskervillehallPredictor(object):
                         categorical_features = []
                         features = []
                         for i in range(len(sessions)):
-                            categorical_features.append([sessions[i]['country']])
-                            features.append(
-                                BaskervillehallIsolationForest.get_vector_from_feature_map(
-                                    model.feature_names,
-                                    BaskervillehallIsolationForest.calculate_features(sessions[i],
-                                                                                      self.date_time_format)
-                                )
-                            )
+                            categorical_features.append(model.get_categorical_features(sessions[i]))
+                            features.append(model.get_features(sessions[i], self.date_time_format))
 
                         features = np.array(features)
 

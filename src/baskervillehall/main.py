@@ -76,6 +76,7 @@ def main():
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'session_inactivity': int(os.environ.get('SESSION_INACTIVITY')),
             'flush_window_seconds': int(os.environ.get('FLUSH_WINDOW_SECONDS')),
+            'single_session_period_seconds': int(os.environ.get('SINGLE_SESSION_PERIOD_SECONDS')),
             'garbage_collection_period': int(os.environ.get('GARBAGE_COLLECTION_PERIOD')),
             'partition': partition,
             'kafka_group_id': os.environ.get('GROUP_ID_SESSION'),
@@ -98,6 +99,7 @@ def main():
 
     elif args.pipeline == 'train':
         trainer_parameters = {
+            'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
             'feature_names': os.environ.get('FEATURE_NAMES').split(','),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
