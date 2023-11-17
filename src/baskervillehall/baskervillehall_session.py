@@ -1,13 +1,13 @@
 import copy
-from collections import defaultdict
+import random
+import string
 
-from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
+from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 import json
-from datetime import datetime, timedelta
-import numpy as np
+from datetime import datetime
 
 
 class BaskervillehallSession(object):
@@ -18,16 +18,22 @@ class BaskervillehallSession(object):
             partition=0,
             kafka_group_id='baskervillehall_session',
             kafka_connection={'bootstrap_servers': 'localhost:9092'},
-            window_duration=1,
+            flush_window_seconds=60,
             reset_duration=5,
             session_inactivity=1,
-            secondary_validation_period=2,
-            datetime_format='%Y-%m-%d %H:%M:%S',
-            garbage_collection_period=30,
+            garbage_collection_period=2,
+            single_session_period_seconds=30,
             whitelist_url=None,
             whitelist_url_default=[],
             whitelist_ip=None,
             white_list_refresh_period=5,
+            max_fresh_sessions_per_ip=10000,
+            fresh_session_ttl_minutes=3,
+            ip_fresh_sessions_limit=10,
+            fresh_session_grace_period=5,
+            datetime_format='%Y-%m-%d %H:%M:%S',
+            min_number_of_requests=10,
+            debug_ip=None,
             logger=None,
     ):
         super().__init__()
@@ -37,16 +43,26 @@ class BaskervillehallSession(object):
         self.kafka_group_id = kafka_group_id
         self.kafka_connection = kafka_connection
         self.session_inactivity = session_inactivity
-        self.secondary_validation_period = secondary_validation_period
-        self.window_duration = window_duration
-        self.date_time_format = datetime_format
+        self.flush_window_seconds = flush_window_seconds
         self.garbage_collection_period = garbage_collection_period
-        self.whitelist_url_default = whitelist_url_default,
+        self.whitelist_url_default = whitelist_url_default
         self.whitelist_ip = whitelist_ip
         self.whitelist_url = whitelist_url
         self.reset_duration = reset_duration
         self.white_list_refresh_period = white_list_refresh_period
+        self.fresh_session_grace_period = fresh_session_grace_period
+        self.single_session_period_seconds = single_session_period_seconds
+
+        self.max_fresh_sessions_per_ip = max_fresh_sessions_per_ip
+        self.fresh_session_ttl_minutes = fresh_session_ttl_minutes
+        self.ip_fresh_sessions_limit = ip_fresh_sessions_limit
+        self.date_time_format = datetime_format
+
         self.logger = logger
+        self.debug_ip = debug_ip
+
+        self.num_flushed_fresh_sessions = 0  # for debugging only
+        self.min_number_of_requests = min_number_of_requests
 
     @staticmethod
     def get_timestamp_and_data(data):
@@ -57,10 +73,7 @@ class BaskervillehallSession(object):
             timestamp = datetime.strptime(data['datestamp'], '%Y-%m-%dT%H:%M:%S.%fZ')
         return timestamp, data
 
-    def flush_session(self, producer, session_id, session):
-        if session['duration'] == 0:
-            return
-
+    def flush_session(self, producer, session):
         requests = session['requests']
         requests_formatted = copy.deepcopy(requests)
         for q in requests_formatted:
@@ -70,22 +83,52 @@ class BaskervillehallSession(object):
             'host': session['host'],
             'ua': session['ua'],
             'country': session['country'],
-            'session_id': session_id,
+            'session_id': session['session_id'],
             'ip': session['ip'],
             'start': session['start'].strftime(self.date_time_format),
             'end': session['end'].strftime(self.date_time_format),
             'duration': session['duration'],
-            'queries': requests_formatted,
-            'features': BaskervillehallIsolationForest.get_features(session)
+            'fresh_sessions': session.get('fresh_sessions', False),
+            'requests': requests_formatted,
         }
         producer.send(
             self.topic_sessions,
             key=bytearray(session['host'], encoding='utf8'),
             value=json.dumps(message).encode('utf-8')
         )
-        producer.flush()
+
         if session['ua'] == 'Baskervillehall':
-            self.logger.info(json.dumps(message, indent=2))
+            self.logger.info(f'@@@@ DEBUG host={session["host"]}, ip={session["ip"]}, session_id={session["session_id"]}'
+                             f'end={session["end"]}, num_requests={len(session["requests"])}')
+
+    @staticmethod
+    def create_session(ua, host, country, ip, session_id, ts, request):
+        return {
+            'ua': ua,
+            'host': host,
+            'country': country,
+            'ip': ip,
+            'session_id': session_id,
+            'start': ts,
+            'end': ts,
+            'duration': 0,
+            'requests': [request] if request else []
+        }
+
+    @staticmethod
+    def update_session(session, request):
+        session['end'] = request['ts']
+        session['duration'] = (session['end'] - session['start']).total_seconds()
+        session['requests'].append(request)
+
+    def is_session_expired(self, session, ts):
+        if (ts - session['end']).total_seconds() > self.session_inactivity * 60:
+            return True
+
+        if session['duration'] > self.reset_duration * 60:
+            return True
+
+        return False
 
     def run(self):
         whitelist_url = WhitelistURL(url=self.whitelist_url,
@@ -102,10 +145,12 @@ class BaskervillehallSession(object):
         )
 
         producer = KafkaProducer(**self.kafka_connection)
-        self.logger.info(f'Starting Baskervillehall sessionizer on topic {self.topic_sessions}')
-        sessions = {}
+        self.logger.info(f'Starting Baskervillehall sessionizer on topic {self.topic_sessions}, '
+                         f'partition {self.partition}')
+        ip_sessions = dict()
 
         garbage_collection_time = datetime.now()
+        single_session_time = datetime.now()
 
         try:
             consumer.assign([TopicPartition(self.topic_weblogs, self.partition)])
@@ -115,79 +160,177 @@ class BaskervillehallSession(object):
                     for message in messages:
                         if not message.value:
                             continue
-                        host = message.key.decode('utf-8')
-                        if whitelist_url.is_host_whitelisted(host):
-                            continue
                         ts, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
 
                         ip = data['client_ip']
+
+                        debugging = self.debug_ip and ip == self.debug_ip
+
+                        host = message.key.decode('utf-8')
+                        if whitelist_url.is_host_whitelisted(host):
+                            if debugging:
+                                self.logger.info(f'host {host} is whitelisted')
+                            continue
+
                         if whitelist_ip.is_in_whitelist(host, ip):
+                            if debugging:
+                                self.logger.info(f'ip {ip} is whitelisted')
                             continue
 
                         url = data['client_url']
                         if whitelist_url.is_in_whitelist(url):
+                            if debugging:
+                                self.logger.info(f'host {host} url {url} is whitelisted')
                             continue
 
-                        session_id = data['client_ip']  # using IP for now
+                        ua = data.get('client_ua', {})
+                        country = data.get('geoip', {}).get('country_code2', '')
+
+                        session_id = data.get('deflect_session', '')
+
+                        if debugging:
+                            deflect_session_new = data['deflect_session_new']
+                            deflect_session = data['deflect_session']
+                            client_url = data['client_url']
+                            self.logger.info(f'@@@@ {deflect_session}, {deflect_session_new}, {client_url}')
 
                         request = {
                             'ts': ts,
                             'url': url,
+                            'ua': ua,
                             'query': data['querystring'],
                             'code': data['http_response_code'],
                             'type': data['content_type'],
-                            'payload': data['reply_length_bytes']
+                            'payload': data['reply_length_bytes'],
                         }
 
-                        create_new_session = False
-                        if session_id not in sessions:
-                            create_new_session = True
+                        if ip not in ip_sessions:
+                            ip_sessions[ip] = {}
+
+                        if session_id in ip_sessions[ip]:
+                            if debugging:
+                                self.logger.info('session exists')
+                            session = ip_sessions[ip][session_id]
+                            if self.is_session_expired(session, ts):
+                                if debugging:
+                                    self.logger.info('session is expired')
+                                session = self.create_session(ua, host, country, ip, session_id, ts, request)
+                                ip_sessions[ip][session_id] = session
+                            else:
+                                if debugging:
+                                    self.logger.info('updating session')
+                                self.update_session(session, request)
                         else:
-                            session = sessions[session_id]
-                            if (ts - session['end']).total_seconds() > self.session_inactivity * 60:
-                                create_new_session = True
+                            if debugging:
+                                self.logger.info('creating new  session')
+                            session = self.create_session(ua, host, country, ip, session_id, ts, request)
+                            ip_sessions[ip][session_id] = session
 
-                            if session['duration'] > self.reset_duration * 60:
-                                create_new_session = True
-
-                        if create_new_session:
-                            sessions[session_id] = {
-                                'ua': data.get('client_ua', {}),
-                                'host': host,
-                                'country': data.get('geoip', {}).get('country_code2', ''),
-                                'ip': ip,
-                                'session_id': session_id,
-                                'start': ts,
-                                'end': ts,
-                                'duration': 0,
-                                'requests': [request]
-                            }
-                        else:
-                            session['end'] = ts
-                            duration = (session['end'] - session['start']).total_seconds()
-                            session['duration'] = duration
-                            session['requests'].append(request)
-
-                            if duration > self.window_duration * 60:
-                                if 'flush_ts' not in session:
-                                    self.flush_session(producer, session_id, session)
-                                    session['flush_ts'] = ts
-                                elif (ts - session['flush_ts']).total_seconds() > self.window_duration * 60:
-                                    self.flush_session(producer, session_id, session)
-                                    session['flush_ts'] = ts
+                        if ('flush_ts' not in session and (session['duration'] > self.flush_window_seconds or
+                                                           len(session[
+                                                                   'requests']) > self.min_number_of_requests)) or \
+                                (ts - session.get('flush_ts', ts)).total_seconds() > self.flush_window_seconds:
+                            if debugging:
+                                self.logger.info('flushing session')
+                                duration = session['duration']
+                                length = len(session['requests'])
+                                self.logger.info(f'duration={duration}, requests={length}')
+                            self.flush_session(producer, session)
+                            producer.flush()
+                            session['flush_ts'] = ts
 
                         time_now = datetime.now()
+
+                        if (time_now - single_session_time).total_seconds() > self.single_session_period_seconds:
+                            single_session_time = time_now
+
+                            for ip, sessions in ip_sessions.items():
+                                single_session_count = 0
+                                for _, session in sessions.items():
+                                    if len(session['requests']) == 1 and \
+                                            (ts - session['requests'][0]['ts']).total_seconds() > \
+                                            self.fresh_session_grace_period:
+                                        single_session_count += 1
+                                        if single_session_count > self.ip_fresh_sessions_limit:
+                                            break
+                                if single_session_count > self.ip_fresh_sessions_limit:
+                                    host_session = {}
+                                    for _, session in sessions.items():
+                                        if len(session['requests']) == 1 and \
+                                                (ts - session['requests'][0]['ts']).total_seconds() > \
+                                                self.fresh_session_grace_period:
+                                            request = session['requests'][0]
+                                            if session['host'] not in host_session:
+                                                combined_session = self.create_session(
+                                                    session['ua'],
+                                                    session['host'],
+                                                    session['country'],
+                                                    ip,
+                                                    '-',
+                                                    session['start'],
+                                                    request)
+                                                combined_session['fresh_sessions'] = True
+                                                host_session[session['host']] = combined_session
+                                            else:
+                                                self.update_session(host_session[session['host']], request)
+
+                                    for _, session in host_session.items():
+                                        self.flush_session(producer, session)
+                                    producer.flush()
+
                         if (time_now - garbage_collection_time).total_seconds() > self.garbage_collection_period * 60:
                             garbage_collection_time = time_now
-                            self.logger.info('Garbage collector started...')
+
+                            total_sessions = 0
+                            num_multi_session_ips = 0
+                            for ip, sessions in ip_sessions.items():
+                                if len(sessions) == 0:
+                                    self.logger.info(f'error ip {ip} has zero sessions ')
+                                total_sessions += len(sessions.keys())
+                                if len(sessions.keys()) > 1:
+                                    num_multi_session_ips += 1
+
+                            self.logger.info(
+                                f'Garbage collector - START. Total ips: {len(ip_sessions.keys())}, '
+                                f'total_sessions: {total_sessions},'
+                                f'num_multi_session_ips: {num_multi_session_ips}')
                             deleted = 0
-                            for session_id in list(sessions.keys()):
-                                session = sessions[session_id]
-                                if (time_now - session['end']).total_seconds() > self.session_inactivity * 60:
-                                    self.flush_session(producer, session_id, session)
-                                    del sessions[session_id]
-                                    deleted += 1
-                            self.logger.info(f'Garbage collector. Total: {len(sessions)}, sessions, deleted {deleted} sessions.')
+                            deleted_ips = 0
+                            for ip in list(ip_sessions.keys()):
+                                sessions = ip_sessions[ip]
+                                for session_id in list(sessions.keys()):
+                                    session = sessions[session_id]
+                                    if (time_now - session['end']).total_seconds() > self.session_inactivity * 60:
+                                        if debugging:
+                                            self.logger.info('garbage flush  session')
+                                            self.logger.info(session)
+                                        if len(session['requests']) > 1:
+                                            self.flush_session(producer, session)
+                                        del sessions[session_id]
+                                        deleted += 1
+                                        if len(sessions) == 0:
+                                            del ip_sessions[ip]
+                                            deleted_ips += 1
+                                            break
+
+                            producer.flush()
+
+                            total_sessions = 0
+                            num_multi_session_ips = 0
+                            for ip, sessions in ip_sessions.items():
+                                total_sessions += len(sessions)
+                                if len(sessions) > 1:
+                                    num_multi_session_ips += 1
+
+                            total_fresh_sessions = 0
+                            for ip, sessions in ip_sessions.items():
+                                total_fresh_sessions += len(sessions)
+
+                            self.logger.info(f'Garbage collector - FINISH. Total  ips: {len(ip_sessions)}, '
+                                             f'total_sessions: {total_sessions},'
+                                             f'num_multi_session_ips: {num_multi_session_ips},'
+                                             f' deleted {deleted_ips} ips and {deleted} sessions.'
+                                             )
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

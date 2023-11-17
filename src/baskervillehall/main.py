@@ -3,6 +3,7 @@ import logging
 
 import os
 
+from baskervillehall.baskerville_pinger import BaskervillePinger
 from baskervillehall.baskervillehall_counter import BaskervillehallCounter
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
@@ -60,6 +61,7 @@ def main():
     }
 
     partition = int(os.environ.get('MY_POD_NAME').split('-')[-1])
+    debug_ip = os.environ.get('DEBUG_IP')
 
     s3_connection = {
         's3_endpoint': os.environ.get('S3_ENDPOINT'),
@@ -68,27 +70,36 @@ def main():
         's3_region': os.environ.get('S3_REGION'),
     }
 
-    whitelist_url_default = os.environ.get('WHITELIST_URL_DEFAULT').split(',')
-
     if args.pipeline == 'session':
         session_parameters = {
             'topic_weblogs': os.environ.get('TOPIC_WEBLOGS'),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'session_inactivity': int(os.environ.get('SESSION_INACTIVITY')),
-            'secondary_validation_period': int(os.environ.get('SECONDARY_VALIDATION_PERIOD')),
+            'flush_window_seconds': int(os.environ.get('FLUSH_WINDOW_SECONDS')),
+            'single_session_period_seconds': int(os.environ.get('SINGLE_SESSION_PERIOD_SECONDS')),
             'garbage_collection_period': int(os.environ.get('GARBAGE_COLLECTION_PERIOD')),
             'partition': partition,
             'kafka_group_id': os.environ.get('GROUP_ID_SESSION'),
+            'max_fresh_sessions_per_ip': int(os.environ.get('MAX_FRESH_SESSIONS_PER_IP')),
+            'fresh_session_ttl_minutes': int(os.environ.get('FRESH_SESSION_TTL_MINUTES')),
+            'ip_fresh_sessions_limit': int(os.environ.get('IP_FRESH_SESSIONS_LIMIT')),
+            'fresh_session_grace_period': int(os.environ.get('FRESH_SESSION_GRACE_PERIOD')),
+            'datetime_format': os.environ.get('DATETIME_FORMAT'),
+            'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
+            'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
         }
         sessionizer = BaskervillehallSession(
             **session_parameters,
             kafka_connection=kafka_connection,
+            debug_ip=debug_ip,
             logger=logger
         )
         sessionizer.run()
 
     elif args.pipeline == 'train':
         trainer_parameters = {
+            'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
             'feature_names': os.environ.get('FEATURE_NAMES').split(','),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
@@ -107,7 +118,8 @@ def main():
             'min_dataset_size': int(os.environ.get('MIN_DATASET_SIZE')),
             'small_dataset_size': int(os.environ.get('SMALL_DATASET_SIZE')),
             'kafka_group_id': os.environ.get('GROUP_ID_TRAINER'),
-            'wait_time_minutes': int(os.environ.get('TRAINER_WAIT_TIME_MINUTES'))
+            'wait_time_minutes': int(os.environ.get('TRAINER_WAIT_TIME_MINUTES')),
+            'datetime_format': os.environ.get('DATETIME_FORMAT')
         }
         trainer = BaskervillehallTrainer(
             **trainer_parameters,
@@ -129,18 +141,19 @@ def main():
             'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
-            'white_list_refresh_in_minutes': int(os.environ.get('WHITELIST_REFRESH_IN_MINUTES')),
             'whitelist_ip': os.environ.get('WHITELIST_IP'),
             'pending_challenge_ttl_in_minutes': int(os.environ.get('PENDING_CHALLENGE_TTL_IN_MINUTES')),
             'passed_challenge_ttl_in_minutes': int(os.environ.get('PASSED_CHALLENGE_TTL_IN_MINUTES')),
             'maxsize_passed_challenge': int(os.environ.get('MAXSIZE_PASSED_CHALLENGE')),
             'maxsize_pending_challenge': int(os.environ.get('MAXSIZE_PENDING_CHALLENGE')),
+            'datetime_format': os.environ.get('DATETIME_FORMAT')
         }
 
         predictor = BaskervillehallPredictor(
             **predictor_parameters,
             kafka_connection=kafka_connection,
             s3_connection=s3_connection,
+            debug_ip=debug_ip,
             logger=logger
         )
         predictor.run()
@@ -158,6 +171,25 @@ def main():
 
         counter = BaskervillehallCounter(
             **counter_parameters,
+            kafka_connection=kafka_connection,
+            logger=logger
+        )
+        counter.run()
+    elif args.pipeline == 'pinger':
+        kafka_connection = {
+            'bootstrap_servers': os.environ.get('PING_BOOTSTRAP_SERVERS')
+        }
+        pinger_parameters = {
+            'topic': os.environ.get('PING_TOPIC'),
+            'topic_output': os.environ.get('PING_TOPIC_OUTPUT'),
+            'partition': partition,
+            'kafka_group_id': os.environ.get('PING_GROUP_ID'),
+            'num_workers': int(os.environ.get('PING_NUM_WORKERS')),
+            'host_refresh_minutes': int(os.environ.get('PING_HOST_REFRESH_MINUTES'))
+        }
+
+        counter = BaskervillePinger(
+            **pinger_parameters,
             kafka_connection=kafka_connection,
             logger=logger
         )

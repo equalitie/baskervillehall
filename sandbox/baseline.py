@@ -41,11 +41,11 @@ for i in range(num_hits):
     countries.append(country)
 
 session['requests'] = requests
-feature_map = BaskervillehallIsolationForest.get_features(session)
+feature_map = BaskervillehallIsolationForest.calculate_features(session)
 
 feature_map = {"request_rate": 49.35483870967742, "request_interval_average": 1.24, "request_interval_std": 1.2257242756835651, "response4xx_to_request_ratio": 0.0, "response5xx_to_request_ratio": 0.0, "top_page_to_request_ratio": 1.0, "unique_path_rate": 0.967741935483871, "unique_path_to_request_ratio": 0.0196078431372549, "unique_query_rate": 0.967741935483871, "unique_query_to_unique_path_ratio": 1.0, "image_to_html_ratio": 0.0, "js_to_html_ratio": 0.0, "css_to_html_ratio": 0.0, "path_depth_average": 1.0, "path_depth_std": 0.0, "payload_size_log_average": 10.816191860874861}
-vector = BaskervillehallIsolationForest.get_vector_from_feature_map(model.feature_names,
-                                                                    feature_map)
+vector = BaskervillehallIsolationForest.get_vector_from_features_dict(model.feature_names,
+                                                                      feature_map)
 
 score = model.score(np.array([vector]), [[country]])
 
