@@ -141,7 +141,6 @@ def main():
             'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
-            'white_list_refresh_in_minutes': int(os.environ.get('WHITELIST_REFRESH_IN_MINUTES')),
             'whitelist_ip': os.environ.get('WHITELIST_IP'),
             'pending_challenge_ttl_in_minutes': int(os.environ.get('PENDING_CHALLENGE_TTL_IN_MINUTES')),
             'passed_challenge_ttl_in_minutes': int(os.environ.get('PASSED_CHALLENGE_TTL_IN_MINUTES')),

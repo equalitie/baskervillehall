@@ -98,7 +98,8 @@ class BaskervillehallSession(object):
         )
 
         if session['ua'] == 'Baskervillehall':
-            self.logger.info(json.dumps(message, indent=2))
+            self.logger.info(f'@@@@ DEBUG host={session["host"]}, ip={session["ip"]}, session_id={session["session_id"]}'
+                             f'end={session["end"]}, num_requests={len(session["requests"])}')
 
     @staticmethod
     def create_session(ua, host, country, ip, session_id, ts, request):
@@ -303,7 +304,8 @@ class BaskervillehallSession(object):
                                         if debugging:
                                             self.logger.info('garbage flush  session')
                                             self.logger.info(session)
-                                        self.flush_session(producer, session)
+                                        if len(session['requests']) > 1:
+                                            self.flush_session(producer, session)
                                         del sessions[session_id]
                                         deleted += 1
                                         if len(sessions) == 0:

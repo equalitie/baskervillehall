@@ -22,8 +22,8 @@ class BaskervillehallPredictor(object):
             topic_commands='banjax_command_topic',
             topic_reports='banjax_report_topic',
             kafka_group_id='baskervillehall_predictor',
-            kafka_connection={'bootstrap_servers': 'localhost:9092'},
-            s3_connection={},
+            kafka_connection=None,
+            s3_connection=None,
             s3_path='/',
             datetime_format='%Y-%m-%d %H:%M:%S',
             white_list_refresh_in_minutes=5,
@@ -42,6 +42,10 @@ class BaskervillehallPredictor(object):
     ):
         super().__init__()
 
+        if s3_connection is None:
+            s3_connection = {}
+        if kafka_connection is None:
+            kafka_connection = {'bootstrap_servers': 'localhost:9092'}
         self.topic_sessions = topic_sessions
         self.partition = partition
         self.num_partitions = num_partitions
@@ -67,7 +71,7 @@ class BaskervillehallPredictor(object):
         self.debug_ip = debug_ip
 
     def _is_debug_enabled(self, value):
-        return self.debug_ip and value['ip'] == self.debug_ip
+        return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
 
     def run(self):
         model_storage = ModelStorage(
@@ -192,8 +196,8 @@ class BaskervillehallPredictor(object):
                                 #     continue
                                 # pending_challenge_ips[(ip, session_id)] = True
 
-                                self.logger.info(f'Challenging ip={ip}, '
-                                                 f'session_id={session_id}, host={host}, end={end}.')
+                                self.logger.info(f'Challenging for ip={ip}, '
+                                                 f'session_id={session_id}, host={host}, end={end}, score={score}.')
                                 message = json.dumps(
                                     {
                                         'Name': 'challenge_session' if session_id != '-' else 'challenge_ip',
@@ -203,7 +207,9 @@ class BaskervillehallPredictor(object):
                                         'source': 'baskervillehall',
                                         'start': session['start'],
                                         'end': session['end'],
-                                        'duration': session['duration']
+                                        'duration': session['duration'],
+                                        'score': score,
+                                        'num_requests': len(session['requests'])
                                     }
                                 ).encode('utf-8')
                                 producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
@@ -220,7 +226,9 @@ class BaskervillehallPredictor(object):
                                             'source': 'baskervillehall',
                                             'start': session['start'],
                                             'end': session['end'],
-                                            'duration': session['duration']
+                                            'duration': session['duration'],
+                                            'score': score,
+                                            'num_requests': len(session['requests'])
                                         }
                                     ).encode('utf-8')
                                     producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))

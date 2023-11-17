@@ -60,12 +60,12 @@ class BaskervillehallIsolationForest(object):
 
     def get_features(self, session, date_time_format):
         features_dict = self.calculate_features_dict(session, date_time_format)
-        return self.get_vector_from_feature_map(features_dict)
+        return self.get_vector_from_features_dict(features_dict)
 
     def get_categorical_features(self, session):
         return [session[f] for f in self.categorical_feature_names]
 
-    def get_vector_from_feature_map(self, features_map):
+    def get_vector_from_features_dict(self, features_map):
         vector = np.zeros(len(self.feature_names))
         for i in range(len(self.feature_names)):
             vector[i] = features_map.get(self.feature_names[i], 0.0)
