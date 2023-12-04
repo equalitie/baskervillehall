@@ -21,7 +21,8 @@ class BaskervillehallTrainer(object):
             kafka_group_id='baskervillehall_trainer',
             num_sessions=10000,
             min_session_duration=20,
-            min_number_of_queries=2,
+            min_number_of_requests=2,
+            accepted_contamination=0.1,
 
             n_estimators=500,
             max_samples="auto",
@@ -79,8 +80,8 @@ class BaskervillehallTrainer(object):
         self.partition = partition
         self.num_sessions = num_sessions
         self.min_session_duration = min_session_duration
-        self.min_number_of_queries = min_number_of_queries
-        self.date_time_format = datetime_format
+        self.min_number_of_requests = min_number_of_requests
+        self.datetime_format = datetime_format
 
         self.n_estimators = n_estimators
         self.max_samples = max_samples
@@ -103,24 +104,25 @@ class BaskervillehallTrainer(object):
         self.min_dataset_size = min_dataset_size
         self.small_dataset_size = small_dataset_size
         self.dataset_delay_from_now_in_minutes = dataset_delay_from_now_in_minutes
+        self.accepted_contamination = accepted_contamination
 
     def run(self):
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
 
-        consumer = KafkaConsumer(
-            **self.kafka_connection,
-            auto_offset_reset='earliest',
-            group_id=self.kafka_group_id
-        )
-
-        host_selector = HostSelector(
-            ttl_in_minutes=self.model_ttl_in_minutes,
-            logger=self.logger
-        )
-        self.logger.info(self.kafka_connection['bootstrap_servers'])
-        self.logger.info(f'Starting training on topic {self.topic_sessions}')
-
         try:
+            consumer = KafkaConsumer(
+                **self.kafka_connection,
+                auto_offset_reset='earliest',
+                group_id=self.kafka_group_id
+            )
+
+            host_selector = HostSelector(
+                ttl_in_minutes=self.model_ttl_in_minutes,
+                logger=self.logger
+            )
+            self.logger.info(self.kafka_connection['bootstrap_servers'])
+            self.logger.info(f'Starting training on topic {self.topic_sessions}')
+
             consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
             while True:
                 self.logger.info('Getting next hosts...')
@@ -146,6 +148,7 @@ class BaskervillehallTrainer(object):
                             max_features=self.max_features,
                             warmup_period=self.warmup_period,
                             feature_names=self.feature_names,
+                            datetime_format=self.datetime_format,
                             categorical_feature_names=['country'],
                             bootstrap=self.bootstrap,
                             n_jobs=self.n_jobs,
@@ -176,7 +179,7 @@ class BaskervillehallTrainer(object):
                                 continue
                             if session['duration'] < self.min_session_duration:
                                 continue
-                            if len(session.get('requests', session.get('queries'))) < self.min_number_of_queries:
+                            if len(session.get('requests', session.get('queries'))) < self.min_number_of_requests:
                                 continue
 
                             # if session['session_id'] == '-' or session['session_id'] == '':
@@ -194,25 +197,35 @@ class BaskervillehallTrainer(object):
                                     continue
 
                             model = batch[host]['model']
-                            batch[host]['features'].append(model.get_features(session, self.date_time_format))
+                            batch[host]['features'].append(model.get_features(session))
                             batch[host]['categorical_features'].append(model.get_categorical_features(session))
 
                 for host, dataset in batch.items():
                     features = dataset['features']
+                    features = np.array(features)
                     categorical_features = dataset['categorical_features']
+
+                    old_model = model_io.load(self.s3_path, host)
+                    if old_model:
+                        scores = old_model.score(features, categorical_features)
+                        contamination = float(len(scores[scores < 0])) / len(scores)
+                        if contamination > self.accepted_contamination:
+                            self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
+                                             f'Host = {host}.')
+                            continue
                     model = dataset['model']
                     self.logger.info(f'Training host {host}, dataset size {len(features)}')
 
-                    if len(features) <= self.min_dataset_size:
+                    if features.shape[0] <= self.min_dataset_size:
                         self.logger.info(f'Skipping training. Too few sessions: {len(features)}. Host = {host}.'
                                          f'The minimum is {self.min_dataset_size}')
                         continue
 
-                    if len(features) <= self.small_dataset_size:
-                        model.set_n_estimators(len(features))
+                    if features.shape[0] <= self.small_dataset_size:
+                        model.set_n_estimators(features.shape[0])
                         model.set_contamination(self.contamination * 2)
 
-                    features = np.array(features)
+
                     model.fit(
                         features=features,
                         categorical_features=categorical_features,
@@ -223,5 +236,3 @@ class BaskervillehallTrainer(object):
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')
 
-        finally:
-            consumer.close()

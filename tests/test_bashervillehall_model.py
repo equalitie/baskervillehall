@@ -33,7 +33,7 @@ class TestModel(unittest.TestCase):
 
         features = np.array(features)
         model = BaskervillehallIsolationForest()
-        model.fit(features=features, feature_names=[], categorical_features=categorical_features)
+        model.fit(features=features, categorical_features=categorical_features)
 
         test_features = []
         test_categorical_features = []
