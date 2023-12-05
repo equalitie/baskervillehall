@@ -185,10 +185,8 @@ class BaskervillehallSession(object):
                         country = data.get('geoip', {}).get('country_code2', '')
 
                         session_id = data.get('deflect_session', '')
-                        if len(session_id) > 4 and session_id[-2:] == '==':
-                            session_id = session_id[:-2]
-                        elif len(session_id) > 6 and session_id[-6:] == '%3D%3D':
-                            session_id = session_id[:-6]
+                        if len(session_id) > 6 and session_id[-6:] == '%3D%3D':
+                            session_id = session_id[:-6] + '=='
 
                         if debugging:
                             deflect_session_new = data['deflect_session_new']

@@ -202,6 +202,9 @@ class BaskervillehallTrainer(object):
 
                 for host, dataset in batch.items():
                     features = dataset['features']
+                    if len(features) == 0:
+                        continue
+
                     features = np.array(features)
                     categorical_features = dataset['categorical_features']
 
@@ -211,7 +214,7 @@ class BaskervillehallTrainer(object):
                         contamination = float(len(scores[scores < 0])) / len(scores)
                         if contamination > self.accepted_contamination:
                             self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
-                                             f'Host = {host}.')
+                                             f'Host = {host}. {scores.shape[0]} records.')
                             continue
                     model = dataset['model']
                     self.logger.info(f'Training host {host}, dataset size {len(features)}')
