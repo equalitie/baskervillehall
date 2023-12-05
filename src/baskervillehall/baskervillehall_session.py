@@ -1,10 +1,7 @@
 import copy
-import random
-import string
 
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
-from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 import json
 from datetime import datetime
@@ -19,6 +16,7 @@ class BaskervillehallSession(object):
             kafka_group_id='baskervillehall_session',
             kafka_connection={'bootstrap_servers': 'localhost:9092'},
             flush_window_seconds=60,
+            min_session_duration=10,
             reset_duration=5,
             session_inactivity=1,
             garbage_collection_period=2,
@@ -29,7 +27,6 @@ class BaskervillehallSession(object):
             white_list_refresh_period=5,
             max_fresh_sessions_per_ip=10000,
             fresh_session_ttl_minutes=3,
-            ip_fresh_sessions_limit=10,
             fresh_session_grace_period=5,
             datetime_format='%Y-%m-%d %H:%M:%S',
             min_number_of_requests=10,
@@ -55,8 +52,8 @@ class BaskervillehallSession(object):
 
         self.max_fresh_sessions_per_ip = max_fresh_sessions_per_ip
         self.fresh_session_ttl_minutes = fresh_session_ttl_minutes
-        self.ip_fresh_sessions_limit = ip_fresh_sessions_limit
         self.date_time_format = datetime_format
+        self.min_session_duration = min_session_duration
 
         self.logger = logger
         self.debug_ip = debug_ip
@@ -98,8 +95,9 @@ class BaskervillehallSession(object):
         )
 
         if session['ua'] == 'Baskervillehall':
-            self.logger.info(f'@@@@ DEBUG host={session["host"]}, ip={session["ip"]}, session_id={session["session_id"]}'
-                             f'end={session["end"]}, num_requests={len(session["requests"])}')
+            self.logger.info(
+                f'@@@@ DEBUG host={session["host"]}, ip={session["ip"]}, session_id={session["session_id"]}'
+                f'end={session["end"]}, num_requests={len(session["requests"])}')
 
     @staticmethod
     def create_session(ua, host, country, ip, session_id, ts, request):
@@ -139,20 +137,20 @@ class BaskervillehallSession(object):
         whitelist_ip = WhitelistIP(self.whitelist_ip, logger=self.logger,
                                    refresh_period_in_seconds=60 * self.white_list_refresh_period)
 
-        consumer = KafkaConsumer(
-            **self.kafka_connection,
-            group_id=self.kafka_group_id
-        )
-
-        producer = KafkaProducer(**self.kafka_connection)
-        self.logger.info(f'Starting Baskervillehall sessionizer on topic {self.topic_sessions}, '
-                         f'partition {self.partition}')
-        ip_sessions = dict()
-
-        garbage_collection_time = datetime.now()
-        single_session_time = datetime.now()
-
         try:
+            consumer = KafkaConsumer(
+                **self.kafka_connection,
+                group_id=self.kafka_group_id
+            )
+
+            producer = KafkaProducer(**self.kafka_connection)
+            self.logger.info(f'Starting Baskervillehall sessionizer on topic {self.topic_sessions}, '
+                             f'partition {self.partition}')
+            ip_sessions = dict()
+
+            garbage_collection_time = datetime.now()
+            single_session_time = datetime.now()
+
             consumer.assign([TopicPartition(self.topic_weblogs, self.partition)])
             while True:
                 raw_messages = consumer.poll(timeout_ms=1000, max_records=5000)
@@ -187,6 +185,10 @@ class BaskervillehallSession(object):
                         country = data.get('geoip', {}).get('country_code2', '')
 
                         session_id = data.get('deflect_session', '')
+                        if len(session_id) > 4 and session_id[-2:] == '==':
+                            session_id = session_id[:-2]
+                        elif len(session_id) > 6 and session_id[-6:] == '%3D%3D':
+                            session_id = session_id[:-6]
 
                         if debugging:
                             deflect_session_new = data['deflect_session_new']
@@ -226,18 +228,19 @@ class BaskervillehallSession(object):
                             session = self.create_session(ua, host, country, ip, session_id, ts, request)
                             ip_sessions[ip][session_id] = session
 
-                        if ('flush_ts' not in session and (session['duration'] > self.flush_window_seconds or
-                                                           len(session[
-                                                                   'requests']) > self.min_number_of_requests)) or \
+                        if 'flush_ts' not in session or \
                                 (ts - session.get('flush_ts', ts)).total_seconds() > self.flush_window_seconds:
-                            if debugging:
-                                self.logger.info('flushing session')
-                                duration = session['duration']
-                                length = len(session['requests'])
-                                self.logger.info(f'duration={duration}, requests={length}')
-                            self.flush_session(producer, session)
-                            producer.flush()
-                            session['flush_ts'] = ts
+
+                            if session['duration'] > self.min_session_duration and \
+                                    len(session['requests']) > self.min_number_of_requests:
+                                if debugging:
+                                    self.logger.info('flushing session')
+                                    duration = session['duration']
+                                    length = len(session['requests'])
+                                    self.logger.info(f'duration={duration}, requests={length}')
+                                self.flush_session(producer, session)
+                                producer.flush()
+                                session['flush_ts'] = ts
 
                         time_now = datetime.now()
 
@@ -251,9 +254,9 @@ class BaskervillehallSession(object):
                                             (ts - session['requests'][0]['ts']).total_seconds() > \
                                             self.fresh_session_grace_period:
                                         single_session_count += 1
-                                        if single_session_count > self.ip_fresh_sessions_limit:
+                                        if single_session_count > self.min_number_of_requests:
                                             break
-                                if single_session_count > self.ip_fresh_sessions_limit:
+                                if single_session_count > self.min_number_of_requests:
                                     host_session = {}
                                     for _, session in sessions.items():
                                         if len(session['requests']) == 1 and \
@@ -274,9 +277,11 @@ class BaskervillehallSession(object):
                                             else:
                                                 self.update_session(host_session[session['host']], request)
 
-                                    for _, session in host_session.items():
-                                        self.flush_session(producer, session)
-                                    producer.flush()
+                                    for host, session in host_session.items():
+                                        if len(session['requests']) > self.min_number_of_requests and \
+                                                session['duration'] > self.min_session_duration:
+                                            self.flush_session(producer, session)
+                            producer.flush()
 
                         if (time_now - garbage_collection_time).total_seconds() > self.garbage_collection_period * 60:
                             garbage_collection_time = time_now
@@ -291,7 +296,7 @@ class BaskervillehallSession(object):
                                     num_multi_session_ips += 1
 
                             self.logger.info(
-                                f'Garbage collector - START. Total ips: {len(ip_sessions.keys())}, '
+                                    f'Garbage collector - START. Total ips: {len(ip_sessions.keys())}, '
                                 f'total_sessions: {total_sessions},'
                                 f'num_multi_session_ips: {num_multi_session_ips}')
                             deleted = 0
@@ -304,14 +309,14 @@ class BaskervillehallSession(object):
                                         if debugging:
                                             self.logger.info('garbage flush  session')
                                             self.logger.info(session)
-                                        if len(session['requests']) > 1:
+                                        if session['duration'] > self.min_session_duration and \
+                                                len(session['requests']) > self.min_number_of_requests:
                                             self.flush_session(producer, session)
                                         del sessions[session_id]
                                         deleted += 1
-                                        if len(sessions) == 0:
-                                            del ip_sessions[ip]
-                                            deleted_ips += 1
-                                            break
+                                if len(sessions.keys()) == 0:
+                                    del ip_sessions[ip]
+                                    deleted_ips += 1
 
                             producer.flush()
 
@@ -335,5 +340,3 @@ class BaskervillehallSession(object):
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')
 
-        finally:
-            consumer.close()

@@ -79,10 +79,10 @@ def main():
             'single_session_period_seconds': int(os.environ.get('SINGLE_SESSION_PERIOD_SECONDS')),
             'garbage_collection_period': int(os.environ.get('GARBAGE_COLLECTION_PERIOD')),
             'partition': partition,
+            'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'kafka_group_id': os.environ.get('GROUP_ID_SESSION'),
             'max_fresh_sessions_per_ip': int(os.environ.get('MAX_FRESH_SESSIONS_PER_IP')),
             'fresh_session_ttl_minutes': int(os.environ.get('FRESH_SESSION_TTL_MINUTES')),
-            'ip_fresh_sessions_limit': int(os.environ.get('IP_FRESH_SESSIONS_LIMIT')),
             'fresh_session_grace_period': int(os.environ.get('FRESH_SESSION_GRACE_PERIOD')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
@@ -100,13 +100,14 @@ def main():
     elif args.pipeline == 'train':
         trainer_parameters = {
             'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
+            'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'feature_names': os.environ.get('FEATURE_NAMES').split(','),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'train_batch_size': int(os.environ.get('TRAIN_BATCH_SIZE')),
             'num_sessions': int(os.environ.get('NUM_SESSIONS')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
-            'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
+            'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'n_estimators': int(os.environ.get('N_ESTIMATORS')),
             'max_samples': int(os.environ.get('MAX_SAMPLES')),
             'contamination': float(os.environ.get('CONTAMINATION')),
@@ -119,7 +120,8 @@ def main():
             'small_dataset_size': int(os.environ.get('SMALL_DATASET_SIZE')),
             'kafka_group_id': os.environ.get('GROUP_ID_TRAINER'),
             'wait_time_minutes': int(os.environ.get('TRAINER_WAIT_TIME_MINUTES')),
-            'datetime_format': os.environ.get('DATETIME_FORMAT')
+            'datetime_format': os.environ.get('DATETIME_FORMAT'),
+            'n_jobs': int(os.environ.get('N_JOBS'))
         }
         trainer = BaskervillehallTrainer(
             **trainer_parameters,
@@ -138,7 +140,7 @@ def main():
             'kafka_group_id': os.environ.get('GROUP_ID_PREDICTOR'),
             'model_reload_in_minutes': int(os.environ.get('PREDICTOR_MODEL_RELOAD_IN_MINUTES')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
-            'min_number_of_queries': int(os.environ.get('MIN_NUMBER_OF_QUERIES')),
+            'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
             'whitelist_ip': os.environ.get('WHITELIST_IP'),
@@ -146,7 +148,8 @@ def main():
             'passed_challenge_ttl_in_minutes': int(os.environ.get('PASSED_CHALLENGE_TTL_IN_MINUTES')),
             'maxsize_passed_challenge': int(os.environ.get('MAXSIZE_PASSED_CHALLENGE')),
             'maxsize_pending_challenge': int(os.environ.get('MAXSIZE_PENDING_CHALLENGE')),
-            'datetime_format': os.environ.get('DATETIME_FORMAT')
+            'datetime_format': os.environ.get('DATETIME_FORMAT'),
+            'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT'))
         }
 
         predictor = BaskervillehallPredictor(
@@ -196,6 +199,9 @@ def main():
         counter.run()
     else:
         logger.error('Pipeline is not specified. Use session, predict or train')
+
+    logger.info('Pipeline finished.')
+    exit()
 
 
 if __name__ == '__main__':

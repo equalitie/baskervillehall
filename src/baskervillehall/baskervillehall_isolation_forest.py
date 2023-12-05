@@ -18,6 +18,7 @@ class BaskervillehallIsolationForest(object):
             warmup_period=5,
             feature_names=None,
             categorical_feature_names=None,
+            datetime_format='%Y-%m-%d %H:%M:%S',
             max_features=1.0,
             bootstrap=False,
             n_jobs=None,
@@ -41,6 +42,7 @@ class BaskervillehallIsolationForest(object):
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.warmup_period = warmup_period
+        self.datetime_format = datetime_format
 
         self.categorical_encoders = None
         self.feature_names = feature_names
@@ -58,8 +60,8 @@ class BaskervillehallIsolationForest(object):
     def _normalize(self, Y):
         return (Y - self.mean) / self.std
 
-    def get_features(self, session, date_time_format):
-        features_dict = self.calculate_features_dict(session, date_time_format)
+    def get_features(self, session):
+        features_dict = self.calculate_features_dict(session)
         return self.get_vector_from_features_dict(features_dict)
 
     def get_categorical_features(self, session):
@@ -71,14 +73,14 @@ class BaskervillehallIsolationForest(object):
             vector[i] = features_map.get(self.feature_names[i], 0.0)
         return vector
 
-    def calculate_features_dict(self, session, datetime_format):
+    def calculate_features_dict(self, session):
         assert(len(session['requests']) > 0)
 
         features = {}
         requests_original = session.get('requests', [])
 
         if len(requests_original) > 0 and isinstance(requests_original[0]['ts'], str):
-            timestamps = [datetime.strptime(r['ts'], datetime_format) for r in requests_original]
+            timestamps = [datetime.strptime(r['ts'], self.datetime_format) for r in requests_original]
         else:
             timestamps = [r['ts'] for r in requests_original]
 
@@ -223,3 +225,15 @@ class BaskervillehallIsolationForest(object):
         Z = self._normalize(Y)
         scores = self.isolation_forest.decision_function(Z)
         return scores
+
+    def score_sessions(self, sessions):
+        categorical_features = []
+        features = []
+        for i in range(len(sessions)):
+            categorical_features.append(self.get_categorical_features(sessions[i]))
+            features.append(self.get_features(sessions[i]))
+
+        features = np.array(features)
+
+        return self.score(features, categorical_features)
+
