@@ -4,7 +4,6 @@ from collections import defaultdict
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
-from baskervillehall.ip_storage import IPStorage
 from baskervillehall.model_storage import ModelStorage
 from baskervillehall.whitelist_ip import WhitelistIP
 import json
@@ -78,13 +77,18 @@ class BaskervillehallPredictor(object):
             model_storage = ModelStorage(
                 self.s3_connection,
                 self.s3_path,
-                reload_in_minutes=self.model_reload_in_minutes ,
+                reload_in_minutes=self.model_reload_in_minutes,
                 logger=self.logger)
             model_storage.start()
 
             pending_challenge_ips = TTLCache(
                 maxsize=self.maxsize_pending_challenge,
                 ttl=self.pending_challenge_ttl_in_minutes * 60
+            )
+
+            offences = TTLCache(
+                maxsize=10000,
+                ttl=20 * 60
             )
 
             # ip_storage = IPStorage(
@@ -102,8 +106,8 @@ class BaskervillehallPredictor(object):
                 **self.kafka_connection,
                 group_id=self.kafka_group_id,
                 max_poll_records=self.batch_size,
-                fetch_max_bytes=52428800*5,
-                max_partition_fetch_bytes=1048576*10,
+                fetch_max_bytes=52428800 * 5,
+                max_partition_fetch_bytes=1048576 * 10,
                 api_version=(0, 11, 5),
             )
 
@@ -162,12 +166,12 @@ class BaskervillehallPredictor(object):
                     for host, sessions in batch.items():
                         model = model_storage.get_model(host)
 
+                        if model is None:
+                            continue
+
                         # REMOVE THIS
                         # it is temporal for backward compatibility only
                         model.datetime_format = '%Y-%m-%d %H:%M:%S'
-
-                        if model is None:
-                            continue
 
                         ts = datetime.now()
                         scores = model.score_sessions(sessions)
@@ -189,6 +193,17 @@ class BaskervillehallPredictor(object):
                                                  f'end={end}')
                             if prediction:
                                 session_id = session['session_id']
+
+                                if ip in offences:
+                                    offences[ip].add(session_id)
+                                else:
+                                    offences[ip] = set()
+                                    offences[ip].add(session_id)
+                                if len(offences[ip]) > 2:
+                                    self.logger.info(f'Multiply offences ip = {ip}, num confirmed '
+                                                     f'challenged sessions = {len(offences[ip])}')
+                                    self.logger.info(offences[ip])
+
                                 # if ip_storage.is_challenge_passed(session_id):
                                 #     if debug:
                                 #         self.logger.info(f'ip = {ip} is in challenged_passed_storage')
