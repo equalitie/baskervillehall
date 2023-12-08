@@ -13,6 +13,52 @@ logger = get_logger('Baskervillehall test')
 
 class TestModel(unittest.TestCase):
 
+    def test_session_anomaly(self):
+        random.seed(777)
+        num_records = 10000
+        sessions = []
+        urls = [f'{i}.html' for i in range(30)]
+        ts = datetime.now()
+        for session_id in range(num_records):
+            sessions.append({
+                'session_id': session_id,
+                'country': 'UK',
+                'duration': 30,
+                'requests': [{
+                    'ts': ts + timedelta(seconds=i*3),
+                    'code': 200,
+                    'url': urls[random.randrange(len(urls))],
+                    'query': f'{i}',
+                    'type': 'text/html',
+                    'payload': 100
+                } for i in range(10)]
+            })
+        model = BaskervillehallIsolationForest()
+        model.fit_sessions(sessions)
+
+        scores = model.score_sessions(sessions)
+        assert (len(scores[scores < 0]) < len(scores) * 0.4)
+
+        anomaly_sessions = []
+        ts = datetime.now()
+        for ip in range(10):
+            anomaly_sessions.append({
+                'session_id': ip,
+                'country': 'CA',
+                'duration': 10,
+                'requests': [{
+                    'ts': ts + timedelta(seconds=i),
+                    'code': 403,
+                    'url': urls[random.randrange(5)],
+                    'query': f'{i}',
+                    'type': 'text/html',
+                    'payload': 10
+                } for i in range(2 + random.randrange(200))]
+            })
+
+        anomaly_scores = model.score_sessions(anomaly_sessions)
+        assert (len(anomaly_scores[anomaly_scores < 0]) > len(anomaly_scores) * 0.8)
+
     def test_basic_anomaly(self):
         random.seed(777)
         num_records = 1000
@@ -20,7 +66,7 @@ class TestModel(unittest.TestCase):
         num_features = 5
 
         categories = [
-            ['a','b','c','d','e','f'],
+            ['a', 'b', 'c', 'd', 'e', 'f'],
             ['alfa', 'betta', 'gamma']
         ]
 
@@ -29,7 +75,8 @@ class TestModel(unittest.TestCase):
 
         for ip in range(num_records):
             features.append([np.random.normal(loc=float(i)) for i in range(num_features)])
-            categorical_features.append([categories[i][random.randint(0, len(categories[i])-1)] for i in range(len(categories))])
+            categorical_features.append(
+                [categories[i][random.randint(0, len(categories[i]) - 1)] for i in range(len(categories))])
 
         features = np.array(features)
         model = BaskervillehallIsolationForest()
@@ -73,8 +120,7 @@ class TestModel(unittest.TestCase):
         session['requests'] = requests
 
         features = BaskervillehallIsolationForest.calculate_features(session, '')
-        import pdb
-        pdb.set_trace()
-        assert(features['request_rate'] == float(hit_rate))
-        assert(features['entropy'] < 30.0)
-        assert(features['path_depth_average'] == 1.0)
+
+        assert (features['request_rate'] == float(hit_rate))
+        assert (features['entropy'] < 30.0)
+        assert (features['path_depth_average'] == 1.0)

@@ -54,10 +54,10 @@ class BehavePCA(object):
 
         return sample
 
-    def fit(self, dataset):
+    def fit(self, sessions):
         self.url_dict = defaultdict(int)
 
-        for urls in dataset:
+        for session in sessions:
             for url in urls:
                 self.url_dict[url] += 1
 

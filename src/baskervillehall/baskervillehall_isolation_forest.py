@@ -73,22 +73,40 @@ class BaskervillehallIsolationForest(object):
             vector[i] = features_map.get(self.feature_names[i], 0.0)
         return vector
 
-    def calculate_features_dict(self, session):
-        assert(len(session['requests']) > 0)
+    def preprocess_session(self, session):
+        result = {
+            'session_id': session['session_id'],
+            'country': session['country'],
+            'duration': session['duration'],
+            'requests': list()
+        }
 
-        features = {}
         requests_original = session.get('requests', [])
+        if len(requests_original) == 0:
+            return result
 
-        if len(requests_original) > 0 and isinstance(requests_original[0]['ts'], str):
-            timestamps = [datetime.strptime(r['ts'], self.datetime_format) for r in requests_original]
-        else:
-            timestamps = [r['ts'] for r in requests_original]
+        parse_datetime = isinstance(requests_original[0]['ts'], str)
+        for r in requests_original:
+            if parse_datetime:
+                r['ts'] = datetime.strptime(r[i]['ts'], self.datetime_format)
 
-        requests = list()
+        requests = result['requests']
         requests.append(requests_original[0])
+        start = requests[0]['ts']
         for i in range(1, len(requests_original)):
-            if (timestamps[i] - timestamps[0]).total_seconds() > self.warmup_period:
-                requests.append(requests_original[i])
+            r = requests_original[i]
+            if (r['ts'] - start).total_seconds() < self.warmup_period:
+                continue
+            requests.append(r)
+
+        return result
+
+    def calculate_features_dict(self, session):
+        assert (len(session['requests']) > 0)
+
+        session = self.preprocess_session(session)
+        features = {}
+        requests = session['requests']
 
         hits = float(len(requests))
         intervals = []
@@ -104,22 +122,22 @@ class BaskervillehallIsolationForest(object):
         payloads = []
 
         for i in range(len(requests)):
-            request = requests[i]
+            r = requests[i]
             if i == 0:
                 intervals.append(0)
             else:
-                intervals.append((timestamps[i] - timestamps[i-1]).total_seconds())
-            code = request['code']
+                intervals.append((r['ts'] - requests[i - 1]['ts']).total_seconds())
+            code = r['code']
             if code // 100 == 4:
                 num_4xx += 1
             if code // 100 == 5:
                 num_5xx += 1
-            url = request['url']
-            payloads.append(request['payload'] + 1.0)
+            url = r['url']
+            payloads.append(r['payload'] + 1.0)
             slash_counts.append(len(url.split('/')) - 1)
             url_map[url] += 1
-            query_map[request['query']] += 1
-            content_type = request['type']
+            query_map[r['query']] += 1
+            content_type = r['type']
             if content_type == 'text/html' or \
                     content_type == 'text/html; charset=UTF-8' or \
                     content_type == 'text/html; charset=utf-8':
@@ -208,6 +226,16 @@ class BaskervillehallIsolationForest(object):
 
         self.isolation_forest.fit(Z)
 
+    def fit_sessions(self, sessions):
+        features = list()
+        categorical_features = list()
+        for session in sessions:
+            features.append(self.get_features(session))
+            categorical_features.append(self.get_categorical_features(session))
+
+        features = np.array(features)
+        return self.fit(features, categorical_features)
+
     def score(self, features, categorical_features):
         assert (features.shape[0] == len(categorical_features))
         assert (len(categorical_features[0]) == len(self.categorical_encoders))
@@ -236,4 +264,3 @@ class BaskervillehallIsolationForest(object):
         features = np.array(features)
 
         return self.score(features, categorical_features)
-
