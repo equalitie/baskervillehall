@@ -16,6 +16,7 @@ class BaskervillehallTrainer(object):
             self,
             warmup_period=5,
             feature_names=None,
+`            use_pca=True,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             partition=0,
             kafka_group_id='baskervillehall_trainer',
@@ -73,7 +74,7 @@ class BaskervillehallTrainer(object):
                 'payload_size_log_average',
                 'fresh_session'
             ]
-
+        self.use_pca = use_pca
         self.warmup_period = warmup_period
         self.feature_names = feature_names
         self.topic_sessions = topic_sessions
@@ -138,24 +139,7 @@ class BaskervillehallTrainer(object):
                 consumer.seek_to_beginning()
                 batch_complete = False
                 batch = {
-                    host: {
-                        'features': [],
-                        'categorical_features': [],
-                        'model': BaskervillehallIsolationForest(
-                            n_estimators=self.n_estimators,
-                            max_samples=self.max_samples,
-                            contamination=self.contamination,
-                            max_features=self.max_features,
-                            warmup_period=self.warmup_period,
-                            feature_names=self.feature_names,
-                            datetime_format=self.datetime_format,
-                            categorical_feature_names=['country'],
-                            bootstrap=self.bootstrap,
-                            n_jobs=self.n_jobs,
-                            random_state=self.random_state,
-                            logger=self.logger,
-                        )
-                    } for host in hosts
+                    host: [] for host in hosts
                 }
                 while not batch_complete:
                     raw_messages = consumer.poll(timeout_ms=self.kafka_timeout_ms, max_records=self.kafka_max_size)
@@ -185,10 +169,10 @@ class BaskervillehallTrainer(object):
                             # if session['session_id'] == '-' or session['session_id'] == '':
                             #     continue
 
-                            if len(batch[host]['features']) >= self.num_sessions:
+                            if len(batch[host]) >= self.num_sessions:
                                 batch_complete = True
-                                for _, dataset in batch.items():
-                                    if len(dataset['features']) < self.num_sessions:
+                                for _, sessions in batch.items():
+                                    if len(sessions) < self.num_sessions:
                                         batch_complete = False
                                         break
                                 if batch_complete:
@@ -196,43 +180,47 @@ class BaskervillehallTrainer(object):
                                 else:
                                     continue
 
-                            model = batch[host]['model']
-                            batch[host]['features'].append(model.get_features(session))
-                            batch[host]['categorical_features'].append(model.get_categorical_features(session))
+                            batch[host].append(session)
 
-                for host, dataset in batch.items():
-                    features = dataset['features']
-                    if len(features) == 0:
+                for host, sessions in batch.items():
+                    if len(sessions) == 0:
                         continue
-
-                    features = np.array(features)
-                    categorical_features = dataset['categorical_features']
+                    model = BaskervillehallIsolationForest(
+                        n_estimators=self.n_estimators,
+                        max_samples=self.max_samples,
+                        contamination=self.contamination,
+                        max_features=self.max_features,
+                        warmup_period=self.warmup_period,
+                        feature_names=self.feature_names,
+                        use_pca=self.use_pca,
+                        datetime_format=self.datetime_format,
+                        categorical_feature_names=['country'],
+                        bootstrap=self.bootstrap,
+                        n_jobs=self.n_jobs,
+                        random_state=self.random_state,
+                        logger=self.logger,
+                    )
 
                     old_model = model_io.load(self.s3_path, host)
                     if old_model:
-                        scores = old_model.score(features, categorical_features)
+                        scores = old_model.score_sessions(sessions)
                         contamination = float(len(scores[scores < 0])) / len(scores)
                         if contamination > self.accepted_contamination:
                             self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
                                              f'Host = {host}. {scores.shape[0]} records.')
                             continue
-                    model = dataset['model']
-                    self.logger.info(f'Training host {host}, dataset size {len(features)}')
+                    self.logger.info(f'Training host {host}, dataset size {len(sessions)}')
 
-                    if features.shape[0] <= self.min_dataset_size:
-                        self.logger.info(f'Skipping training. Too few sessions: {len(features)}. Host = {host}.'
+                    if len(sessions) <= self.min_dataset_size:
+                        self.logger.info(f'Skipping training. Too few sessions: {len(sessions)}. Host = {host}.'
                                          f'The minimum is {self.min_dataset_size}')
                         continue
 
-                    if features.shape[0] <= self.small_dataset_size:
-                        model.set_n_estimators(features.shape[0])
+                    if len(sessions) <= self.small_dataset_size:
+                        model.set_n_estimators(len(self.feature_names))
                         model.set_contamination(self.contamination * 2)
 
-
-                    model.fit(
-                        features=features,
-                        categorical_features=categorical_features,
-                    )
+                    model.fit_sessions(sessions)
 
                     self.logger.info(f'@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
                     model_io.save(model, self.s3_path, host)

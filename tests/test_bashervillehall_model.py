@@ -27,13 +27,13 @@ class TestModel(unittest.TestCase):
                 'requests': [{
                     'ts': ts + timedelta(seconds=i*3),
                     'code': 200,
-                    'url': urls[random.randrange(len(urls))],
+                    'url': urls[random.randrange(5)],
                     'query': f'{i}',
                     'type': 'text/html',
                     'payload': 100
                 } for i in range(10)]
             })
-        model = BaskervillehallIsolationForest()
+        model = BaskervillehallIsolationForest(use_pca=True)
         model.fit_sessions(sessions)
 
         scores = model.score_sessions(sessions)
@@ -49,7 +49,7 @@ class TestModel(unittest.TestCase):
                 'requests': [{
                     'ts': ts + timedelta(seconds=i),
                     'code': 403,
-                    'url': urls[random.randrange(5)],
+                    'url': urls[random.randrange(3)],
                     'query': f'{i}',
                     'type': 'text/html',
                     'payload': 10

@@ -2,6 +2,7 @@ import logging
 from collections import defaultdict
 
 import numpy as np
+from baskervillehall.behave_pca import BehavePCA
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import IsolationForest
 from datetime import datetime
@@ -17,6 +18,7 @@ class BaskervillehallIsolationForest(object):
             contamination="auto",
             warmup_period=5,
             feature_names=None,
+            use_pca=True,
             categorical_feature_names=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
             max_features=1.0,
@@ -31,9 +33,10 @@ class BaskervillehallIsolationForest(object):
         if feature_names is None:
             feature_names = ['request_rate', 'request_interval_average', 'request_interval_std',
                              'response4xx_to_request_ratio', 'top_page_to_request_ratio',
-                             'unique_path_to_request_ratio', 'path_depth_average', 'fresh_session', 'entropy']
+                             'unique_path_to_request_ratio', 'path_depth_average', 'fresh_session',
+                             'entropy']
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
-
+        self.use_pca = use_pca
         self.n_estimators = n_estimators
         self.max_samples = max_samples
         self.contamination = contamination
@@ -88,7 +91,7 @@ class BaskervillehallIsolationForest(object):
         parse_datetime = isinstance(requests_original[0]['ts'], str)
         for r in requests_original:
             if parse_datetime:
-                r['ts'] = datetime.strptime(r[i]['ts'], self.datetime_format)
+                r['ts'] = datetime.strptime(r['ts'], self.datetime_format)
 
         requests = result['requests']
         requests.append(requests_original[0])
@@ -104,7 +107,6 @@ class BaskervillehallIsolationForest(object):
     def calculate_features_dict(self, session):
         assert (len(session['requests']) > 0)
 
-        session = self.preprocess_session(session)
         features = {}
         requests = session['requests']
 
@@ -227,13 +229,17 @@ class BaskervillehallIsolationForest(object):
         self.isolation_forest.fit(Z)
 
     def fit_sessions(self, sessions):
+        sessions =[self.preprocess_session(session) for session in sessions]
         features = list()
         categorical_features = list()
         for session in sessions:
             features.append(self.get_features(session))
             categorical_features.append(self.get_categorical_features(session))
-
         features = np.array(features)
+        if self.use_pca:
+            self.pca_model = BehavePCA()
+            scores = self.pca_model.fit(sessions)
+            features = np.concatenate((features, np.array([[s] for s in scores])), axis=1)
         return self.fit(features, categorical_features)
 
     def score(self, features, categorical_features):
@@ -257,10 +263,16 @@ class BaskervillehallIsolationForest(object):
     def score_sessions(self, sessions):
         categorical_features = []
         features = []
+        sessions = [self.preprocess_session(session) for session in sessions]
+
         for i in range(len(sessions)):
             categorical_features.append(self.get_categorical_features(sessions[i]))
             features.append(self.get_features(sessions[i]))
 
         features = np.array(features)
+
+        if self.use_pca:
+            scores = self.pca_model.score(sessions)
+            features = np.concatenate((features, np.array([[s] for s in scores])), axis=1)
 
         return self.score(features, categorical_features)
