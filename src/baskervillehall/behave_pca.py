@@ -16,6 +16,7 @@ class BehavePCA(object):
             num_total_pca_components=500,
             target_explained_variance=0.98,
             target_false_positive_rate=0.02,
+            warmup_period=3,
             logger=None
     ):
         super().__init__()
@@ -54,15 +55,15 @@ class BehavePCA(object):
 
         return sample
 
-    def fit(self, dataset):
+    def fit(self, sessions):
         self.url_dict = defaultdict(int)
 
-        for urls in dataset:
-            for url in urls:
-                self.url_dict[url] += 1
+        for session in sessions:
+            for r in session['requests']:
+                self.url_dict[r['url']] += 1
 
         # build url-index dictionary from top hits
-        self.logger.info(f'Total {len(dataset)} sessions, {len(self.url_dict.items())} urls')
+        self.logger.info(f'Total {len(sessions)} sessions, {len(self.url_dict.items())} urls')
         all_urls = sorted([(k, v) for k, v in self.url_dict.items()], key=lambda v: v[1], reverse=True)
         actual_num_urls = min(self.num_urls, len(all_urls))
         for i in range(actual_num_urls):
@@ -73,14 +74,14 @@ class BehavePCA(object):
         self.url_index['tail'] = len(self.url_index)
         self.url_index['not_existing'] = len(self.url_index)
 
-        if len(dataset) < self.num_total_pca_components:
-            self.logger.info(f'Number of sessions ({len(dataset)} is less than the '
+        if len(sessions) < self.num_total_pca_components:
+            self.logger.info(f'Number of sessions ({len(sessions)} is less than the '
                              f'number of PCA components({self.num_total_pca_components})')
 
         self.logger.info('Creating samples from sessions...')
         Y = []
-        for urls in dataset:
-            Y.append(self.create_sample(urls=urls))
+        for session in sessions:
+            Y.append(self.create_sample(urls=[r['url'] for r in session['requests']]))
         Y = np.array(Y)
 
         self.logger.info('Normalizing...')
@@ -93,7 +94,7 @@ class BehavePCA(object):
         Z = (Y - self.mean) / self.std
         Z[np.isnan(Z)] = 0
 
-        total_pca_components = min(self.num_total_pca_components, len(self.url_index), len(dataset))
+        total_pca_components = min(self.num_total_pca_components, len(self.url_index), len(sessions))
         pca = PCA(n_components=total_pca_components)
         self.logger.info(
             f'Fitting PCA with {total_pca_components} components for {len(Z)} samples of size {len(self.url_index)}')
@@ -128,7 +129,7 @@ class BehavePCA(object):
             self.threshold += 0.01
         self.logger.info(f'Threshold={self.threshold}, false_positive_rate={false_positive_rate}')
 
-        return self
+        return score_train
 
     def _score_vectors(self, Z):
         Ya = np.matmul(self.projector, Z.transpose())
@@ -137,8 +138,8 @@ class BehavePCA(object):
 
     def score(self, sessions):
         Y = []
-        for urls in sessions:
-            Y.append(self.create_sample(urls=urls))
+        for session in sessions:
+            Y.append(self.create_sample(urls=[r['url'] for r in session['requests']]))
 
         Y = np.array(Y)
 
