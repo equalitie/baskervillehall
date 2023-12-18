@@ -16,7 +16,7 @@ class BaskervillehallTrainer(object):
             self,
             warmup_period=5,
             feature_names=None,
-`            use_pca=True,
+            use_pca=True,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             partition=0,
             kafka_group_id='baskervillehall_trainer',
