@@ -1,4 +1,5 @@
 import copy
+import urllib.parse
 
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
@@ -185,6 +186,13 @@ class BaskervillehallSession(object):
                         country = data.get('geoip', {}).get('country_code2', '')
 
                         session_id = data.get('deflect_session', '')
+
+                        origin_session_id = session_id
+                        if len(session_id) > 5:
+                            if session_id[-2:] == '==':
+                                session_id = urllib.parse.quote_plus(session_id)
+                            elif session_id[-5:] =='%253D':
+                                session_id = urllib.parse.unquote(session_id)
 
                         if debugging:
                             deflect_session_new = data['deflect_session_new']
