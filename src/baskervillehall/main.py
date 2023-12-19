@@ -102,7 +102,7 @@ def main():
             'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'feature_names': os.environ.get('FEATURE_NAMES').split(','),
-            'use_pca': bool(os.environ.get('USE_PCA_FEATURE')),
+            'use_pca': os.environ.get('USE_PCA_FEATURE') == 'True',
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'train_batch_size': int(os.environ.get('TRAIN_BATCH_SIZE')),
