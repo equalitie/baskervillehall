@@ -10,6 +10,12 @@ COPY ./README.md /home/jovyan/baskervillehall/README.md
 USER root
 WORKDIR /home/jovyan/baskervillehall
 RUN pip install .
+RUN chmod 777 /home/jovyan/baskervillehall
 USER jovyan
+
+
+
+
+
 
 

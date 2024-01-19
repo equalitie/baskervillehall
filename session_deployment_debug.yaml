@@ -1,0 +1,45 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-session-debug"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-session-debug"
+spec:
+  replicas: 3
+  serviceName: "baskervillehall-session-debug"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-session-debug"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-session-debug"
+    spec:
+      containers:
+      - name: "baskervillehall-session-debug"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "5Gi"
+            cpu: "250m"
+          limits:
+            memory: "20Gi"
+            cpu: "2000m"
+        command:
+          - python
+        args:
+          - /usr/local/baskervillehall/src/baskervillehall/main.py
+          - session
+        envFrom:
+          - configMapRef:
+              name: baskervillehall-debug
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name

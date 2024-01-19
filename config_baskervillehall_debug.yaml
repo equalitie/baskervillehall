@@ -1,16 +1,16 @@
 kind: ConfigMap
 apiVersion: v1
 metadata:
-  name: baskervillehall
+  name: baskervillehall-debug
 data:
-    READ_FROM_BEGINNING: "False"
-    DEBUG_IP: "212.102.57.93"
-    TOPIC_WEBLOGS: "logstash_deflect.log"
+    READ_FROM_BEGINNING: "True"
+    DEBUG_IP: "190.2.210.116"
+    TOPIC_WEBLOGS: "anton_logs"
     SESSION_INACTIVITY: "3"
     GARBAGE_COLLECTION_PERIOD: "3"
     SINGLE_SESSION_PERIOD_SECONDS: "30"
     FLUSH_WINDOW_SECONDS: "60"
-    TOPIC_SESSIONS: "BASKERVILLEHALL_3"
+    TOPIC_SESSIONS: "anton_sessions"
     WARMUP_PERIOD: "1"
     FEATURE_NAMES: "request_rate,response4xx_to_request_ratio,top_page_to_request_ratio,unique_path_to_request_ratio,path_depth_average,fresh_session,entropy"
     USE_PCA_FEATURE: "False"
@@ -22,9 +22,9 @@ data:
     GROUP_ID_PREDICTOR: "baskervillehall_predicting2"
     MODEL_TTL_IN_MINUTES: "300"
     DATASET_DELAY_FROM_NOW_IN_MINUTES: "10"
-    S3_MODEL_STORAGE_PATH: "anton/baslervillehall/models25"
+    S3_MODEL_STORAGE_PATH: "anton/baslervillehall/models24"
     TRAIN_BATCH_SIZE: "10"
-    ACCEPTED_CONTAMINATION: "0.4"
+    ACCEPTED_CONTAMINATION: "0.2"
     TRAINER_WAIT_TIME_MINUTES: "10"
     MIN_DATASET_SIZE: "50"
     SMALL_DATASET_SIZE: "500"
@@ -48,7 +48,7 @@ data:
     WHITELIST_URL_DEFAULT: "informator.ua,indymedia.org,holod.media,holod.click,holod.news,splintercon.net"
     WHITELIST_URL: "https://dashboard.deflect.ca/api/baskerville_config?key=f3f7af6a8dcecc0546726f09cfaf27dd91111f8828a0ceffba9ac7ba7afcc35e"
     WHITELIST_IP: "https://dashboard.deflect.ca/api/add_banjax_whitelist?key=f3f7af6a8dcecc0546726f09cfaf27dd91111f8828a0ceffba9ac7ba7afcc35e"
-    BOOTSTRAP_SERVERS: "kafka9-0.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093"
+    BOOTSTRAP_SERVERS: "kafkab-0.kafkab-headless.default.svc.cluster.local:9093,kafkab-2.kafkab-headless.default.svc.cluster.local:9093,kafkab-2.kafkab-headless.default.svc.cluster.local:9093"
     PENDING_CHALLENGE_TTL_IN_MINUTES: "2"
     PASSED_CHALLENGE_TTL_IN_MINUTES: "240"
     MAXSIZE_PASSED_CHALLENGE: "10000000"

@@ -30,6 +30,7 @@ class BaskervillehallSession(object):
             fresh_session_ttl_minutes=3,
             fresh_session_grace_period=5,
             datetime_format='%Y-%m-%d %H:%M:%S',
+            read_from_beginning=False,
             min_number_of_requests=10,
             debug_ip=None,
             logger=None,
@@ -55,6 +56,7 @@ class BaskervillehallSession(object):
         self.fresh_session_ttl_minutes = fresh_session_ttl_minutes
         self.date_time_format = datetime_format
         self.min_session_duration = min_session_duration
+        self.read_from_beginning = read_from_beginning
 
         self.logger = logger
         self.debug_ip = debug_ip
@@ -73,9 +75,11 @@ class BaskervillehallSession(object):
 
     def flush_session(self, producer, session):
         requests = session['requests']
-        requests_formatted = copy.deepcopy(requests)
-        for q in requests_formatted:
-            q['ts'] = q['ts'].strftime(self.date_time_format)
+        requests_formatted = []
+        for r in requests:
+            rf = copy.deepcopy(r)
+            rf['ts'] = r['ts'].strftime(self.date_time_format)
+            requests_formatted.append(rf)
 
         message = {
             'host': session['host'],
@@ -153,6 +157,9 @@ class BaskervillehallSession(object):
             single_session_time = datetime.now()
 
             consumer.assign([TopicPartition(self.topic_weblogs, self.partition)])
+            if self.read_from_beginning:
+                consumer.seek_to_beginning()
+
             while True:
                 raw_messages = consumer.poll(timeout_ms=1000, max_records=5000)
                 for topic_partition, messages in raw_messages.items():
@@ -225,7 +232,7 @@ class BaskervillehallSession(object):
                             else:
                                 if debugging:
                                     self.logger.info('updating session')
-                                self.update_session(session, request)
+                            self.update_session(session, request)
                         else:
                             if debugging:
                                 self.logger.info('creating new  session')
@@ -235,7 +242,7 @@ class BaskervillehallSession(object):
                         if 'flush_ts' not in session or \
                                 (ts - session.get('flush_ts', ts)).total_seconds() > self.flush_window_seconds:
 
-                            if session['duration'] > self.min_session_duration and \
+                            if session['duration'] > self.min_session_duration or \
                                     len(session['requests']) > self.min_number_of_requests:
                                 if debugging:
                                     self.logger.info('flushing session')
@@ -313,7 +320,7 @@ class BaskervillehallSession(object):
                                         if debugging:
                                             self.logger.info('garbage flush  session')
                                             self.logger.info(session)
-                                        if session['duration'] > self.min_session_duration and \
+                                        if session['duration'] > self.min_session_duration or \
                                                 len(session['requests']) > self.min_number_of_requests:
                                             self.flush_session(producer, session)
                                         del sessions[session_id]

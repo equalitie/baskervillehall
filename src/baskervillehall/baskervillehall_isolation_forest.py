@@ -53,6 +53,31 @@ class BaskervillehallIsolationForest(object):
         self.mean = None
         self.std = None
         self.isolation_forest = None
+        self.all_feature_names = [
+            'request_rate',
+            'request_interval_average',
+            'request_interval_std',
+            'response4xx_to_request_ratio',
+            'response5xx_to_request_ratio',
+            'top_page_to_request_ratio',
+            'unique_path_rate',
+            'unique_path_to_request_ratio',
+            'unique_query_rate',
+            'unique_query_to_unique_path_ratio',
+            'image_to_html_ratio',
+            'js_to_html_ratio',
+            'css_to_html_ratio',
+            'path_depth_average',
+            'path_depth_std',
+            'payload_size_log_average',
+            'fresh_session',
+            'entropy'
+        ]
+
+        not_supported_features = set(self.feature_names) - set(self.all_feature_names)
+        if len(not_supported_features) > 0:
+            raise RuntimeError(f'Features {not_supported_features} not supported.')
+
 
     def set_n_estimators(self, n_estimators):
         self.n_estimators = n_estimators
