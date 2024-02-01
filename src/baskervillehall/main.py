@@ -72,6 +72,7 @@ def main():
 
     if args.pipeline == 'session':
         session_parameters = {
+            'read_from_beginning': os.environ.get('READ_FROM_BEGINNING') == 'True',
             'topic_weblogs': os.environ.get('TOPIC_WEBLOGS'),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'session_inactivity': int(os.environ.get('SESSION_INACTIVITY')),

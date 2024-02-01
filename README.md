@@ -29,24 +29,25 @@ docker push equalitie/baskervillehall:jupyter
 
 ### Installation
 ```commandline
+kubectl apply -f jupyter/admin-pvc.yaml
 helm repo add jupyter https://hub.jupyter.org/helm-chart/
 helm repo update
 ```
 
 ```commandline
 helm upgrade --cleanup-on-fail \
-  --install jupyterhub jupyter/jupyterhub \
+  --install jupyter jupyter/jupyterhub \
   --namespace default \
-  --version=2.0.0 \
+  --version=3.2.1 \
   --values ./jupyter/config.yaml
 ```
 
 ### Jupyterhub modification
 ```commandline
 helm upgrade --cleanup-on-fail \
-  jupyterhub jupyter/jupyterhub \
+  jupyter jupyter/jupyterhub \
   --namespace default \
-  --version=2.0.0 \
+  --version=3.2.1 \
   --values ./jupyter/config.yaml
 ```
 
@@ -54,3 +55,4 @@ helm upgrade --cleanup-on-fail \
 ```commandline
 kubectl port-forward service/proxy-public 8080:http
 ```
+Please, use user `admin` with an empth password.

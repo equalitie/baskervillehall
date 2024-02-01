@@ -13,57 +13,31 @@ proxy:
 
 singleuser:
   image:
-    # You should replace the "latest" tag with a fixed version from:
-    # https://hub.docker.com/r/jupyter/scipy-notebook/tags/
     name: equalitie/baskervillehall
     tag: jupyter
+  startTimeout: 3600
 
-  # `cmd: null` allows the custom CMD of the Jupyter docker-stacks to be used
-  # which performs further customization on startup.
-  cmd: null
+  storage:
+    capacity: 10Gi
+
+  cloudMetadata:
+    # block set to true will append a privileged initContainer using the
+    # iptables to block the sensitive metadata server at the provided ip.
+    blockWithIptables: false
 
   networkPolicy:
     egressAllowRules:
       privateIPs: true
       cloudMetadataServer: true
 
-#hub:
-#  extraConfig:
-#    10-secretToEnv: |
-#      from kubernetes import client
-#      def modify_pod_hook(spawner, pod):
-#          pod.spec.containers[0].env.append(
-#              client.V1EnvVar(
-#                  name='S3_ACCESS',
-#                  value_from=client.V1EnvVarSource(
-#                      secret_key_ref=client.V1SecretKeySelector(
-#                          name='spark-secrets',
-#                          key='s3_access',
-#                      )
-#                  )
-#              )
-#          )
-#          pod.spec.containers[0].env.append(
-#              client.V1EnvVar(
-#                  name='S3_SECRET',
-#                  value_from=client.V1EnvVarSource(
-#                      secret_key_ref=client.V1SecretKeySelector(
-#                          name='spark-secrets',
-#                          key='s3_secret',
-#                      )
-#                  )
-#              )
-#          )
-#          pod.spec.containers[0].env.append(
-#              client.V1EnvVar(
-#                  name='S3_ENDPOINT',
-#                  value_from=client.V1EnvVarSource(
-#                      secret_key_ref=client.V1SecretKeySelector(
-#                          name='spark-secrets',
-#                          key='s3_endpoint',
-#                      )
-#                  )
-#              )
-#          )
-#          return pod
-#      c.KubeSpawner.modify_pod_hook = modify_pod_hook
+  # `cmd: null` allows the custom CMD of the Jupyter docker-stacks to be used
+  # which performs further customization on startup.
+  cmd: null
+
+scheduling:
+  userScheduler:
+    enabled: false
+
+
+
+
