@@ -36,7 +36,7 @@ helm repo update
 
 ```commandline
 helm upgrade --cleanup-on-fail \
-  --install jupyterhub jupyter/jupyterhub \
+  --install jupyter jupyter/jupyterhub \
   --namespace default \
   --version=3.2.1 \
   --values ./jupyter/config.yaml
@@ -45,9 +45,9 @@ helm upgrade --cleanup-on-fail \
 ### Jupyterhub modification
 ```commandline
 helm upgrade --cleanup-on-fail \
-  jupyterhub jupyter/jupyterhub \
+  jupyter jupyter/jupyterhub \
   --namespace default \
-  --version=2.0.0 \
+  --version=3.2.1 \
   --values ./jupyter/config.yaml
 ```
 

@@ -15,12 +15,29 @@ singleuser:
   image:
     name: equalitie/baskervillehall
     tag: jupyter
+  startTimeout: 3600
 
   storage:
     capacity: 10Gi
 
+  cloudMetadata:
+    # block set to true will append a privileged initContainer using the
+    # iptables to block the sensitive metadata server at the provided ip.
+    blockWithIptables: false
+
+  networkPolicy:
+    egressAllowRules:
+      privateIPs: true
+      cloudMetadataServer: true
+
   # `cmd: null` allows the custom CMD of the Jupyter docker-stacks to be used
   # which performs further customization on startup.
   cmd: null
+
+scheduling:
+  userScheduler:
+    enabled: false
+
+
 
 

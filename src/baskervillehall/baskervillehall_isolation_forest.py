@@ -106,6 +106,7 @@ class BaskervillehallIsolationForest(object):
             'session_id': session['session_id'],
             'country': session['country'],
             'duration': session['duration'],
+            'fresh_sessions': session['fresh_sessions'],
             'requests': list()
         }
 
