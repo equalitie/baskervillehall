@@ -106,7 +106,7 @@ class TestModel(unittest.TestCase):
         hit_rate = 20
         country = 'US'
         url = '/'
-        session = {'duration': duration, 'country': country, 'fresh_sessions': False}
+        session = {'duration': duration, 'country': country, 'primary_session': False}
         requests = []
         num_hits = int(duration * hit_rate / 60)
         ts = datetime.now()

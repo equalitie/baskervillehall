@@ -33,7 +33,7 @@ class BaskervillehallIsolationForest(object):
         if feature_names is None:
             feature_names = ['request_rate', 'request_interval_average', 'request_interval_std',
                              'response4xx_to_request_ratio', 'top_page_to_request_ratio',
-                             'unique_path_to_request_ratio', 'path_depth_average', 'fresh_session',
+                             'unique_path_to_request_ratio', 'path_depth_average', 'primary_session',
                              'entropy']
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.use_pca = use_pca
@@ -70,7 +70,7 @@ class BaskervillehallIsolationForest(object):
             'path_depth_average',
             'path_depth_std',
             'payload_size_log_average',
-            'fresh_session',
+            'primary_session',
             'entropy'
         ]
 
@@ -106,7 +106,7 @@ class BaskervillehallIsolationForest(object):
             'session_id': session['session_id'],
             'country': session['country'],
             'duration': session['duration'],
-            'fresh_sessions': session['fresh_sessions'],
+            'primary_session': session.get('primary_session', session.get('fresh_sessions')),
             'requests': list()
         }
 
@@ -209,7 +209,7 @@ class BaskervillehallIsolationForest(object):
         features['path_depth_average'] = mean_depth
         features['path_depth_std'] = np.sqrt(np.mean((slash_counts - mean_depth) ** 2))
         features['payload_size_log_average'] = np.mean(np.log(payloads))
-        features['fresh_session'] = 1 if session.get('fresh_sessions', False) else 0
+        features['primary_session'] = 1 if session.get('primary_session', False) else 0
         features['entropy'] = entropy
 
         return features
@@ -239,7 +239,7 @@ class BaskervillehallIsolationForest(object):
 
         self.mean = Y.mean(axis=0)
         self.std = Y.std(axis=0)
-        self.std[self.std == 0] = 1
+        self.std[self.std == 0] = 0.01
         Z = self._normalize(Y)
 
         self.isolation_forest = IsolationForest(
