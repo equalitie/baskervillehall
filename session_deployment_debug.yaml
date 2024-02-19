@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
       - name: "baskervillehall-session-debug"
-        image: "equalitie/baskervillehall:latest"
+        image: "equalitie/baskervillehall:debug"
         imagePullPolicy: Always
         resources:
           requests:

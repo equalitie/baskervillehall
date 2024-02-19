@@ -148,14 +148,8 @@ class BaskervillehallPredictor(object):
                         ip_whitelisted += 1
                         continue
 
-                    if session['duration'] < self.min_session_duration:
-                        if debug:
-                            self.logger.info(f'ip {ip} value[duration] < self.min_session_duration')
-                        continue
-
-                    if len(session['requests']) < self.min_number_of_requests:
-                        if debug:
-                            self.logger.info(f'ip {ip} < min_number_of_requests')
+                    if session['duration'] < self.min_session_duration and \
+                            len(session['requests']) < self.min_number_of_requests:
                         continue
 
                     batch[host].append(session)

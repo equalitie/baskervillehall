@@ -72,7 +72,7 @@ class BaskervillehallTrainer(object):
                 'path_depth_average',
                 'path_depth_std',
                 'payload_size_log_average',
-                'fresh_session'
+                'primary_session'
             ]
         self.use_pca = use_pca
         self.warmup_period = warmup_period
