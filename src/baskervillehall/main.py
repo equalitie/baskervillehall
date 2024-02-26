@@ -100,8 +100,10 @@ def main():
         trainer_parameters = {
             'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
-            'feature_names': os.environ.get('FEATURE_NAMES').split(','),
-            'use_pca': os.environ.get('USE_PCA_FEATURE') == 'True',
+            'features': os.environ.get('FEATURES').split(','),
+            'categorical_features': os.environ.get('CATEGORICAL_FEATURES').split(','),
+            'max_categories': int(os.environ.get('MAX_CATEGORIES')),
+            'min_category_frequency': int(os.environ.get('MIN_CATEGORY_FREQUENCY')),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'train_batch_size': int(os.environ.get('TRAIN_BATCH_SIZE')),

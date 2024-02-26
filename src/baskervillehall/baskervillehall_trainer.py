@@ -15,8 +15,10 @@ class BaskervillehallTrainer(object):
     def __init__(
             self,
             warmup_period=5,
-            feature_names=None,
-            use_pca=True,
+            features=None,
+            categorical_features=None,
+            max_categories=3,
+            min_category_frequency=10,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             partition=0,
             kafka_group_id='baskervillehall_trainer',
@@ -54,29 +56,11 @@ class BaskervillehallTrainer(object):
         if kafka_connection is None:
             kafka_connection = {'bootstrap_servers': 'localhost:9092'}
 
-        if feature_names is None:
-            feature_names = [
-                'request_rate',
-                'request_interval_average',
-                'request_interval_std',
-                'response4xx_to_request_ratio',
-                'response5xx_to_request_ratio',
-                'top_page_to_request_ratio',
-                'unique_path_rate',
-                'unique_path_to_request_ratio',
-                'unique_query_rate',
-                'unique_query_to_unique_path_ratio',
-                'image_to_html_ratio',
-                'js_to_html_ratio',
-                'css_to_html_ratio',
-                'path_depth_average',
-                'path_depth_std',
-                'payload_size_log_average',
-                'primary_session'
-            ]
-        self.use_pca = use_pca
+        self.max_categories = max_categories
+        self.min_category_frequency = min_category_frequency
         self.warmup_period = warmup_period
-        self.feature_names = feature_names
+        self.features = features
+        self.categorical_features = categorical_features
         self.topic_sessions = topic_sessions
         self.partition = partition
         self.num_sessions = num_sessions
@@ -191,10 +175,11 @@ class BaskervillehallTrainer(object):
                         contamination=self.contamination,
                         max_features=self.max_features,
                         warmup_period=self.warmup_period,
-                        feature_names=self.feature_names,
-                        use_pca=self.use_pca,
+                        features=self.features,
+                        categorical_features=self.categorical_features,
+                        max_categories=self.max_categories,
+                        min_category_frequency=self.min_category_frequency,
                         datetime_format=self.datetime_format,
-                        categorical_feature_names=['country'],
                         bootstrap=self.bootstrap,
                         n_jobs=self.n_jobs,
                         random_state=self.random_state,
@@ -203,7 +188,7 @@ class BaskervillehallTrainer(object):
 
                     old_model = model_io.load(self.s3_path, host)
                     if old_model:
-                        scores = old_model.score_sessions(sessions)
+                        scores = old_model.transform(sessions)
                         contamination = float(len(scores[scores < 0])) / len(scores)
                         if contamination > self.accepted_contamination:
                             self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
@@ -217,10 +202,10 @@ class BaskervillehallTrainer(object):
                         continue
 
                     if len(sessions) <= self.small_dataset_size:
-                        model.set_n_estimators(len(self.feature_names))
+                        model.set_n_estimators(len(self.features))
                         model.set_contamination(self.contamination * 2)
 
-                    model.fit_sessions(sessions)
+                    model.fit(sessions)
 
                     self.logger.info(f'@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
                     model_io.save(model, self.s3_path, host)
