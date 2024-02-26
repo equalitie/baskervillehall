@@ -167,7 +167,7 @@ class BaskervillehallPredictor(object):
                     model.datetime_format = '%Y-%m-%d %H:%M:%S'
 
                     ts = datetime.now()
-                    scores = model.score_sessions(sessions)
+                    scores = model.transform(sessions)
                     predicted += scores.shape[0]
                     self.logger.info(f'score() time = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
                                      f'{scores.shape[0]} items')
