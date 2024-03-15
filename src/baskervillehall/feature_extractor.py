@@ -26,6 +26,7 @@ class FeatureExtractor(object):
         self.datetime_format = datetime_format
         supported_features = [
             'request_rate',
+            'post_rate',
             'request_interval_average',
             'request_interval_std',
             'response4xx_to_request_ratio',
@@ -108,6 +109,7 @@ class FeatureExtractor(object):
         num_css = 0
         slash_counts = []
         payloads = []
+        num_post = 0
 
         for i in range(len(requests)):
             r = requests[i]
@@ -138,6 +140,8 @@ class FeatureExtractor(object):
                     content_type == 'text/css; charset=UTF-8' or \
                     content_type == 'text/css; charset=utf-8':
                 num_css += 1
+            if r['method'] == 'POST':
+                num_post += 1
 
         intervals = np.array(intervals)
         unique_path = float(len(url_map.keys()))
@@ -153,6 +157,7 @@ class FeatureExtractor(object):
         features['num_requests'] = len(requests)
         features['duration'] = session_duration
         features['request_rate'] = hits / session_duration * 60
+        features['post_rate'] = num_post / hits
         mean_intervals = np.mean(intervals)
         features['request_interval_average'] = mean_intervals
         features['request_interval_std'] = np.sqrt(np.mean((intervals - mean_intervals) ** 2))

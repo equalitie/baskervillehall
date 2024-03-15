@@ -148,10 +148,6 @@ class BaskervillehallPredictor(object):
                         ip_whitelisted += 1
                         continue
 
-                    if session['duration'] < self.min_session_duration and \
-                            len(session['requests']) < self.min_number_of_requests:
-                        continue
-
                     batch[host].append(session)
                     predicting_total += 1
 
@@ -213,7 +209,7 @@ class BaskervillehallPredictor(object):
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.')
                             message = json.dumps(
                                 {
-                                    'Name': 'challenge_session' if session_id != '-' else 'challenge_ip',
+                                    'Name': 'challenge_ip' if session['primary_session'] else 'challenge_session',
                                     'Value': f'{ip}',
                                     'session_id': session_id,
                                     'host': host,
@@ -227,24 +223,24 @@ class BaskervillehallPredictor(object):
                             ).encode('utf-8')
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
-                            # for backward compatibility with  production
-                            if session_id != '-':
-                                message = json.dumps(
-                                    {
-                                        'Name': 'challenge_ip',
-                                        'Value': f'{ip}',
-                                        'session_id': '-',
-                                        'forwarded': True,
-                                        'host': host,
-                                        'source': 'baskervillehall',
-                                        'start': session['start'],
-                                        'end': session['end'],
-                                        'duration': session['duration'],
-                                        'score': score,
-                                        'num_requests': len(session['requests'])
-                                    }
-                                ).encode('utf-8')
-                                producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                            # # for backward compatibility with  production
+                            # if session_id != '-':
+                            #     message = json.dumps(
+                            #         {
+                            #             'Name': 'challenge_ip',
+                            #             'Value': f'{ip}',
+                            #             'session_id': '-',
+                            #             'forwarded': True,
+                            #             'host': host,
+                            #             'source': 'baskervillehall',
+                            #             'start': session['start'],
+                            #             'end': session['end'],
+                            #             'duration': session['duration'],
+                            #             'score': score,
+                            #             'num_requests': len(session['requests'])
+                            #         }
+                            #     ).encode('utf-8')
+                            #     producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
                                  f'predicted = {predicted}, whitelisted = {ip_whitelisted}')

@@ -82,7 +82,6 @@ def main():
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'kafka_group_id': os.environ.get('GROUP_ID_SESSION'),
             'max_primary_sessions_per_ip': int(os.environ.get('MAX_PRIMARY_SESSIONS_PER_IP')),
-            'primary_session_grace_period': int(os.environ.get('PRIMARY_SESSION_GRACE_PERIOD')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
