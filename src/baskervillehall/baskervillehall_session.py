@@ -28,7 +28,6 @@ class BaskervillehallSession(object):
             whitelist_ip=None,
             white_list_refresh_period=5,
             max_primary_sessions_per_ip=10,
-            primary_session_grace_period=5,
             datetime_format='%Y-%m-%d %H:%M:%S',
             read_from_beginning=False,
             min_number_of_requests=10,
@@ -49,7 +48,6 @@ class BaskervillehallSession(object):
         self.whitelist_url = whitelist_url
         self.reset_duration = reset_duration
         self.white_list_refresh_period = white_list_refresh_period
-        self.primary_session_grace_period = primary_session_grace_period
 
         self.max_primary_sessions_per_ip = max_primary_sessions_per_ip
         self.date_time_format = datetime_format
@@ -193,11 +191,10 @@ class BaskervillehallSession(object):
             for session_id in list(primary_sessions.keys()):
                 ps = primary_sessions[session_id]
                 r = ps['requests'][0]
-                if (ts - r['ts']).total_seconds() > self.primary_session_grace_period:
-                    host = ps['host']
-                    if host not in hosts:
-                        hosts[host] = []
-                    hosts[host].append(ps)
+                host = ps['host']
+                if host not in hosts:
+                    hosts[host] = []
+                hosts[host].append(ps)
 
             for host, sessions in hosts.items():
                 if len(sessions) > self.max_primary_sessions_per_ip:
@@ -241,7 +238,6 @@ class BaskervillehallSession(object):
                              f'partition {self.partition}')
 
             ts_gc = datetime.now()
-            ts_primary_garbage_collection = datetime.now()
 
             consumer.assign([TopicPartition(self.topic_weblogs, self.partition)])
             if self.read_from_beginning:
@@ -281,14 +277,7 @@ class BaskervillehallSession(object):
 
                         session_id = data.get('deflect_session', '')
 
-                        origin_session_id = session_id
-                        if len(session_id) > 5:
-                            if session_id[-2:] == '==':
-                                session_id = urllib.parse.quote_plus(session_id)
-                            elif session_id[-5:] =='%253D':
-                                session_id = urllib.parse.unquote(session_id)
-
-                        if session_id == '-':
+                        if len(session_id) < 5:
                             session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits)
                                                  for _ in range(7))
 
@@ -305,6 +294,7 @@ class BaskervillehallSession(object):
                             'code': data['http_response_code'],
                             'type': data['content_type'],
                             'payload': data['reply_length_bytes'],
+                            'method': data['client_request_method']
                         }
 
                         if ip in self.ips and session_id in self.ips[ip]:
