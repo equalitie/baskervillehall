@@ -31,6 +31,7 @@ class BaskervillehallSession(object):
             datetime_format='%Y-%m-%d %H:%M:%S',
             read_from_beginning=False,
             min_number_of_requests=10,
+            flush_period_for_primary_session=10,
             debug_ip=None,
             logger=None,
     ):
@@ -62,6 +63,9 @@ class BaskervillehallSession(object):
         self.producer = None
         self.ips = dict()
         self.ips_primary = dict()
+        self.flush_ts_primary = dict()
+        self.debugging = False
+        self.flush_period_for_primary_session = flush_period_for_primary_session
 
     @staticmethod
     def get_timestamp_and_data(data):
@@ -108,7 +112,7 @@ class BaskervillehallSession(object):
             value=json.dumps(message).encode('utf-8')
         )
 
-        if session['ua'] == 'Baskervillehall':
+        if self.debugging:
             self.logger.info(
                 f'@@@@ DEBUG host={session["host"]}, ip={session["ip"]}, session_id={session["session_id"]}'
                 f'end={session["end"]}, num_requests={len(session["requests"])}')
@@ -187,6 +191,12 @@ class BaskervillehallSession(object):
     def collect_primary_session(self, ip, ts):
         primary_sessions = self.ips_primary[ip]
         if len(primary_sessions) > self.max_primary_sessions_per_ip:
+            if ip in self.flush_ts_primary:
+                seconds_since_last_flush = (datetime.now() - self.flush_ts_primary[ip]).total_seconds()
+                if  seconds_since_last_flush < self.flush_period_for_primary_session:
+                    return
+            self.flush_ts_primary[ip] = datetime.now()
+
             hosts = {}
             for session_id in list(primary_sessions.keys()):
                 ps = primary_sessions[session_id]
@@ -197,26 +207,39 @@ class BaskervillehallSession(object):
                 hosts[host].append(ps)
 
             for host, sessions in hosts.items():
-                if len(sessions) > self.max_primary_sessions_per_ip:
-                    requests = [s['requests'][0] for s in sessions]
-                    requests = sorted(requests, key=lambda x: x['ts'])
-                    for s in sessions:
-                        del primary_sessions[s['session_id']]
-                    session = {
-                        'ua': sessions[0]['ua'],
-                        'host': host,
-                        'country': sessions[0]['country'],
-                        'ip': ip,
-                        'session_id': '-',
-                        'start': requests[0]['ts'],
-                        'end': requests[-1]['ts'],
-                        'duration': (requests[-1]['ts'] - requests[0]['ts']).total_seconds(),
-                        'requests': requests,
-                        'primary_session': True
-                    }
-                    self.send_session(session)
+                if len(sessions) < self.max_primary_sessions_per_ip:
+                    if self.debugging:
+                        self.logger.info(f'Primary session not sent. len(sessions)'
+                                         f'{len(sessions)} <= {self.max_primary_sessions_per_ip}')
+                    continue
+
+                requests = [s['requests'][0] for s in sessions]
+                requests = sorted(requests, key=lambda x: x['ts'])
+                session = {
+                    'ua': sessions[0]['ua'],
+                    'host': host,
+                    'country': sessions[0]['country'],
+                    'ip': ip,
+                    'session_id': '-',
+                    'start': requests[0]['ts'],
+                    'end': requests[-1]['ts'],
+                    'duration': (requests[-1]['ts'] - requests[0]['ts']).total_seconds(),
+                    'requests': requests,
+                    'primary_session': True
+                }
+                if self.debugging:
+                    self.logger.info('flushing primary session')
+                    self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
+                self.send_session(session)
 
             self.flush()
+
+    def is_debugging_mode(self, data):
+        if self.debug_ip and data['client_ip'] == self.debug_ip:
+            return True
+        if 'Baskerville' in data.get('client_ua', ''):
+            return True
+        return False
 
     def run(self):
         whitelist_url = WhitelistURL(url=self.whitelist_url,
@@ -242,33 +265,40 @@ class BaskervillehallSession(object):
             consumer.assign([TopicPartition(self.topic_weblogs, self.partition)])
             if self.read_from_beginning:
                 consumer.seek_to_beginning()
-
+            else:
+                consumer.seek_to_end()
+            ts_lag_report = datetime.now()
             while True:
-                raw_messages = consumer.poll(timeout_ms=1000, max_records=5000)
+                raw_messages = consumer.poll(timeout_ms=1000, max_records=200, update_offsets=False)
                 for topic_partition, messages in raw_messages.items():
                     for message in messages:
+                        if (datetime.now() - ts_lag_report).total_seconds() > 5:
+                            highwater = consumer.highwater(topic_partition)
+                            lag = (highwater - 1) - message.offset
+                            self.logger.info(f'Lag = {lag}')
+                            ts_lag_report = datetime.now()
                         if not message.value:
                             continue
                         ts, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
 
                         ip = data['client_ip']
 
-                        debugging = self.debug_ip and ip == self.debug_ip
+                        self.debugging = self.is_debugging_mode(data)
 
                         host = message.key.decode('utf-8')
                         if whitelist_url.is_host_whitelisted(host):
-                            if debugging:
+                            if self.debugging:
                                 self.logger.info(f'host {host} is whitelisted')
                             continue
 
                         if whitelist_ip.is_in_whitelist(host, ip):
-                            if debugging:
+                            if self.debugging:
                                 self.logger.info(f'ip {ip} is whitelisted')
                             continue
 
                         url = data['client_url']
                         if whitelist_url.is_in_whitelist(url):
-                            if debugging:
+                            if self.debugging:
                                 self.logger.info(f'host {host} url {url} is whitelisted')
                             continue
 
@@ -281,7 +311,7 @@ class BaskervillehallSession(object):
                             session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits)
                                                  for _ in range(7))
 
-                        if debugging:
+                        if self.debugging:
                             deflect_session = data['deflect_session']
                             client_url = data['client_url']
                             self.logger.info(f'@@@@ {deflect_session}, {client_url}')
@@ -299,23 +329,23 @@ class BaskervillehallSession(object):
 
                         if ip in self.ips and session_id in self.ips[ip]:
                             # existing session
-                            if debugging:
+                            if self.debugging:
                                 self.logger.info('session exists')
                             session = self.ips[ip][session_id]
                             if self.is_session_expired(session, ts):
-                                if debugging:
+                                if self.debugging:
                                     self.logger.info('session is expired')
                                 session = self.create_session(ua, host, country, ip, session_id, ts, request)
                                 self.ips[ip][session_id] = session
                             else:
-                                if debugging:
+                                if self.debugging:
                                     self.logger.info('updating session')
                                 self.update_session(session, request)
                             self.check_and_send_session(session, ts)
                             self.flush()
                         elif ip in self.ips_primary and session_id in self.ips_primary[ip]:
                             # maturing session from primary
-                            if debugging:
+                            if self.debugging:
                                 self.logger.info('maturing primary session')
                             session = self.ips_primary[ip][session_id]
                             self.update_session(session, request)

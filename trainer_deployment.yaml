@@ -19,6 +19,15 @@ spec:
       labels:
         app: "baskervillehall-trainer"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - workers-node-6a9f33
       containers:
       - name: "baskervillehall-trainer"
         image: "equalitie/baskervillehall:latest"
