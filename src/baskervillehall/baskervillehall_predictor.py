@@ -28,11 +28,9 @@ class BaskervillehallPredictor(object):
             max_models=10000,
             min_session_duration=20,
             min_number_of_requests=2,
-            batch_size=5000,
-            pending_challenge_ttl_in_minutes=30,
-            maxsize_pending_challenge=10000000,
-            passed_challenge_ttl_in_minutes=600,
-            maxsize_passed_challenge=10000000,
+            batch_size=500,
+            pending_ttl=30,
+            maxsize_pending=10000000,
             n_jobs_predict=10,
             logger=None,
             whitelist_ip=None,
@@ -59,11 +57,9 @@ class BaskervillehallPredictor(object):
         self.whitelist_ip = whitelist_ip
         self.model_reload_in_minutes = model_reload_in_minutes
         self.max_models = max_models
-        self.pending_challenge_ttl_in_minutes = pending_challenge_ttl_in_minutes
+        self.pending_ttl = pending_ttl
         self.topic_reports = topic_reports
-        self.passed_challenge_ttl_in_minutes = passed_challenge_ttl_in_minutes
-        self.maxsize_pending_challenge = maxsize_pending_challenge
-        self.maxsize_passed_challenge = maxsize_passed_challenge
+        self.maxsize_pending = maxsize_pending
         self.batch_size = batch_size
         self.date_time_format = datetime_format
         self.debug_ip = debug_ip
@@ -80,10 +76,8 @@ class BaskervillehallPredictor(object):
             logger=self.logger)
         model_storage.start()
 
-        pending_challenge_ips = TTLCache(
-            maxsize=self.maxsize_pending_challenge,
-            ttl=self.pending_challenge_ttl_in_minutes * 60
-        )
+        pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+        pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
 
         offences = TTLCache(
             maxsize=10000,
@@ -121,7 +115,8 @@ class BaskervillehallPredictor(object):
                                    refresh_period_in_seconds=60 * self.white_list_refresh_in_minutes)
 
         consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
-
+        consumer.seek_to_end()
+        ts_lag_report = datetime.now()
         while True:
             raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
             for topic_partition, messages in raw_messages.items():
@@ -130,6 +125,12 @@ class BaskervillehallPredictor(object):
                 predicting_total = 0
                 ip_whitelisted = 0
                 for message in messages:
+                    if (datetime.now() - ts_lag_report).total_seconds() > 5:
+                        highwater = consumer.highwater(topic_partition)
+                        lag = (highwater - 1) - message.offset
+                        self.logger.info(f'Lag = {lag}')
+                        ts_lag_report = datetime.now()
+
                     if not message.value:
                         continue
 
@@ -183,9 +184,25 @@ class BaskervillehallPredictor(object):
                         if prediction:
                             session_id = session['session_id']
 
+                            # if ip_storage.is_challenge_passed(session_id):
+                            #     if debug:
+                            #         self.logger.info(f'ip = {ip} is in challenged_passed_storage')
+                            #     continue
+                            #
+
+                            challenge_ip = session['primary_session']
+
+                            if challenge_ip:
+                                if ip in pending_ip:
+                                    continue
+                                pending_ip[ip] = True
+                            else:
+                                if (ip, session_id) in pending_session:
+                                    continue
+                                pending_session[(ip, session_id)] = True
+
                             if ip not in offences:
                                 offences[ip] = {}
-
                             offences[ip][session_id] = session
                             if len(offences[ip]) > 2:
                                 self.logger.info(f'Multiply offences ip = {ip}, num confirmed '
@@ -194,22 +211,12 @@ class BaskervillehallPredictor(object):
                                 for s in offences[ip].values():
                                     self.logger.info(s)
 
-                            # if ip_storage.is_challenge_passed(session_id):
-                            #     if debug:
-                            #         self.logger.info(f'ip = {ip} is in challenged_passed_storage')
-                            #     continue
-                            #
-                            if (ip, session_id) in pending_challenge_ips:
-                                if debug:
-                                    self.logger.info(f'ip = {ip} is in challenged_pending_storage')
-                                continue
-                            pending_challenge_ips[(ip, session_id)] = True
 
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.')
                             message = json.dumps(
                                 {
-                                    'Name': 'challenge_ip' if session['primary_session'] else 'challenge_session',
+                                    'Name': 'challenge_ip' if challenge_ip else 'challenge_session',
                                     'Value': f'{ip}',
                                     'session_id': session_id,
                                     'host': host,
@@ -223,24 +230,24 @@ class BaskervillehallPredictor(object):
                             ).encode('utf-8')
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
-                            # # for backward compatibility with  production
-                            # if session_id != '-':
-                            #     message = json.dumps(
-                            #         {
-                            #             'Name': 'challenge_ip',
-                            #             'Value': f'{ip}',
-                            #             'session_id': '-',
-                            #             'forwarded': True,
-                            #             'host': host,
-                            #             'source': 'baskervillehall',
-                            #             'start': session['start'],
-                            #             'end': session['end'],
-                            #             'duration': session['duration'],
-                            #             'score': score,
-                            #             'num_requests': len(session['requests'])
-                            #         }
-                            #     ).encode('utf-8')
-                            #     producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                            # for backward compatibility with  production
+                            if session_id != '-':
+                                message = json.dumps(
+                                    {
+                                        'Name': 'challenge_ip',
+                                        'Value': f'{ip}',
+                                        'session_id': '-',
+                                        'forwarded': True,
+                                        'host': host,
+                                        'source': 'baskervillehall',
+                                        'start': session['start'],
+                                        'end': session['end'],
+                                        'duration': session['duration'],
+                                        'score': score,
+                                        'num_requests': len(session['requests'])
+                                    }
+                                ).encode('utf-8')
+                                producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
                                  f'predicted = {predicted}, whitelisted = {ip_whitelisted}')

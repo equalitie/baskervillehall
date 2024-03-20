@@ -73,6 +73,7 @@ def main():
     if args.pipeline == 'session':
         session_parameters = {
             'read_from_beginning': os.environ.get('READ_FROM_BEGINNING') == 'True',
+            'flush_period_for_primary_session': int(os.environ.get('FLUSH_PERIOD_FOR_PRIMARY_SESSION')),
             'topic_weblogs': os.environ.get('TOPIC_WEBLOGS'),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'session_inactivity': int(os.environ.get('SESSION_INACTIVITY')),
@@ -145,10 +146,8 @@ def main():
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
             'whitelist_ip': os.environ.get('WHITELIST_IP'),
-            'pending_challenge_ttl_in_minutes': int(os.environ.get('PENDING_CHALLENGE_TTL_IN_MINUTES')),
-            'passed_challenge_ttl_in_minutes': int(os.environ.get('PASSED_CHALLENGE_TTL_IN_MINUTES')),
-            'maxsize_passed_challenge': int(os.environ.get('MAXSIZE_PASSED_CHALLENGE')),
-            'maxsize_pending_challenge': int(os.environ.get('MAXSIZE_PENDING_CHALLENGE')),
+            'pending_ttl': int(os.environ.get('PENDING_TTL')),
+            'maxsize_pending': int(os.environ.get('MAXSIZE_PENDING')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT'))
         }

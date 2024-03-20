@@ -4,7 +4,7 @@ metadata:
   name: baskervillehall
 data:
     READ_FROM_BEGINNING: "False"
-    DEBUG_IP: "212.102.57.93"
+    DEBUG_IP: "191.96.36.197"
     TOPIC_WEBLOGS: "logstash_deflect.log"
     SESSION_INACTIVITY: "3"
     GARBAGE_COLLECTION_PERIOD: "3"
@@ -22,7 +22,7 @@ data:
     GROUP_ID_PREDICTOR: "baskervillehall_predicting2"
     MODEL_TTL_IN_MINUTES: "300"
     DATASET_DELAY_FROM_NOW_IN_MINUTES: "10"
-    S3_MODEL_STORAGE_PATH: "anton/baslervillehall/models35"
+    S3_MODEL_STORAGE_PATH: "anton/baslervillehall/models36"
     TRAIN_BATCH_SIZE: "10"
     ACCEPTED_CONTAMINATION: "0.4"
     TRAINER_WAIT_TIME_MINUTES: "10"
@@ -40,6 +40,7 @@ data:
     MIN_SESSION_DURATION: "5"
     MIN_NUMBER_OF_REQUESTS : "5"
     MAX_PRIMARY_SESSIONS_PER_IP: "10"
+    FLUSH_PERIOD_FOR_PRIMARY_SESSION: "10"
     DATETIME_FORMAT: "%Y-%m-%d %H:%M:%S"
     PREDICTOR_MODEL_RELOAD_IN_MINUTES: "10"
     N_JOBS_PREDICT: "10"
@@ -48,10 +49,8 @@ data:
     WHITELIST_URL: "https://dashboard.deflect.ca/api/baskerville_config?key=f3f7af6a8dcecc0546726f09cfaf27dd91111f8828a0ceffba9ac7ba7afcc35e"
     WHITELIST_IP: "https://dashboard.deflect.ca/api/add_banjax_whitelist?key=f3f7af6a8dcecc0546726f09cfaf27dd91111f8828a0ceffba9ac7ba7afcc35e"
     BOOTSTRAP_SERVERS: "kafka9-0.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093"
-    PENDING_CHALLENGE_TTL_IN_MINUTES: "2"
-    PASSED_CHALLENGE_TTL_IN_MINUTES: "240"
-    MAXSIZE_PASSED_CHALLENGE: "10000000"
-    MAXSIZE_PENDING_CHALLENGE: "10000000"
+    PENDING_TTL: "30"
+    MAXSIZE_PENDING: "10000000"
 
     TOPIC_COUNTER: "filebeat_deflect_access"
     GROUP_ID_COUNTER: "baskervillehall_counter"
