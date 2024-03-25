@@ -145,13 +145,6 @@ class BaskervillehallTrainer(object):
 
                             if host not in batch:
                                 continue
-                            if session['duration'] < self.min_session_duration:
-                                continue
-                            if len(session.get('requests', session.get('queries'))) < self.min_number_of_requests:
-                                continue
-
-                            # if session['session_id'] == '-' or session['session_id'] == '':
-                            #     continue
 
                             if len(batch[host]) >= self.num_sessions:
                                 batch_complete = True

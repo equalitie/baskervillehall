@@ -2,42 +2,51 @@
 apiVersion: "apps/v1"
 kind: "StatefulSet"
 metadata:
-  name: "baskervillehall-counter"
+  name: "baskervillehall-session-ch"
   namespace: "default"
   labels:
-    app: "baskervillehall-counter"
+    app: "baskervillehall-session-ch"
 spec:
   replicas: 3
-  serviceName: "baskervillehall-counter"
+  serviceName: "baskervillehall-session-ch"
   updateStrategy:
     type: RollingUpdate
   selector:
     matchLabels:
-      app: "baskervillehall-counter"
+      app: "baskervillehall-session-ch"
   template:
     metadata:
       labels:
-        app: "baskervillehall-counter"
+        app: "baskervillehall-session-ch"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nodepool
+                    operator: In
+                    values:
+                      - postgres
       containers:
-      - name: "baskervillehall-counter"
+      - name: "baskervillehall-session-ch"
         image: "equalitie/baskervillehall:latest"
         imagePullPolicy: Always
         resources:
           requests:
             memory: "1Gi"
-            cpu: "50m"
+            cpu: "250m"
           limits:
-            memory: "1Gi"
-            cpu: "300m"
+            memory: "2Gi"
+            cpu: "500m"
         command:
           - python
         args:
           - /usr/local/baskervillehall/src/baskervillehall/main.py
-          - counter
+          - session
         envFrom:
           - configMapRef:
-              name: baskervillehall
+              name: baskervillehall-ch
         env:
         - name: MY_POD_NAME
           valueFrom:

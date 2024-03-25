@@ -3,8 +3,7 @@ import logging
 
 import os
 
-from baskervillehall.baskerville_pinger import BaskervillePinger
-from baskervillehall.baskervillehall_counter import BaskervillehallCounter
+from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
@@ -160,43 +159,6 @@ def main():
             logger=logger
         )
         predictor.run()
-    elif args.pipeline == 'counter':
-        kafka_connection = {
-            'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_COUNTER')
-        }
-        counter_parameters = {
-            'topic': os.environ.get('TOPIC_COUNTER'),
-            'partition': partition,
-            'kafka_group_id': os.environ.get('GROUP_ID_COUNTER'),
-            'batch_size': int(os.environ.get('BATCH_SIZE')),
-            'window': int(os.environ.get('WINDOW_COUNTER'))
-        }
-
-        counter = BaskervillehallCounter(
-            **counter_parameters,
-            kafka_connection=kafka_connection,
-            logger=logger
-        )
-        counter.run()
-    elif args.pipeline == 'pinger':
-        kafka_connection = {
-            'bootstrap_servers': os.environ.get('PING_BOOTSTRAP_SERVERS')
-        }
-        pinger_parameters = {
-            'topic': os.environ.get('PING_TOPIC'),
-            'topic_output': os.environ.get('PING_TOPIC_OUTPUT'),
-            'partition': partition,
-            'kafka_group_id': os.environ.get('PING_GROUP_ID'),
-            'num_workers': int(os.environ.get('PING_NUM_WORKERS')),
-            'host_refresh_minutes': int(os.environ.get('PING_HOST_REFRESH_MINUTES'))
-        }
-
-        counter = BaskervillePinger(
-            **pinger_parameters,
-            kafka_connection=kafka_connection,
-            logger=logger
-        )
-        counter.run()
     else:
         logger.error('Pipeline is not specified. Use session, predict or train')
 
