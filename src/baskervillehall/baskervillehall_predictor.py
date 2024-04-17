@@ -232,22 +232,23 @@ class BaskervillehallPredictor(object):
 
                             # for backward compatibility with  production
                             if session_id != '-':
-                                message = json.dumps(
-                                    {
-                                        'Name': 'challenge_ip',
-                                        'Value': f'{ip}',
-                                        'session_id': '-',
-                                        'forwarded': True,
-                                        'host': host,
-                                        'source': 'baskervillehall',
-                                        'start': session['start'],
-                                        'end': session['end'],
-                                        'duration': session['duration'],
-                                        'score': score,
-                                        'num_requests': len(session['requests'])
-                                    }
-                                ).encode('utf-8')
-                                producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                                if host != 'palestinechronicle.com':
+                                    message = json.dumps(
+                                        {
+                                            'Name': 'challenge_ip',
+                                            'Value': f'{ip}',
+                                            'session_id': '-',
+                                            'forwarded': True,
+                                            'host': host,
+                                            'source': 'baskervillehall',
+                                            'start': session['start'],
+                                            'end': session['end'],
+                                            'duration': session['duration'],
+                                            'score': score,
+                                            'num_requests': len(session['requests'])
+                                        }
+                                    ).encode('utf-8')
+                                    producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
                                  f'predicted = {predicted}, whitelisted = {ip_whitelisted}')

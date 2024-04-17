@@ -18,8 +18,9 @@ class BaskervillehallSession(object):
             partition=0,
             kafka_group_id='baskervillehall_session',
             kafka_connection={'bootstrap_servers': 'localhost:9092'},
-            flush_window_seconds=60,
-            min_session_duration=10,
+            flush_increment=10,
+            min_session_duration=5,
+            max_session_duration=60,
             reset_duration=5,
             session_inactivity=1,
             garbage_collection_period=2,
@@ -31,7 +32,6 @@ class BaskervillehallSession(object):
             datetime_format='%Y-%m-%d %H:%M:%S',
             read_from_beginning=False,
             min_number_of_requests=10,
-            flush_period_for_primary_session=10,
             debug_ip=None,
             logger=None,
     ):
@@ -42,7 +42,7 @@ class BaskervillehallSession(object):
         self.kafka_group_id = kafka_group_id
         self.kafka_connection = kafka_connection
         self.session_inactivity = session_inactivity
-        self.flush_window_seconds = flush_window_seconds
+        self.flush_increment = flush_increment
         self.garbage_collection_period = garbage_collection_period
         self.whitelist_url_default = whitelist_url_default
         self.whitelist_ip = whitelist_ip
@@ -53,6 +53,7 @@ class BaskervillehallSession(object):
         self.max_primary_sessions_per_ip = max_primary_sessions_per_ip
         self.date_time_format = datetime_format
         self.min_session_duration = min_session_duration
+        self.max_session_duration = max_session_duration
         self.read_from_beginning = read_from_beginning
 
         self.logger = logger
@@ -63,9 +64,8 @@ class BaskervillehallSession(object):
         self.producer = None
         self.ips = dict()
         self.ips_primary = dict()
-        self.flush_ts_primary = dict()
+        self.flush_size_primary = dict()
         self.debugging = False
-        self.flush_period_for_primary_session = flush_period_for_primary_session
 
     @staticmethod
     def get_timestamp_and_data(data):
@@ -80,11 +80,14 @@ class BaskervillehallSession(object):
         self.producer.flush()
 
     def check_and_send_session(self, session, ts):
-        if 'flush_ts' not in session or \
-                (ts - session.get('flush_ts', ts)).total_seconds() > self.flush_window_seconds:
+        if session['duration'] < self.max_session_duration:
+            size = len(session['requests'])
             if session['duration'] > self.min_session_duration or \
-                    len(session['requests']) > self.min_number_of_requests:
-                self.send_session(session)
+                    size > self.min_number_of_requests:
+                if 'flush_size' not in session or \
+                        size - session.get('flush_size') > self.flush_increment:
+                            self.send_session(session)
+                            session['flush_size'] = size
 
     def send_session(self, session):
         requests = session['requests']
@@ -94,6 +97,7 @@ class BaskervillehallSession(object):
             rf['ts'] = r['ts'].strftime(self.date_time_format)
             requests_formatted.append(rf)
 
+        requests_formatted = sorted(requests_formatted, key=lambda x: x['ts'])
         message = {
             'host': session['host'],
             'ua': session['ua'],
@@ -190,29 +194,23 @@ class BaskervillehallSession(object):
 
     def collect_primary_session(self, ip, ts):
         primary_sessions = self.ips_primary[ip]
-        if len(primary_sessions) > self.max_primary_sessions_per_ip:
-            if ip in self.flush_ts_primary:
-                seconds_since_last_flush = (datetime.now() - self.flush_ts_primary[ip]).total_seconds()
-                if  seconds_since_last_flush < self.flush_period_for_primary_session:
+        size = len(primary_sessions)
+        if size > self.max_primary_sessions_per_ip:
+            if ip in self.flush_size_primary:
+                increment = size - self.flush_size_primary[ip]
+                if increment < self.flush_increment:
                     return
-            self.flush_ts_primary[ip] = datetime.now()
+            self.flush_size_primary[ip] = size
 
             hosts = {}
             for session_id in list(primary_sessions.keys()):
-                ps = primary_sessions[session_id]
-                r = ps['requests'][0]
-                host = ps['host']
+                s = primary_sessions[session_id]
+                host = s['host']
                 if host not in hosts:
                     hosts[host] = []
-                hosts[host].append(ps)
+                hosts[host].append(s)
 
             for host, sessions in hosts.items():
-                if len(sessions) < self.max_primary_sessions_per_ip:
-                    if self.debugging:
-                        self.logger.info(f'Primary session not sent. len(sessions)'
-                                         f'{len(sessions)} <= {self.max_primary_sessions_per_ip}')
-                    continue
-
                 requests = [s['requests'][0] for s in sessions]
                 requests = sorted(requests, key=lambda x: x['ts'])
                 session = {
@@ -230,7 +228,8 @@ class BaskervillehallSession(object):
                 if self.debugging:
                     self.logger.info('flushing primary session')
                     self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
-                self.send_session(session)
+                if session['duration'] < self.max_session_duration:
+                    self.send_session(session)
 
             self.flush()
 
