@@ -32,7 +32,8 @@ class HostSelector(object):
             for topic_partition, messages in raw_messages.items():
                 for message in messages:
                     if (time_start - message.timestamp / 1000) / 60 < 2:
-                        self.logger.info('Topic offset is too close to the current times...')
+                        consumer.seek_to_beginning()
+                        self.logger.info('get_next_hosts() seek to beginning...')
                         return host_batch
 
                     if not message.value:
