@@ -9,7 +9,7 @@ class HostSelector(object):
                  ttl_in_minutes=120,
                  whitelist=[],
                  kafka_timeout_ms=1000,
-                 kafka_max_size=5000,
+                 kafka_max_size=100,
                  logger=None):
         super().__init__()
         self.ttl_in_minutes = ttl_in_minutes
@@ -48,5 +48,6 @@ class HostSelector(object):
                     if (host not in self.hosts) or ((int(time.time()) - self.hosts[host]) / 60 > self.ttl_in_minutes):
                         self.hosts[host] = int(time.time())
                         host_batch.append(host)
+                        self.logger.info(f'host {host} added. {len(host_batch)} out of {number_of_hosts}')
                         if len(host_batch) == number_of_hosts:
                             return host_batch
