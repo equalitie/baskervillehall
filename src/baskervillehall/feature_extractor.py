@@ -71,25 +71,12 @@ class FeatureExtractor(object):
             return requests
 
         parse_datetime = isinstance(requests[0]['ts'], str)
-        timestamps = {}
         for r in requests:
             if parse_datetime:
                 r['ts'] = datetime.strptime(r['ts'], self.datetime_format)
-            timestamps[r['ts']] = r
-        ordered_ts = [(ts, r) for ts, r in timestamps.items()]
-        ordered_ts = sorted(ordered_ts, key=lambda x: x[0])
-        grouped_requests = [x[1] for x in ordered_ts]
 
-        result = []
-        result.append(grouped_requests[0])
-        start = grouped_requests[0]['ts']
-        for i in range(1, len(grouped_requests)):
-            r = requests[i]
-            if (r['ts'] - start).total_seconds() < self.warmup_period:
-                continue
-            result.append(r)
-
-        return result
+        requests = sorted(requests, key=lambda x: x['ts'])
+        return requests
 
     def calculate_features_dict(self, session):
         assert (len(session['requests']) > 0)
