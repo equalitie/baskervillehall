@@ -54,8 +54,8 @@ class ModelIO(object):
         bucket, key = self._split_s3_path(path)
         s3.put_object(Body=body, Bucket=bucket, Key=key)
 
-    def save(self, model, path, host):
-        model_folder = os.path.join(path, host)
+    def save(self, model, path, host, human):
+        model_folder = os.path.join(path, host, 'human' if human else 'bot')
         model_path = os.path.join(model_folder, f'{self._get_timestamp()}.pkl')
 
         self._save_object(pickle.dumps(model), model_path)
@@ -63,9 +63,9 @@ class ModelIO(object):
 
         self.logger.info(f'Model for host {host} saved into {model_path}')
 
-    def load(self, path, host):
+    def load(self, path, host, human):
         try:
-            model_folder = os.path.join(path, host)
+            model_folder = os.path.join(path, host, 'human' if human else 'bot')
             model_path = self._load_object(os.path.join(model_folder, 'index.txt')).decode('utf-8')
 
             model_data = self._load_object(model_path)

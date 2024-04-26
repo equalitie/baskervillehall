@@ -45,12 +45,21 @@ class BaskervillehallIsolationForest(object):
         self.random_state = random_state
         self.isolation_forest = None
 
-
     def set_n_estimators(self, n_estimators):
         self.n_estimators = n_estimators
 
     def set_contamination(self, contamination):
         self.contamination = contamination
+
+    @staticmethod
+    def is_bot_ua(ua):
+        ua_lowercase = ua.lower()
+        return 'bot' in ua_lowercase or 'spider' in ua_lowercase or 'crawl' in ua_lowercase
+
+    @staticmethod
+    def is_bot(session):
+        return (session['primary_session'] is True or
+                BaskervillehallIsolationForest.is_bot_ua(session['ua']))
 
     def fit(
             self,
