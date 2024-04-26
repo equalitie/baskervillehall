@@ -72,14 +72,14 @@ def main():
     if args.pipeline == 'session':
         session_parameters = {
             'read_from_beginning': os.environ.get('READ_FROM_BEGINNING') == 'True',
-            'flush_period_for_primary_session': int(os.environ.get('FLUSH_PERIOD_FOR_PRIMARY_SESSION')),
+            'flush_increment': int(os.environ.get('FLUSH_INCREMENT')),
             'topic_weblogs': os.environ.get('TOPIC_WEBLOGS'),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'session_inactivity': int(os.environ.get('SESSION_INACTIVITY')),
-            'flush_window_seconds': int(os.environ.get('FLUSH_WINDOW_SECONDS')),
             'garbage_collection_period': int(os.environ.get('GARBAGE_COLLECTION_PERIOD')),
             'partition': partition,
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
+            'max_session_duration': int(os.environ.get('MAX_SESSION_DURATION')),
             'kafka_group_id': os.environ.get('GROUP_ID_SESSION'),
             'max_primary_sessions_per_ip': int(os.environ.get('MAX_PRIMARY_SESSIONS_PER_IP')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),

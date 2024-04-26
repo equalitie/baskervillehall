@@ -158,7 +158,7 @@ class BaskervillehallTrainer(object):
 
             consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
             while True:
-                self.logger.info('Getting next hosts...')
+                self.logger.info(f'Getting next hosts... batch={self.train_batch_size}')
                 time_now = int(time.time())
                 hosts = host_selector.get_next_hosts(consumer, self.train_batch_size)
                 if len(hosts) == 0:
