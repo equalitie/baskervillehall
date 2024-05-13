@@ -91,8 +91,55 @@ class BaskervillehallTrainer(object):
         self.dataset_delay_from_now_in_minutes = dataset_delay_from_now_in_minutes
         self.accepted_contamination = accepted_contamination
 
-    def run(self):
+    def train_and_save_model(self, sessions, host, human):
+        if len(sessions) == 0:
+            return
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
+
+        model = BaskervillehallIsolationForest(
+            n_estimators=self.n_estimators,
+            max_samples=self.max_samples,
+            contamination=self.contamination,
+            max_features=self.max_features,
+            warmup_period=self.warmup_period,
+            features=self.features,
+            categorical_features=self.categorical_features,
+            max_categories=self.max_categories,
+            min_category_frequency=self.min_category_frequency,
+            datetime_format=self.datetime_format,
+            bootstrap=self.bootstrap,
+            n_jobs=self.n_jobs,
+            random_state=self.random_state,
+            logger=self.logger,
+        )
+
+        old_model = model_io.load(self.s3_path, host, human)
+        if old_model:
+            scores = old_model.transform(sessions)
+            contamination = float(len(scores[scores < 0])) / len(scores)
+            if contamination > self.accepted_contamination:
+                self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
+                                 f'Host = {host}. {scores.shape[0]} records, human={human}')
+                return
+
+        self.logger.info(f'Training host {host}, dataset size {len(sessions)}, human={human}')
+
+        if len(sessions) <= self.min_dataset_size:
+            self.logger.info(f'Skipping training. Too few sessions: {len(sessions)}. Host = {host}.'
+                             f'The minimum is {self.min_dataset_size}, human={human}')
+            return
+
+        if len(sessions) <= self.small_dataset_size:
+            model.set_n_estimators(len(self.features))
+            model.set_contamination(self.contamination * 2)
+
+        model.fit(sessions)
+
+        self.logger.info(f'@@@ Saving model for {host}, human={human}...')
+        model_io.save(model, self.s3_path, host, human)
+
+    def run(self):
+
 
         try:
             consumer = KafkaConsumer(
@@ -123,8 +170,13 @@ class BaskervillehallTrainer(object):
                 consumer.seek_to_beginning()
                 batch_complete = False
                 batch = {
-                    host: [] for host in hosts
+                    host: {
+                        'bot': [],
+                        'human': []
+                    } for host in hosts
                 }
+                self.logger.info(batch)
+
                 while not batch_complete:
                     raw_messages = consumer.poll(timeout_ms=self.kafka_timeout_ms, max_records=self.kafka_max_size)
                     for topic_partition, messages in raw_messages.items():
@@ -145,11 +197,12 @@ class BaskervillehallTrainer(object):
 
                             if host not in batch:
                                 continue
-
-                            if len(batch[host]) >= self.num_sessions:
+                            if len(batch[host]['bot']) >= self.num_sessions and \
+                                    len(batch[host]['human']) >= self.num_sessions:
                                 batch_complete = True
-                                for _, sessions in batch.items():
-                                    if len(sessions) < self.num_sessions:
+                                for _, v in batch.items():
+                                    if len(v['bot']) > self.num_sessions or \
+                                            len(v['human']) < self.num_sessions:
                                         batch_complete = False
                                         break
                                 if batch_complete:
@@ -157,51 +210,15 @@ class BaskervillehallTrainer(object):
                                 else:
                                     continue
 
-                            batch[host].append(session)
+                            if len(batch[host]['bot']) < self.num_sessions and \
+                                    not BaskervillehallIsolationForest.is_human(session):
+                                batch[host]['bot'].append(session)
+                            elif len(batch[host]['human']) < self.num_sessions and \
+                                    BaskervillehallIsolationForest.is_human(session):
+                                batch[host]['human'].append(session)
+                for host, v in batch.items():
+                    self.train_and_save_model(v['human'], host, human=True)
+                    self.train_and_save_model(v['bot'], host, human=False)
 
-                for host, sessions in batch.items():
-                    if len(sessions) == 0:
-                        continue
-                    model = BaskervillehallIsolationForest(
-                        n_estimators=self.n_estimators,
-                        max_samples=self.max_samples,
-                        contamination=self.contamination,
-                        max_features=self.max_features,
-                        warmup_period=self.warmup_period,
-                        features=self.features,
-                        categorical_features=self.categorical_features,
-                        max_categories=self.max_categories,
-                        min_category_frequency=self.min_category_frequency,
-                        datetime_format=self.datetime_format,
-                        bootstrap=self.bootstrap,
-                        n_jobs=self.n_jobs,
-                        random_state=self.random_state,
-                        logger=self.logger,
-                    )
-
-                    old_model = model_io.load(self.s3_path, host)
-                    if old_model:
-                        scores = old_model.transform(sessions)
-                        contamination = float(len(scores[scores < 0])) / len(scores)
-                        if contamination > self.accepted_contamination:
-                            self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
-                                             f'Host = {host}. {scores.shape[0]} records.')
-                            continue
-                    self.logger.info(f'Training host {host}, dataset size {len(sessions)}')
-
-                    if len(sessions) <= self.min_dataset_size:
-                        self.logger.info(f'Skipping training. Too few sessions: {len(sessions)}. Host = {host}.'
-                                         f'The minimum is {self.min_dataset_size}')
-                        continue
-
-                    if len(sessions) <= self.small_dataset_size:
-                        model.set_n_estimators(len(self.features))
-                        model.set_contamination(self.contamination * 2)
-
-                    model.fit(sessions)
-
-                    self.logger.info(f'@@@@@@@@@@@@@@@@ Saving model for {host} ... @@@@@@@@@@@@@@@@@@@@@@@@@')
-                    model_io.save(model, self.s3_path, host)
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')
-

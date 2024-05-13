@@ -12,6 +12,7 @@ class ModelStorage(object):
             self,
             s3_connection,
             s3_path,
+            human,
             reload_in_minutes=10,
             logger=None
     ):
@@ -23,6 +24,7 @@ class ModelStorage(object):
         self.thread = None
         self.reload_in_minutes = reload_in_minutes
         self.lock = threading.Lock()
+        self.human = human
         self.requests = set()
 
     def _is_expired(self, ts):
@@ -51,14 +53,15 @@ class ModelStorage(object):
                 time.sleep(1)
                 continue
 
-            model = self.model_io.load(self.s3_path, host)
+            model = self.model_io.load(self.s3_path, host, human=self.human)
             if model is None:
                 with self.lock:
                     self.requests.add(host)
                 continue
             with self.lock:
                 self.models[host] = (model, datetime.now())
-                self.logger.info(f'Loaded model for host {host}. Total models = {len(self.models.keys())}')
+                self.logger.info(f'Loaded model for host {host} {"human" if self.human else "bot"}). '
+                                 f'Total models = {len(self.models.keys())}')
 
     def start(self):
         if self.thread is not None:
