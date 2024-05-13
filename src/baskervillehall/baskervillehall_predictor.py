@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict
 
+from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
@@ -69,12 +70,21 @@ class BaskervillehallPredictor(object):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
 
     def run(self):
-        model_storage = ModelStorage(
+        model_storage_human = ModelStorage(
             self.s3_connection,
             self.s3_path,
+            human=True,
             reload_in_minutes=self.model_reload_in_minutes,
             logger=self.logger)
-        model_storage.start()
+        model_storage_human.start()
+
+        model_storage_bot = ModelStorage(
+            self.s3_connection,
+            self.s3_path,
+            human=False,
+            reload_in_minutes=self.model_reload_in_minutes,
+            logger=self.logger)
+        model_storage_bot.start()
 
         pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
@@ -135,6 +145,7 @@ class BaskervillehallPredictor(object):
                         continue
 
                     session = json.loads(message.value.decode("utf-8"))
+                    human = BaskervillehallIsolationForest.is_human(session)
                     ip = session['ip']
 
                     host = message.key.decode("utf-8")
@@ -149,19 +160,19 @@ class BaskervillehallPredictor(object):
                         ip_whitelisted += 1
                         continue
 
-                    batch[host].append(session)
+                    batch[(host, human)].append(session)
                     predicting_total += 1
 
                 predicted = 0
-                for host, sessions in batch.items():
-                    model = model_storage.get_model(host)
+                for (host, human), sessions in batch.items():
+                    model = model_storage_human.get_model(host) if human else\
+                        model_storage_bot.get_model(host)
+                    if model is None:
+                        model = model_storage_bot.get_model(host) if human else \
+                            model_storage_human.get_model(host)
 
                     if model is None:
                         continue
-
-                    # REMOVE THIS
-                    # it is temporal for backward compatibility only
-                    model.datetime_format = '%Y-%m-%d %H:%M:%S'
 
                     ts = datetime.now()
                     scores = model.transform(sessions)

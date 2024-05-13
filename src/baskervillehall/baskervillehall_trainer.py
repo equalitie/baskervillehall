@@ -94,7 +94,6 @@ class BaskervillehallTrainer(object):
     def train_and_save_model(self, sessions, host, human):
         if len(sessions) == 0:
             return
-
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
 
         model = BaskervillehallIsolationForest(
@@ -176,6 +175,7 @@ class BaskervillehallTrainer(object):
                         'human': []
                     } for host in hosts
                 }
+                self.logger.info(batch)
 
                 while not batch_complete:
                     raw_messages = consumer.poll(timeout_ms=self.kafka_timeout_ms, max_records=self.kafka_max_size)
@@ -197,7 +197,6 @@ class BaskervillehallTrainer(object):
 
                             if host not in batch:
                                 continue
-
                             if len(batch[host]['bot']) >= self.num_sessions and \
                                     len(batch[host]['human']) >= self.num_sessions:
                                 batch_complete = True
@@ -210,13 +209,13 @@ class BaskervillehallTrainer(object):
                                     break
                                 else:
                                     continue
+
                             if len(batch[host]['bot']) < self.num_sessions and \
-                                    BaskervillehallIsolationForest.is_bot(session):
+                                    not BaskervillehallIsolationForest.is_human(session):
                                 batch[host]['bot'].append(session)
                             elif len(batch[host]['human']) < self.num_sessions and \
-                                    not BaskervillehallIsolationForest.is_bot(session):
+                                    BaskervillehallIsolationForest.is_human(session):
                                 batch[host]['human'].append(session)
-
                 for host, v in batch.items():
                     self.train_and_save_model(v['human'], host, human=True)
                     self.train_and_save_model(v['bot'], host, human=False)

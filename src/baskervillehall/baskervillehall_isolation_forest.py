@@ -57,9 +57,9 @@ class BaskervillehallIsolationForest(object):
         return 'bot' in ua_lowercase or 'spider' in ua_lowercase or 'crawl' in ua_lowercase
 
     @staticmethod
-    def is_bot(session):
-        return (session['primary_session'] is True or
-                BaskervillehallIsolationForest.is_bot_ua(session['ua']))
+    def is_human(session):
+        return (session['primary_session'] is False and
+                not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
 
     def fit(
             self,
