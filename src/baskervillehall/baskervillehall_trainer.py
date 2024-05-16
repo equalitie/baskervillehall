@@ -215,7 +215,8 @@ class BaskervillehallTrainer(object):
                                 batch[host]['bot'].append(session)
                             elif len(batch[host]['human']) < self.num_sessions and \
                                     BaskervillehallIsolationForest.is_human(session):
-                                batch[host]['human'].append(session)
+                                if not session['primary_session']:
+                                    batch[host]['human'].append(session)
                 for host, v in batch.items():
                     self.train_and_save_model(v['human'], host, human=True)
                     self.train_and_save_model(v['bot'], host, human=False)

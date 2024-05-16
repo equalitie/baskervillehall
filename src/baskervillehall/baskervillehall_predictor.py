@@ -29,6 +29,7 @@ class BaskervillehallPredictor(object):
             max_models=10000,
             min_session_duration=20,
             min_number_of_requests=2,
+            max_offences_before_blocking=3,
             batch_size=500,
             pending_ttl=30,
             maxsize_pending=10000000,
@@ -65,6 +66,7 @@ class BaskervillehallPredictor(object):
         self.date_time_format = datetime_format
         self.debug_ip = debug_ip
         self.n_jobs_predict = n_jobs_predict
+        self.max_offences_before_blocking = max_offences_before_blocking
 
     def _is_debug_enabled(self, value):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
@@ -91,7 +93,7 @@ class BaskervillehallPredictor(object):
 
         offences = TTLCache(
             maxsize=10000,
-            ttl=20 * 60
+            ttl=60 * 60
         )
 
         # ip_storage = IPStorage(
@@ -146,6 +148,7 @@ class BaskervillehallPredictor(object):
 
                     session = json.loads(message.value.decode("utf-8"))
                     human = BaskervillehallIsolationForest.is_human(session)
+
                     ip = session['ip']
 
                     host = message.key.decode("utf-8")
@@ -201,9 +204,10 @@ class BaskervillehallPredictor(object):
                             #     continue
                             #
 
-                            challenge_ip = session['primary_session']
+                            primary_session = session['primary_session']
+                            session_id = '-'
 
-                            if challenge_ip:
+                            if primary_session:
                                 if ip in pending_ip:
                                     continue
                                 pending_ip[ip] = True
@@ -214,20 +218,23 @@ class BaskervillehallPredictor(object):
 
                             if ip not in offences:
                                 offences[ip] = {}
-                            offences[ip][session_id] = session
-                            if len(offences[ip]) > 2:
-                                self.logger.info(f'Multiply offences ip = {ip}, num confirmed '
-                                                 f'challenged sessions = {len(offences[ip])}')
-                                self.logger.info(offences[ip].keys())
-                                for s in offences[ip].values():
-                                    self.logger.info(s)
+                            offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
+
+                            if offences[ip][session_id]  > self.max_offences_before_blocking:
+                                self.logger.info(f'Blocking multiple offences ip = {ip}, session = {session_id} '
+                                                 f' offences = {offences[ip][session_id]} '
+                                                 f'host = {host}')
+                                command = 'block_ip' if primary_session else 'block_session'
+                            else:
+                                command = 'challenge_ip' if primary_session else 'challenge_session'
+
 
 
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.')
                             message = json.dumps(
                                 {
-                                    'Name': 'challenge_ip' if challenge_ip else 'challenge_session',
+                                    'Name': command,
                                     'Value': f'{ip}',
                                     'session_id': session_id,
                                     'host': host,
@@ -242,7 +249,7 @@ class BaskervillehallPredictor(object):
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
                             # for backward compatibility with  production
-                            if session_id != '-':
+                            if not primary_session:
                                 if host != 'palestinechronicle.com':
                                     message = json.dumps(
                                         {
