@@ -187,18 +187,22 @@ class BaskervillehallSession(object):
             if len(sessions) == 0:
                 del self.ips_primary[ip]
 
+        self.flush_size_primary = dict()
+
         self.logger.info(
             f'Garbage collector. \nips: {total_ips-deleted_ips} - {deleted_ips} deleted, \n'
             f'sessions: {total_sessions-deleted} -  {deleted} deleted, \n'
             f'primary: {total_primary_sessions-deleted_primary} - {deleted_primary} deleted \n')
 
-    def collect_primary_session(self, ip, ts):
+    def collect_primary_session(self, ip):
         primary_sessions = self.ips_primary[ip]
         size = len(primary_sessions)
         if size > self.max_primary_sessions_per_ip:
             if ip in self.flush_size_primary:
                 increment = size - self.flush_size_primary[ip]
                 if increment < self.flush_increment:
+                    if self.debugging:
+                        self.logger.info(f'session size increment {increment} < {self.flush_increment}, skipping flushing...')
                     return
             self.flush_size_primary[ip] = size
 
@@ -225,11 +229,17 @@ class BaskervillehallSession(object):
                     'requests': requests,
                     'primary_session': True
                 }
-                if self.debugging:
-                    self.logger.info('flushing primary session')
-                    self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
+
                 if session['duration'] < self.max_session_duration:
+                    if self.debugging:
+                        self.logger.info('flushing primary session')
+                        self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
                     self.send_session(session)
+                else:
+                    if self.debugging:
+                        self.logger.info(f'primary session is too long {session["duration"]} >= '
+                                         f'{self.max_session_duration}')
+                        self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
 
             self.flush()
 
@@ -360,7 +370,7 @@ class BaskervillehallSession(object):
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session
-                            self.collect_primary_session(ip, ts)
+                            self.collect_primary_session(ip)
 
                         time_now = datetime.now()
                         if (time_now - ts_gc).total_seconds() > self.garbage_collection_period * 60:

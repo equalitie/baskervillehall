@@ -58,8 +58,9 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_human(session):
-        return (session['primary_session'] is False and
-                not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
+        # return (session['primary_session'] is False and
+        #         not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
+        return not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
 
     def fit(
             self,
