@@ -15,6 +15,7 @@ class FeatureExtractor(object):
             max_categories=3,
             min_category_frequency=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
+            normalize=False,
             logger=None
     ):
         super().__init__()
@@ -44,7 +45,8 @@ class FeatureExtractor(object):
             'payload_size_log_average',
             'entropy',
             'num_requests',
-            'duration'
+            'duration',
+            'edge_entropy'
         ]
         if features is None:
             features = supported_features
@@ -62,6 +64,7 @@ class FeatureExtractor(object):
         if len(not_supported_categorical_features) > 0:
             raise RuntimeError(f'Categorical feature(s) {not_supported_features} not supported.')
 
+        self.normalize = normalize
         self.encoder = None
         self.mean = None
         self.std = None
@@ -78,6 +81,13 @@ class FeatureExtractor(object):
         requests = sorted(requests, key=lambda x: x['ts'])
         return requests
 
+    def calculate_entropy(self, counts):
+        entropy = 0.0
+        for v, count in counts.items():
+            px = float(count) / len(counts.keys())
+            entropy += - px * math.log(px, 2)
+        return entropy
+
     def calculate_features_dict(self, session):
         assert (len(session['requests']) > 0)
 
@@ -89,6 +99,7 @@ class FeatureExtractor(object):
         num_4xx = 0
         num_5xx = 0
         url_map = defaultdict(int)
+        edge_map = defaultdict(int)
         query_map = defaultdict(int)
         num_html = 0
         num_image = 0
@@ -113,6 +124,7 @@ class FeatureExtractor(object):
             payloads.append(r['payload'] + 1.0)
             slash_counts.append(len(url.split('/')) - 1)
             url_map[url] += 1
+            edge_map[r.get('edge', '')] += 1
             query_map[r['query']] += 1
             content_type = r['type']
             if content_type == 'text/html' or \
@@ -137,10 +149,6 @@ class FeatureExtractor(object):
         if session_duration == 0.0:
             session_duration = 1.0
 
-        entropy = 0.0
-        for url, count in url_map.items():
-            px = float(count) / len(url_map.keys())
-            entropy += - px * math.log(px, 2)
         features['num_requests'] = len(requests)
         features['duration'] = session_duration
         features['request_rate'] = hits / session_duration * 60
@@ -162,7 +170,8 @@ class FeatureExtractor(object):
         features['path_depth_average'] = mean_depth
         features['path_depth_std'] = np.sqrt(np.mean((slash_counts - mean_depth) ** 2))
         features['payload_size_log_average'] = np.mean(np.log(payloads))
-        features['entropy'] = entropy
+        features['entropy'] = self.calculate_entropy(url_map)
+        features['edge_entropy'] = self.calculate_entropy(edge_map)
 
         return features
 
@@ -190,7 +199,8 @@ class FeatureExtractor(object):
         self.mean = X.mean(axis=0)
         self.std = X.std(axis=0)
         self.std[self.std == 0] = 0.01
-        X = self._normalize(X)
+        if self.normalize:
+            X = self._normalize(X)
         if len(self.categorical_features) > 0:
             cat_vectors = self.get_categorical_vectors(sessions)
 
@@ -206,7 +216,8 @@ class FeatureExtractor(object):
 
     def transform(self, sessions):
         X = self.get_vectors(sessions)
-        X = self._normalize(X)
+        if self.normalize:
+            X = self._normalize(X)
         if len(self.categorical_features) > 0:
             X_cat = self.encoder.transform(self.get_categorical_vectors(sessions))
             X = np.concatenate((X, X_cat), axis=1)

@@ -333,7 +333,8 @@ class BaskervillehallSession(object):
                             'code': data['http_response_code'],
                             'type': data['content_type'],
                             'payload': data['reply_length_bytes'],
-                            'method': data['client_request_method']
+                            'method': data['client_request_method'],
+                            'edge': data.get('edge', '')
                         }
 
                         if ip in self.ips and session_id in self.ips[ip]:
