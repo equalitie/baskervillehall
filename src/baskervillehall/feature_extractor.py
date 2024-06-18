@@ -46,7 +46,8 @@ class FeatureExtractor(object):
             'entropy',
             'num_requests',
             'duration',
-            'edge_entropy'
+            'edge_entropy',
+            'static_ratio'
         ]
         if features is None:
             features = supported_features
@@ -108,6 +109,7 @@ class FeatureExtractor(object):
         slash_counts = []
         payloads = []
         num_post = 0
+        num_static = 0
 
         for i in range(len(requests)):
             r = requests[i]
@@ -141,6 +143,8 @@ class FeatureExtractor(object):
                 num_css += 1
             if r['method'] == 'POST':
                 num_post += 1
+            if r.get('static', False):
+                num_static += 1
 
         intervals = np.array(intervals)
         unique_path = float(len(url_map.keys()))
@@ -172,6 +176,7 @@ class FeatureExtractor(object):
         features['payload_size_log_average'] = np.mean(np.log(payloads))
         features['entropy'] = self.calculate_entropy(url_map)
         features['edge_entropy'] = self.calculate_entropy(edge_map)
+        features['static_ratio'] = float(num_static) / hits
 
         return features
 

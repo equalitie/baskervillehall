@@ -11,6 +11,13 @@ import json
 from datetime import datetime
 
 
+def is_static_session(session):
+    for r in session['requests']:
+        if not r.get('static', False):
+            return False
+    return True
+
+
 class BaskervillehallPredictor(object):
     def __init__(
             self,
@@ -223,7 +230,14 @@ class BaskervillehallPredictor(object):
                                 self.logger.info(f'Blocking multiple offences ip = {ip}, session = {session_id} '
                                                  f' offences = {offences[ip][session_id]} '
                                                  f'host = {host}')
-                                command = 'block_ip' if primary_session else 'block_session'
+                                if primary_session:
+                                    # if is_static_session(session):
+                                    #     command = 'block_ip_table'
+                                    # else:
+                                    #     command = 'block_ip'
+                                    command = 'block_ip'
+                                else:
+                                    command = 'block_session'
                             else:
                                 command = 'challenge_ip' if primary_session else 'challenge_session'
 

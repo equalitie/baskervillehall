@@ -334,7 +334,8 @@ class BaskervillehallSession(object):
                             'type': data['content_type'],
                             'payload': data['reply_length_bytes'],
                             'method': data['client_request_method'],
-                            'edge': data.get('edge', '')
+                            'edge': data.get('edge', ''),
+                            'static': data.get('loc_in', '') == 'static_file'
                         }
 
                         if ip in self.ips and session_id in self.ips[ip]:
