@@ -92,9 +92,12 @@ class BaskervillehallSession(object):
     def send_session(self, session):
         requests = session['requests']
         requests_formatted = []
+        passed_challenge = False
         for r in requests:
             rf = copy.deepcopy(r)
             rf['ts'] = r['ts'].strftime(self.date_time_format)
+            if r['banjax_decision'] == 'ShaChallengePassed':
+                passed_challenge = True
             requests_formatted.append(rf)
 
         requests_formatted = sorted(requests_formatted, key=lambda x: x['ts'])
@@ -109,6 +112,7 @@ class BaskervillehallSession(object):
             'duration': session['duration'],
             'primary_session': session.get('primary_session', False),
             'requests': requests_formatted,
+            'passed_challenge': passed_challenge
         }
         self.producer.send(
             self.topic_sessions,
@@ -335,7 +339,8 @@ class BaskervillehallSession(object):
                             'payload': data['reply_length_bytes'],
                             'method': data['client_request_method'],
                             'edge': data.get('edge', ''),
-                            'static': data.get('loc_in', '') == 'static_file'
+                            'static': data.get('loc_in', '') == 'static_file',
+                            'banjax_decision': data.get('banjax_decision', '')
                         }
 
                         if ip in self.ips and session_id in self.ips[ip]:

@@ -149,7 +149,8 @@ def main():
             'pending_ttl': int(os.environ.get('PENDING_TTL')),
             'maxsize_pending': int(os.environ.get('MAXSIZE_PENDING')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
-            'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT'))
+            'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
+            'whitelist_url': os.environ.get('WHITELIST_URL')
         }
 
         predictor = BaskervillehallPredictor(

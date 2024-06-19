@@ -10,6 +10,8 @@ from baskervillehall.whitelist_ip import WhitelistIP
 import json
 from datetime import datetime
 
+from baskervillehall.whitelist_url import WhitelistURL
+
 
 def is_static_session(session):
     for r in session['requests']:
@@ -43,6 +45,8 @@ class BaskervillehallPredictor(object):
             n_jobs_predict=10,
             logger=None,
             whitelist_ip=None,
+            whitelist_url=None,
+            white_list_refresh_period=5,
             debug_ip=None
     ):
         super().__init__()
@@ -74,11 +78,17 @@ class BaskervillehallPredictor(object):
         self.debug_ip = debug_ip
         self.n_jobs_predict = n_jobs_predict
         self.max_offences_before_blocking = max_offences_before_blocking
+        self.whitelist_url = whitelist_url
+        self.white_list_refresh_period = white_list_refresh_period
 
     def _is_debug_enabled(self, value):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
 
     def run(self):
+        whitelist_url = WhitelistURL(url=self.whitelist_url,
+                                     logger=self.logger,
+                                     refresh_period_in_seconds=60 * self.white_list_refresh_period)
+
         model_storage_human = ModelStorage(
             self.s3_connection,
             self.s3_path,
@@ -237,7 +247,8 @@ class BaskervillehallPredictor(object):
                                     #     command = 'block_ip'
                                     command = 'block_ip'
                                 else:
-                                    command = 'block_session'
+                                    if not whitelist_url.is_host_whitelisted_block_session(host):
+                                        command = 'block_session'
                             else:
                                 command = 'challenge_ip' if primary_session else 'challenge_session'
 

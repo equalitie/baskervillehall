@@ -5,7 +5,13 @@ from baskervillehall.json_url_reader import JsonUrlReader
 
 class WhitelistURL(object):
 
-    def __init__(self, url, whitelist_default=[], logger=None, refresh_period_in_seconds=300):
+    def __init__(
+            self,
+            url,
+            whitelist_default=[],
+            whitelist_default_block_session=[],
+            logger=None,
+            refresh_period_in_seconds=300):
         self.reader = JsonUrlReader(url=url, logger=logger, refresh_period_in_seconds=refresh_period_in_seconds)
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.domains = []
@@ -14,10 +20,15 @@ class WhitelistURL(object):
         self.stars = []
         self.double_stars = []
         self.whitelist_default = whitelist_default
+        self.whitelist_default_block_session = whitelist_default_block_session
+        self.whitelist_block_session = []
 
     def _refresh(self):
         data, fresh = self.reader.get()
         if data and fresh:
+            self.whitelist_block_session = list(set(data['no_banjax_path_urls']))
+            self.whitelist_block_session += self.whitelist_default_block_session
+
             white_list = list(set(data['white_list_urls']))
             white_list += self.whitelist_default
 
@@ -41,6 +52,10 @@ class WhitelistURL(object):
                                 self.stars.append((url[:star_pos], url[star_pos + 1:]))
                             else:
                                 self.double_stars.append((url[:star_pos], url[star_pos + 1:-1]))
+
+    def is_host_whitelisted_block_session(self, host):
+        self._refresh()
+        return host in self.whitelist_block_session
 
     def is_host_whitelisted(self, host):
         self._refresh()
