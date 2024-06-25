@@ -86,29 +86,40 @@ class BaskervillehallSession(object):
                     size > self.min_number_of_requests:
                 if 'flush_size' not in session or \
                         size - session.get('flush_size') > self.flush_increment:
-                            self.send_session(session)
-                            session['flush_size'] = size
+                    self.send_session(session)
+                    session['flush_size'] = size
 
     def send_session(self, session):
         requests = session['requests']
         requests_formatted = []
-        for r in requests:
+        passed_challenge = False
+        deflect_password = False
+        requests_sorted = sorted(requests, key=lambda x: x['ts'])
+        duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds()
+
+        for r in requests_sorted:
             rf = copy.deepcopy(r)
             rf['ts'] = r['ts'].strftime(self.date_time_format)
+            if r['banjax_decision'] == 'ShaChallengePassed':
+                passed_challenge = True
+            if (r['banjax_decision'] in
+                    ['PasswordChallengePassed', 'PasswordProtectedPriorityPass', 'PasswordChallengeRoamingPassed']):
+                deflect_password = True
             requests_formatted.append(rf)
 
-        requests_formatted = sorted(requests_formatted, key=lambda x: x['ts'])
         message = {
             'host': session['host'],
             'ua': session['ua'],
             'country': session['country'],
             'session_id': session['session_id'],
             'ip': session['ip'],
-            'start': session['start'].strftime(self.date_time_format),
-            'end': session['end'].strftime(self.date_time_format),
-            'duration': session['duration'],
+            'start': requests_formatted[0]['ts'],
+            'end': requests_formatted[-1]['ts'],
+            'duration': duration,
             'primary_session': session.get('primary_session', False),
             'requests': requests_formatted,
+            'passed_challenge': passed_challenge,
+            'deflect_password': deflect_password
         }
         self.producer.send(
             self.topic_sessions,
@@ -190,9 +201,9 @@ class BaskervillehallSession(object):
         self.flush_size_primary = dict()
 
         self.logger.info(
-            f'Garbage collector. \nips: {total_ips-deleted_ips} - {deleted_ips} deleted, \n'
-            f'sessions: {total_sessions-deleted} -  {deleted} deleted, \n'
-            f'primary: {total_primary_sessions-deleted_primary} - {deleted_primary} deleted \n')
+            f'Garbage collector. \nips: {total_ips - deleted_ips} - {deleted_ips} deleted, \n'
+            f'sessions: {total_sessions - deleted} -  {deleted} deleted, \n'
+            f'primary: {total_primary_sessions - deleted_primary} - {deleted_primary} deleted \n')
 
     def collect_primary_session(self, ip):
         primary_sessions = self.ips_primary[ip]
@@ -202,7 +213,8 @@ class BaskervillehallSession(object):
                 increment = size - self.flush_size_primary[ip]
                 if increment < self.flush_increment:
                     if self.debugging:
-                        self.logger.info(f'session size increment {increment} < {self.flush_increment}, skipping flushing...')
+                        self.logger.info(
+                            f'session size increment {increment} < {self.flush_increment}, skipping flushing...')
                     return
             self.flush_size_primary[ip] = size
 
@@ -318,7 +330,7 @@ class BaskervillehallSession(object):
 
                         if len(session_id) < 5:
                             session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits)
-                                                 for _ in range(7))
+                                                       for _ in range(7))
 
                         if self.debugging:
                             deflect_session = data['deflect_session']
@@ -333,7 +345,10 @@ class BaskervillehallSession(object):
                             'code': data['http_response_code'],
                             'type': data['content_type'],
                             'payload': data['reply_length_bytes'],
-                            'method': data['client_request_method']
+                            'method': data['client_request_method'],
+                            'edge': data.get('edge', ''),
+                            'static': data.get('loc_in', '') == 'static_file',
+                            'banjax_decision': data.get('banjax_decision', '')
                         }
 
                         if ip in self.ips and session_id in self.ips[ip]:
@@ -379,4 +394,3 @@ class BaskervillehallSession(object):
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')
-
