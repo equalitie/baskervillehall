@@ -58,8 +58,7 @@ class BaskervillehallAutoencoder(object):
         # Train the model on normal data only
         self.autoencoder.fit(vectors, vectors, epochs=200, batch_size=128)
 
-
     def transform(self, sessions):
         vectors = self.feature_extractor.transform(sessions)
-        scores = self.isolation_forest.decision_function(vectors)
+        scores = self.autoencoder.decision_function(vectors)
         return scores

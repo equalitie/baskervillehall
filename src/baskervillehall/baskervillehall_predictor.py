@@ -180,6 +180,9 @@ class BaskervillehallPredictor(object):
                         ip_whitelisted += 1
                         continue
 
+                    if session.get('deflect_password', False):
+                        continue
+
                     batch[(host, human)].append(session)
                     predicting_total += 1
 
