@@ -80,7 +80,6 @@ def main():
             'partition': partition,
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'max_session_duration': int(os.environ.get('MAX_SESSION_DURATION')),
-            'kafka_group_id': os.environ.get('GROUP_ID_SESSION'),
             'max_primary_sessions_per_ip': int(os.environ.get('MAX_PRIMARY_SESSIONS_PER_IP')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
@@ -119,7 +118,6 @@ def main():
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
             'min_dataset_size': int(os.environ.get('MIN_DATASET_SIZE')),
             'small_dataset_size': int(os.environ.get('SMALL_DATASET_SIZE')),
-            'kafka_group_id': os.environ.get('GROUP_ID_TRAINER'),
             'wait_time_minutes': int(os.environ.get('TRAINER_WAIT_TIME_MINUTES')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs': int(os.environ.get('N_JOBS'))
@@ -138,7 +136,6 @@ def main():
             'num_partitions': int(os.environ.get('NUM_PARTITIONS')),
             'topic_commands': os.environ.get('TOPIC_COMMANDS'),
             'topic_reports': os.environ.get('TOPIC_REPORTS'),
-            'kafka_group_id': os.environ.get('GROUP_ID_PREDICTOR'),
             'model_reload_in_minutes': int(os.environ.get('PREDICTOR_MODEL_RELOAD_IN_MINUTES')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),

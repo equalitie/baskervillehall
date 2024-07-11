@@ -47,7 +47,9 @@ class FeatureExtractor(object):
             'num_requests',
             'duration',
             'edge_entropy',
-            'static_ratio'
+            'static_ratio',
+            'ua_entropy',
+            'pca'
         ]
         if features is None:
             features = supported_features
@@ -101,6 +103,7 @@ class FeatureExtractor(object):
         num_5xx = 0
         url_map = defaultdict(int)
         edge_map = defaultdict(int)
+        ua_map = defaultdict(int)
         query_map = defaultdict(int)
         num_html = 0
         num_image = 0
@@ -123,10 +126,11 @@ class FeatureExtractor(object):
             if code // 100 == 5:
                 num_5xx += 1
             url = r['url']
-            payloads.append(r['payload'] + 1.0)
+            payloads.append(int(r['payload']) + 1.0)
             slash_counts.append(len(url.split('/')) - 1)
             url_map[url] += 1
             edge_map[r.get('edge', '')] += 1
+            ua_map[r.get('ua', '')] += 1
             query_map[r['query']] += 1
             content_type = r['type']
             if content_type == 'text/html' or \
@@ -176,6 +180,7 @@ class FeatureExtractor(object):
         features['payload_size_log_average'] = np.mean(np.log(payloads))
         features['entropy'] = self.calculate_entropy(url_map)
         features['edge_entropy'] = self.calculate_entropy(edge_map)
+        features['ua_entropy'] = self.calculate_entropy(ua_map)
         features['static_ratio'] = float(num_static) / hits
 
         return features

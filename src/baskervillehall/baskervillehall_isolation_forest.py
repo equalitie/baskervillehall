@@ -53,14 +53,16 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_bot_ua(ua):
-        ua_lowercase = ua.lower()
-        return 'bot' in ua_lowercase or 'spider' in ua_lowercase or 'crawl' in ua_lowercase
+        name = ua
+        if isinstance(ua, dict):
+            name = ua.get('name', '')
+        name_lowercase = name.lower()
+        return 'bot' in name_lowercase or 'spider' in name_lowercase or 'crawl' in name_lowercase
 
     @staticmethod
     def is_human(session):
-        # return (session['primary_session'] is False and
-        #         not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
-        return not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
+        return (session['primary_session'] is False and
+                not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
 
     def fit(
             self,

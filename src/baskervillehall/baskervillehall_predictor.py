@@ -28,7 +28,6 @@ class BaskervillehallPredictor(object):
             num_partitions=3,
             topic_commands='banjax_command_topic',
             topic_reports='banjax_report_topic',
-            kafka_group_id='baskervillehall_predictor',
             kafka_connection=None,
             s3_connection=None,
             s3_path='/',
@@ -39,7 +38,7 @@ class BaskervillehallPredictor(object):
             min_session_duration=20,
             min_number_of_requests=2,
             max_offences_before_blocking=3,
-            batch_size=500,
+            batch_size=100,
             pending_ttl=30,
             maxsize_pending=10000000,
             n_jobs_predict=10,
@@ -59,7 +58,6 @@ class BaskervillehallPredictor(object):
         self.partition = partition
         self.num_partitions = num_partitions
         self.topic_commands = topic_commands
-        self.kafka_group_id = kafka_group_id
         self.kafka_connection = kafka_connection
         self.s3_connection = s3_connection
         self.s3_path = s3_path
@@ -126,7 +124,6 @@ class BaskervillehallPredictor(object):
 
         consumer = KafkaConsumer(
             **self.kafka_connection,
-            group_id=self.kafka_group_id,
             max_poll_records=self.batch_size,
             fetch_max_bytes=52428800 * 5,
             max_partition_fetch_bytes=1048576 * 10,
