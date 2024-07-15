@@ -30,7 +30,7 @@ class BaskervillehallTrainer(object):
             max_samples="auto",
             contamination="auto",
             max_features=1.0,
-            bootstrap=False,
+            bootstrap=True,
             n_jobs=None,
             random_state=None,
             datetime_format='%Y-%m-%d %H:%M:%S',

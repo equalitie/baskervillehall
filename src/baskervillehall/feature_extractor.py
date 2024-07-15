@@ -5,6 +5,8 @@ from datetime import datetime
 from collections import defaultdict
 import numpy as np
 
+from baskervillehall.pca_feature import PCAFeature
+
 
 class FeatureExtractor(object):
     def __init__(
@@ -71,6 +73,7 @@ class FeatureExtractor(object):
         self.encoder = None
         self.mean = None
         self.std = None
+        self.pca = None
 
     def preprocess_requests(self, requests):
         if len(requests) == 0:
@@ -120,19 +123,19 @@ class FeatureExtractor(object):
                 intervals.append(0)
             else:
                 intervals.append((r['ts'] - requests[i - 1]['ts']).total_seconds())
-            code = r['code']
+            code = r.get('code', 200)
             if code // 100 == 4:
                 num_4xx += 1
             if code // 100 == 5:
                 num_5xx += 1
-            url = r['url']
-            payloads.append(int(r['payload']) + 1.0)
+            url = r.get('url', '/')
+            payloads.append(int(r.get('payload', 0)) + 1.0)
             slash_counts.append(len(url.split('/')) - 1)
             url_map[url] += 1
             edge_map[r.get('edge', '')] += 1
             ua_map[r.get('ua', '')] += 1
-            query_map[r['query']] += 1
-            content_type = r['type']
+            query_map[r.get('query', '')] += 1
+            content_type = r.get('type', 'text/html')
             if content_type == 'text/html' or \
                     content_type == 'text/html; charset=UTF-8' or \
                     content_type == 'text/html; charset=utf-8':
@@ -145,7 +148,7 @@ class FeatureExtractor(object):
                     content_type == 'text/css; charset=UTF-8' or \
                     content_type == 'text/css; charset=utf-8':
                 num_css += 1
-            if r['method'] == 'POST':
+            if r.get('method', 'GET') == 'POST':
                 num_post += 1
             if r.get('static', False):
                 num_static += 1
@@ -222,6 +225,12 @@ class FeatureExtractor(object):
 
             X_cat = self.encoder.transform(cat_vectors)
             X = np.concatenate((X, X_cat), axis=1)
+
+        if 'pca' in self.features:
+            self.pca = PCAFeature(logger=self.logger)
+            X_pca = self.pca.fit_transform(sessions)
+            X_pca = np.reshape(X_pca, (X_pca.shape[0], 1))
+            X = np.concatenate((X, X_pca), axis=1)
         return X
 
     def transform(self, sessions):
@@ -231,5 +240,9 @@ class FeatureExtractor(object):
         if len(self.categorical_features) > 0:
             X_cat = self.encoder.transform(self.get_categorical_vectors(sessions))
             X = np.concatenate((X, X_cat), axis=1)
+        if self.pca:
+            X_pca = self.pca.transform(sessions)
+            X_pca = np.reshape(X_pca, (X_pca.shape[0], 1))
+            X = np.concatenate((X, X_pca), axis=1)
         return X
 

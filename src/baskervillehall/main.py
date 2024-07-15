@@ -112,6 +112,7 @@ def main():
             'max_samples': int(os.environ.get('MAX_SAMPLES')),
             'contamination': float(os.environ.get('CONTAMINATION')),
             'max_features': float(os.environ.get('MAX_FEATURES')),
+            'bootstrap': os.environ.get('BOOTSTRAP') == 'True',
             'random_state': int(os.environ.get('RANDOM_STATE')),
             'model_ttl_in_minutes': int(os.environ.get('MODEL_TTL_IN_MINUTES')),
             'dataset_delay_from_now_in_minutes': int(os.environ.get('DATASET_DELAY_FROM_NOW_IN_MINUTES')),

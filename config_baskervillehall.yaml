@@ -30,6 +30,7 @@ data:
     N_ESTIMATORS: "2000"
     MAX_SAMPLES: "1024"
     MAX_FEATURES: "0.8"
+    BOOTSTRAP: "True"
     CONTAMINATION: "0.03"
     N_JOBS: "1"
     RANDOM_STATE: "777"
