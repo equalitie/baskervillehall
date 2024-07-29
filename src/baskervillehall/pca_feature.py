@@ -7,6 +7,17 @@ import tensorflow_text as text
 from sklearn.decomposition import PCA
 from urllib.parse import urlparse, unquote
 from collections import OrderedDict
+import logging
+import numpy as np
+import re
+
+import tensorflow as tf
+import tensorflow_text as text
+from sklearn.decomposition import PCA
+from urllib.parse import urlparse, unquote
+from collections import OrderedDict
+
+from baskervillehall.ebmedding_model import EmbeddingModel
 
 
 def urls_to_text(urls):
@@ -56,159 +67,29 @@ class PCAFeature(object):
         self.projector = None
         self.url_index = OrderedDict()
         self.url_vectors = None
+        self.bert_model_name = bert_model_name
 
         self.target_explained_variance = target_explained_variance
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
 
-        map_name_to_handle = {
-            'bert_en_uncased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/3',
-            'bert_en_cased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_cased_L-12_H-768_A-12/3',
-            'bert_multi_cased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_multi_cased_L-12_H-768_A-12/3',
-            'small_bert/bert_en_uncased_L-2_H-128_A-2':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-2_H-128_A-2/1',
-            'small_bert/bert_en_uncased_L-2_H-256_A-4':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-2_H-256_A-4/1',
-            'small_bert/bert_en_uncased_L-2_H-512_A-8':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-2_H-512_A-8/1',
-            'small_bert/bert_en_uncased_L-2_H-768_A-12':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-2_H-768_A-12/1',
-            'small_bert/bert_en_uncased_L-4_H-128_A-2':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-4_H-128_A-2/1',
-            'small_bert/bert_en_uncased_L-4_H-256_A-4':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-4_H-256_A-4/1',
-            'small_bert/bert_en_uncased_L-4_H-512_A-8':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-4_H-512_A-8/1',
-            'small_bert/bert_en_uncased_L-4_H-768_A-12':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-4_H-768_A-12/1',
-            'small_bert/bert_en_uncased_L-6_H-128_A-2':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-6_H-128_A-2/1',
-            'small_bert/bert_en_uncased_L-6_H-256_A-4':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-6_H-256_A-4/1',
-            'small_bert/bert_en_uncased_L-6_H-512_A-8':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-6_H-512_A-8/1',
-            'small_bert/bert_en_uncased_L-6_H-768_A-12':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-6_H-768_A-12/1',
-            'small_bert/bert_en_uncased_L-8_H-128_A-2':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-8_H-128_A-2/1',
-            'small_bert/bert_en_uncased_L-8_H-256_A-4':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-8_H-256_A-4/1',
-            'small_bert/bert_en_uncased_L-8_H-512_A-8':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-8_H-512_A-8/1',
-            'small_bert/bert_en_uncased_L-8_H-768_A-12':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-8_H-768_A-12/1',
-            'small_bert/bert_en_uncased_L-10_H-128_A-2':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-10_H-128_A-2/1',
-            'small_bert/bert_en_uncased_L-10_H-256_A-4':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-10_H-256_A-4/1',
-            'small_bert/bert_en_uncased_L-10_H-512_A-8':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-10_H-512_A-8/1',
-            'small_bert/bert_en_uncased_L-10_H-768_A-12':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-10_H-768_A-12/1',
-            'small_bert/bert_en_uncased_L-12_H-128_A-2':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-12_H-128_A-2/1',
-            'small_bert/bert_en_uncased_L-12_H-256_A-4':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-12_H-256_A-4/1',
-            'small_bert/bert_en_uncased_L-12_H-512_A-8':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-12_H-512_A-8/1',
-            'small_bert/bert_en_uncased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-12_H-768_A-12/1',
-            'albert_en_base':
-                'https://tfhub.dev/tensorflow/albert_en_base/2',
-            'electra_small':
-                'https://tfhub.dev/google/electra_small/2',
-            'electra_base':
-                'https://tfhub.dev/google/electra_base/2',
-            'experts_pubmed':
-                'https://tfhub.dev/google/experts/bert/pubmed/2',
-            'experts_wiki_books':
-                'https://tfhub.dev/google/experts/bert/wiki_books/2',
-            'talking-heads_base':
-                'https://tfhub.dev/tensorflow/talkheads_ggelu_bert_en_base/1',
-        }
+        self.bert_preprocess_model = None
+        self.bert_model = None
 
-        map_model_to_preprocess = {
-            'bert_en_uncased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'bert_en_cased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_cased_preprocess/3',
-            'small_bert/bert_en_uncased_L-2_H-128_A-2':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-2_H-256_A-4':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-2_H-512_A-8':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-2_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-4_H-128_A-2':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-4_H-256_A-4':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-4_H-512_A-8':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-4_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-6_H-128_A-2':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-6_H-256_A-4':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-6_H-512_A-8':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-6_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-8_H-128_A-2':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-8_H-256_A-4':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-8_H-512_A-8':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-8_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-10_H-128_A-2':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-10_H-256_A-4':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-10_H-512_A-8':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-10_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-12_H-128_A-2':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-12_H-256_A-4':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-12_H-512_A-8':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'small_bert/bert_en_uncased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'bert_multi_cased_L-12_H-768_A-12':
-                'https://tfhub.dev/tensorflow/bert_multi_cased_preprocess/3',
-            'albert_en_base':
-                'https://tfhub.dev/tensorflow/albert_en_preprocess/3',
-            'electra_small':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'electra_base':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'experts_pubmed':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'experts_wiki_books':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-            'talking-heads_base':
-                'https://tfhub.dev/tensorflow/bert_en_uncased_preprocess/3',
-        }
+        self.create_embeddings()
 
-        tfhub_handle_encoder = map_name_to_handle[bert_model_name]
-        tfhub_handle_preprocess = map_model_to_preprocess[bert_model_name]
+    def clear_embeddings(self):
+        self.bert_preprocess_model = None
+        self.bert_model = None
 
-        self.bert_preprocess_model = hub.KerasLayer(tfhub_handle_preprocess)
-        self.bert_model = hub.KerasLayer(tfhub_handle_encoder)
+    def create_embeddings(self):
+        self.bert_preprocess_model, self.bert_model = EmbeddingModel(self.bert_model_name, self.logger).get_models()
 
     def texts_to_vec(self, texts):
         self.logger.info('Tokenizing...')
         text_preprocessed = self.bert_preprocess_model(texts)
         self.logger.info('Embedding...')
         bert_results = self.bert_model(text_preprocessed)
+        self.logger.info('Embedding done.')
         return bert_results["pooled_output"]
 
     def urls_to_vec(self, urls):
@@ -255,6 +136,7 @@ class PCAFeature(object):
         return Z
 
     def fit_transform(self, sessions):
+        self.create_embeddings()
         Y = self.create_dataset(sessions)
 
         self.logger.info('Normalizing...')
@@ -294,6 +176,7 @@ class PCAFeature(object):
         return (Ya ** 2).mean(axis=0)
 
     def transform(self, sessions):
+        self.create_embeddings()
         Y = self.create_dataset(sessions)
         Z = self.normalize(Y)
         return self._score_vectors(Z)

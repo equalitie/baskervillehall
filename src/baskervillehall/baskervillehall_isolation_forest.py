@@ -14,6 +14,7 @@ class BaskervillehallIsolationForest(object):
             warmup_period=5,
             features=None,
             categorical_features=None,
+            pca_feature=False,
             max_categories=3,
             min_category_frequency=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
@@ -30,6 +31,7 @@ class BaskervillehallIsolationForest(object):
             warmup_period=warmup_period,
             features=features,
             categorical_features=categorical_features,
+            pca_feature=pca_feature,
             max_categories=max_categories,
             min_category_frequency=min_category_frequency,
             datetime_format=datetime_format,
@@ -44,6 +46,9 @@ class BaskervillehallIsolationForest(object):
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.isolation_forest = None
+
+    def clear_embeddings(self):
+        self.feature_extractor.clear_embeddings()
 
     def set_n_estimators(self, n_estimators):
         self.n_estimators = n_estimators

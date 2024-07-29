@@ -17,6 +17,7 @@ class BaskervillehallTrainer(object):
             warmup_period=5,
             features=None,
             categorical_features=None,
+            pca_feature=False,
             max_categories=3,
             min_category_frequency=10,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
@@ -25,7 +26,6 @@ class BaskervillehallTrainer(object):
             min_session_duration=20,
             min_number_of_requests=2,
             accepted_contamination=0.1,
-
             n_estimators=500,
             max_samples="auto",
             contamination="auto",
@@ -60,6 +60,7 @@ class BaskervillehallTrainer(object):
         self.warmup_period = warmup_period
         self.features = features
         self.categorical_features = categorical_features
+        self.pca_feature = pca_feature
         self.topic_sessions = topic_sessions
         self.partition = partition
         self.num_sessions = num_sessions
@@ -102,6 +103,7 @@ class BaskervillehallTrainer(object):
             warmup_period=self.warmup_period,
             features=self.features,
             categorical_features=self.categorical_features,
+            pca_feature=self.pca_feature,
             max_categories=self.max_categories,
             min_category_frequency=self.min_category_frequency,
             datetime_format=self.datetime_format,
@@ -137,6 +139,7 @@ class BaskervillehallTrainer(object):
         model.fit(sessions)
 
         self.logger.info(f'@@@ Saving model for {host}, human={human}...')
+        model.clear_embeddings()
         model_io.save(model, self.s3_path, host, human)
 
     def run(self):

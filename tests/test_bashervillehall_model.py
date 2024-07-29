@@ -35,7 +35,33 @@ class TestModel(unittest.TestCase):
                     'payload': 100
                 } for i in range(10)]
             })
-        model = BaskervillehallIsolationForest()
+        model = BaskervillehallIsolationForest(
+            features=[
+                'request_rate',
+                'post_rate',
+                'request_interval_average',
+                'request_interval_std',
+                'response4xx_to_request_ratio',
+                'response5xx_to_request_ratio',
+                'top_page_to_request_ratio',
+                'unique_path_rate',
+                'unique_path_to_request_ratio',
+                'unique_query_rate',
+                'unique_query_to_unique_path_ratio',
+                'image_to_html_ratio',
+                'js_to_html_ratio',
+                'css_to_html_ratio',
+                'path_depth_average',
+                'path_depth_std',
+                'payload_size_log_average',
+                'entropy',
+                'num_requests',
+                'duration',
+                'edge_entropy',
+                'static_ratio',
+                'ua_entropy',
+            ]
+        )
         model.fit(sessions)
 
         scores = model.transform(sessions)

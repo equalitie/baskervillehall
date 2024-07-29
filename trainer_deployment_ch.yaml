@@ -33,7 +33,7 @@ spec:
         command:
           - python
         args:
-          - /usr/local/baskervillehall/src/baskervillehall/main.py
+          - /usr/bin/baskervillehall/src/baskervillehall/main.py
           - train
         envFrom:
           - configMapRef:

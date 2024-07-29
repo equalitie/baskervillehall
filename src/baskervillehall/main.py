@@ -100,6 +100,7 @@ def main():
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'features': os.environ.get('FEATURES').split(','),
             'categorical_features': os.environ.get('CATEGORICAL_FEATURES').split(','),
+            'pca_feature': os.environ.get('PCA_FEATURE') == 'True',
             'max_categories': int(os.environ.get('MAX_CATEGORIES')),
             'min_category_frequency': int(os.environ.get('MIN_CATEGORY_FREQUENCY')),
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
