@@ -17,21 +17,20 @@ class BaskervillehallTrainer(object):
             warmup_period=5,
             features=None,
             categorical_features=None,
+            pca_feature=False,
             max_categories=3,
             min_category_frequency=10,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             partition=0,
-            kafka_group_id='baskervillehall_trainer',
             num_sessions=10000,
             min_session_duration=20,
             min_number_of_requests=2,
             accepted_contamination=0.1,
-
             n_estimators=500,
             max_samples="auto",
             contamination="auto",
             max_features=1.0,
-            bootstrap=False,
+            bootstrap=True,
             n_jobs=None,
             random_state=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
@@ -45,7 +44,7 @@ class BaskervillehallTrainer(object):
             min_dataset_size=100,
             small_dataset_size=500,
             kafka_timeout_ms=1000,
-            kafka_max_size=5000,
+            kafka_max_size=200,
             wait_time_minutes=5,
             logger=None
     ):
@@ -61,6 +60,7 @@ class BaskervillehallTrainer(object):
         self.warmup_period = warmup_period
         self.features = features
         self.categorical_features = categorical_features
+        self.pca_feature = pca_feature
         self.topic_sessions = topic_sessions
         self.partition = partition
         self.num_sessions = num_sessions
@@ -81,7 +81,6 @@ class BaskervillehallTrainer(object):
         self.model_ttl_in_minutes = model_ttl_in_minutes
         self.train_batch_size = train_batch_size
         self.kafka_connection = kafka_connection
-        self.kafka_group_id = kafka_group_id
         self.kafka_timeout_ms = kafka_timeout_ms
         self.kafka_max_size = kafka_max_size
         self.s3_connection = s3_connection
@@ -104,6 +103,7 @@ class BaskervillehallTrainer(object):
             warmup_period=self.warmup_period,
             features=self.features,
             categorical_features=self.categorical_features,
+            pca_feature=self.pca_feature,
             max_categories=self.max_categories,
             min_category_frequency=self.min_category_frequency,
             datetime_format=self.datetime_format,
@@ -131,21 +131,21 @@ class BaskervillehallTrainer(object):
 
         if len(sessions) <= self.small_dataset_size:
             model.set_n_estimators(len(self.features))
-            model.set_contamination(self.contamination * 2)
+            new_contamination = self.contamination * 2
+            if new_contamination > 0.5:
+                new_contamination = 0.5
+            model.set_contamination(new_contamination)
 
         model.fit(sessions)
 
         self.logger.info(f'@@@ Saving model for {host}, human={human}...')
+        model.clear_embeddings()
         model_io.save(model, self.s3_path, host, human)
 
     def run(self):
-
-
         try:
             consumer = KafkaConsumer(
-                **self.kafka_connection,
-                auto_offset_reset='earliest',
-                group_id=self.kafka_group_id
+                **self.kafka_connection
             )
 
             host_selector = HostSelector(
@@ -156,6 +156,7 @@ class BaskervillehallTrainer(object):
             self.logger.info(f'Starting training on topic {self.topic_sessions}')
 
             consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
+            consumer.seek_to_beginning()
             while True:
                 self.logger.info(f'Getting next hosts... batch={self.train_batch_size}')
                 time_now = int(time.time())
@@ -175,7 +176,6 @@ class BaskervillehallTrainer(object):
                         'human': []
                     } for host in hosts
                 }
-                self.logger.info(batch)
 
                 while not batch_complete:
                     raw_messages = consumer.poll(timeout_ms=self.kafka_timeout_ms, max_records=self.kafka_max_size)
@@ -194,7 +194,6 @@ class BaskervillehallTrainer(object):
 
                             session = json.loads(message.value.decode("utf-8"))
                             host = message.key.decode("utf-8")
-
                             if host not in batch:
                                 continue
                             if len(batch[host]['bot']) >= self.num_sessions and \
@@ -206,17 +205,25 @@ class BaskervillehallTrainer(object):
                                         batch_complete = False
                                         break
                                 if batch_complete:
+                                    self.logger.info('x1')
                                     break
                                 else:
                                     continue
 
-                            if len(batch[host]['bot']) < self.num_sessions and \
-                                    not BaskervillehallIsolationForest.is_human(session):
-                                batch[host]['bot'].append(session)
-                            elif len(batch[host]['human']) < self.num_sessions and \
-                                    BaskervillehallIsolationForest.is_human(session):
-                                if not session['primary_session']:
+                            # self.logger.info(f'is_human={BaskervillehallIsolationForest.is_human(session)}, '
+                            #                  f'primary_session={session["primary_session"]}'
+                            #                  f'session_id={session["session_id"]} ua={session["ua"]}'
+                            #                  f'end={session["end"]}')
+                            if BaskervillehallIsolationForest.is_human(session):
+                                if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(session)
+                            else:
+                                if len(batch[host]['bot']) < self.num_sessions:
+                                    batch[host]['bot'].append(session)
+
+                self.logger.info('The new batch:')
+                for host, v in batch.items():
+                    self.logger.info(f'---{host}: humans={len(v["human"])}, bots={len(v["bot"])}')
                 for host, v in batch.items():
                     self.train_and_save_model(v['human'], host, human=True)
                     self.train_and_save_model(v['bot'], host, human=False)

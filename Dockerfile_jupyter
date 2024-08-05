@@ -13,7 +13,7 @@ COPY ./README.md /usr/bin/baskervillehall/README.md
 
 USER root
 WORKDIR /usr/bin/baskervillehall
-RUN pip install .
+RUN pip install -e .
 RUN chmod 777 /usr/bin/baskervillehall
 USER jovyan
 WORKDIR /home/jovyan

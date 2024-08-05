@@ -2,6 +2,7 @@ import unittest
 import random
 import numpy as np
 import os
+from datetime import datetime, timedelta
 
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.main import get_logger
@@ -14,35 +15,30 @@ class TestModel(unittest.TestCase):
 
     def test_model(self):
         random.seed(777)
-        num_records = 1000
-
-        num_features = 10
-
-        categories = [
-            ['a','b','c','d','e','f'],
-            ['alfa', 'betta', 'gamma']
-        ]
-
-        features = []
-        categorical_features = []
-
-        for ip in range(num_records):
-            features.append([np.random.normal(loc=float(i)) for i in range(num_features)])
-            categorical_features.append([categories[i][random.randint(0, len(categories[i])-1)] for i in range(len(categories))])
-
-        features = np.array(features)
-        model = BaskervillehallIsolationForest()
-        model.fit(features=features, feature_names=[], categorical_features=categorical_features)
-
-        test_features = []
-        test_categorical_features = []
-        for ip in range(10):
-            test_features.append([np.random.normal(loc=float(100)) for i in range(num_features)])
-            test_categorical_features.append([categories[i][0] for i in range(len(categories))])
-        test_features = np.array(test_features)
-
-        scores = model.score(test_features, test_categorical_features)
-        assert (len(scores[scores < 0]) == len(scores))
+        num_records = 10000
+        sessions = []
+        urls = [f'{i}.html' for i in range(30)]
+        ts = datetime.now()
+        for session_id in range(num_records):
+            sessions.append({
+                'session_id': session_id,
+                'country': 'UK',
+                'duration': 30,
+                'primary_session': False,
+                'requests': [{
+                    'ts': ts + timedelta(seconds=i * 3),
+                    'code': 200,
+                    'url': urls[random.randrange(5)],
+                    'query': f'{i}',
+                    'type': 'text/html',
+                    'payload': 100
+                } for i in range(10)]
+            })
+        model = BaskervillehallIsolationForest(
+            pca_feature=True
+        )
+        model.fit(sessions)
+        scores = model.transform(sessions)
 
         s3_storage = 'tests'
         host = 'host1'
@@ -53,8 +49,9 @@ class TestModel(unittest.TestCase):
             's3_region': os.environ.get('S3_REGION'),
         }
         io = ModelIO(**s3_connection)
-        io.save(model, s3_storage, host)
+        model.clear_embeddings()
+        io.save(model, s3_storage, host, human=True)
 
-        model1 = io.load(s3_storage, host)
-        scores1 = model1.score(test_features, test_categorical_features)
-        assert (len(scores1[scores1 < 0]) == len(scores1))
+        model1 = io.load(s3_storage, host, human=True)
+        scores1 = model1.transform(sessions)
+        assert scores1[0] == scores[0]

@@ -1,9 +1,11 @@
 import logging
 import math
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OrdinalEncoder
 from datetime import datetime
 from collections import defaultdict
 import numpy as np
+
+from baskervillehall.pca_feature import PCAFeature
 
 
 class FeatureExtractor(object):
@@ -11,6 +13,7 @@ class FeatureExtractor(object):
             self,
             warmup_period=5,
             features=None,
+            pca_feature=False,
             categorical_features=None,
             max_categories=3,
             min_category_frequency=10,
@@ -46,9 +49,11 @@ class FeatureExtractor(object):
             'entropy',
             'num_requests',
             'duration',
-            'edge_entropy',
-            'static_ratio'
+            'edge_count',
+            'static_ratio',
+            'ua_count',
         ]
+        self.pca_feature = pca_feature
         if features is None:
             features = supported_features
         self.features = features
@@ -65,10 +70,19 @@ class FeatureExtractor(object):
         if len(not_supported_categorical_features) > 0:
             raise RuntimeError(f'Categorical feature(s) {not_supported_features} not supported.')
 
+        if self.pca_feature:
+            self.pca = PCAFeature(logger=self.logger)
+        else:
+            self.pca = None
+
         self.normalize = normalize
         self.encoder = None
         self.mean = None
         self.std = None
+
+    def clear_embeddings(self):
+        if self.pca_feature:
+            self.pca.clear_embeddings()
 
     def preprocess_requests(self, requests):
         if len(requests) == 0:
@@ -90,7 +104,7 @@ class FeatureExtractor(object):
         return entropy
 
     def calculate_features_dict(self, session):
-        assert (len(session['requests']) > 0)
+        # assert (len(session['requests']) > 0)
 
         features = {}
         requests = self.preprocess_requests(session['requests'])
@@ -101,6 +115,7 @@ class FeatureExtractor(object):
         num_5xx = 0
         url_map = defaultdict(int)
         edge_map = defaultdict(int)
+        ua_map = defaultdict(int)
         query_map = defaultdict(int)
         num_html = 0
         num_image = 0
@@ -117,18 +132,19 @@ class FeatureExtractor(object):
                 intervals.append(0)
             else:
                 intervals.append((r['ts'] - requests[i - 1]['ts']).total_seconds())
-            code = r['code']
+            code = r.get('code', 200)
             if code // 100 == 4:
                 num_4xx += 1
             if code // 100 == 5:
                 num_5xx += 1
-            url = r['url']
-            payloads.append(r['payload'] + 1.0)
+            url = r.get('url', '/')
+            payloads.append(int(r.get('payload', 0)) + 1.0)
             slash_counts.append(len(url.split('/')) - 1)
             url_map[url] += 1
             edge_map[r.get('edge', '')] += 1
-            query_map[r['query']] += 1
-            content_type = r['type']
+            ua_map[r.get('ua', '')] += 1
+            query_map[r.get('query', '')] += 1
+            content_type = r.get('type', 'text/html')
             if content_type == 'text/html' or \
                     content_type == 'text/html; charset=UTF-8' or \
                     content_type == 'text/html; charset=utf-8':
@@ -141,7 +157,7 @@ class FeatureExtractor(object):
                     content_type == 'text/css; charset=UTF-8' or \
                     content_type == 'text/css; charset=utf-8':
                 num_css += 1
-            if r['method'] == 'POST':
+            if r.get('method', 'GET') == 'POST':
                 num_post += 1
             if r.get('static', False):
                 num_static += 1
@@ -172,10 +188,11 @@ class FeatureExtractor(object):
         features['css_to_html_ratio'] = float(num_css) / num_html if num_html > 0 else 10.0
         mean_depth = np.mean(slash_counts)
         features['path_depth_average'] = mean_depth
-        features['path_depth_std'] = np.sqrt(np.mean((slash_counts - mean_depth) ** 2))
+        features['path_depth_std'] = np.sqrt(np.mean((len(slash_counts) - mean_depth) ** 2))
         features['payload_size_log_average'] = np.mean(np.log(payloads))
         features['entropy'] = self.calculate_entropy(url_map)
-        features['edge_entropy'] = self.calculate_entropy(edge_map)
+        features['edge_count'] = len(edge_map.keys())
+        features['ua_count'] = len(ua_map.keys())
         features['static_ratio'] = float(num_static) / hits
 
         return features
@@ -199,32 +216,56 @@ class FeatureExtractor(object):
     def _normalize(self, X):
         return (X - self.mean) / self.std
 
+    def feature_columns(self):
+        res = []
+        res += self.features
+        if self.pca_feature:
+            res.append('pca')
+        res += self.categorical_features
+        return res
+
     def fit_transform(self, sessions):
         X = self.get_vectors(sessions)
         self.mean = X.mean(axis=0)
         self.std = X.std(axis=0)
         self.std[self.std == 0] = 0.01
+
+        if self.pca_feature:
+            X_pca = self.pca.fit_transform(sessions)
+            X_pca = np.reshape(X_pca, (X_pca.shape[0], 1))
+            X = np.concatenate((X, X_pca), axis=1)
+
         if self.normalize:
             X = self._normalize(X)
+
         if len(self.categorical_features) > 0:
             cat_vectors = self.get_categorical_vectors(sessions)
 
-            self.encoder = OneHotEncoder(sparse_output=False,
-                                         handle_unknown='ignore',
-                                         min_frequency=self.min_category_frequency,
-                                         max_categories=self.max_categories)
+            self.encoder = OrdinalEncoder(
+                handle_unknown='use_encoded_value',
+                unknown_value=10000
+            )
             self.encoder.fit(cat_vectors)
-
             X_cat = self.encoder.transform(cat_vectors)
             X = np.concatenate((X, X_cat), axis=1)
+
         return X
 
     def transform(self, sessions):
         X = self.get_vectors(sessions)
+
+        if self.pca_feature:
+            assert self.pca
+            X_pca = self.pca.transform(sessions)
+            X_pca = np.reshape(X_pca, (X_pca.shape[0], 1))
+            X = np.concatenate((X, X_pca), axis=1)
+
         if self.normalize:
             X = self._normalize(X)
+
         if len(self.categorical_features) > 0:
             X_cat = self.encoder.transform(self.get_categorical_vectors(sessions))
             X = np.concatenate((X, X_cat), axis=1)
+
         return X
 

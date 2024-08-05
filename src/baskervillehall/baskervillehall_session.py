@@ -16,7 +16,6 @@ class BaskervillehallSession(object):
             topic_weblogs='BASKERVILLEHALL_WEBLOGS',
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             partition=0,
-            kafka_group_id='baskervillehall_session',
             kafka_connection={'bootstrap_servers': 'localhost:9092'},
             flush_increment=10,
             min_session_duration=5,
@@ -39,7 +38,6 @@ class BaskervillehallSession(object):
         self.topic_weblogs = topic_weblogs
         self.topic_sessions = topic_sessions
         self.partition = partition
-        self.kafka_group_id = kafka_group_id
         self.kafka_connection = kafka_connection
         self.session_inactivity = session_inactivity
         self.flush_increment = flush_increment
@@ -273,8 +271,7 @@ class BaskervillehallSession(object):
 
         try:
             consumer = KafkaConsumer(
-                **self.kafka_connection,
-                group_id=self.kafka_group_id
+                **self.kafka_connection
             )
 
             self.producer = KafkaProducer(**self.kafka_connection)
@@ -323,10 +320,19 @@ class BaskervillehallSession(object):
                                 self.logger.info(f'host {host} url {url} is whitelisted')
                             continue
 
-                        ua = data.get('client_ua', {})
+                        if 'client_ua' in data:
+                            ua = data['client_ua']
+                        else:
+                            ua = data.get('client_user_agent', '')
+
                         country = data.get('geoip', {}).get('country_code2', '')
 
-                        session_id = data.get('deflect_session', '')
+                        session_id = ''
+                        if 'deflect_session' in data:
+                            session_id = data.get('deflect_session', '')
+                        else:
+                            if 'cookies' in data:
+                                session_id = data['cookies'].get('sessionCookie', '')
 
                         if len(session_id) < 5:
                             session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits)
@@ -344,7 +350,7 @@ class BaskervillehallSession(object):
                             'query': data['querystring'],
                             'code': data['http_response_code'],
                             'type': data['content_type'],
-                            'payload': data['reply_length_bytes'],
+                            'payload': int(data['reply_length_bytes']),
                             'method': data['client_request_method'],
                             'edge': data.get('edge', ''),
                             'static': data.get('loc_in', '') == 'static_file',

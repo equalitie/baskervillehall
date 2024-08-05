@@ -14,6 +14,7 @@ class BaskervillehallIsolationForest(object):
             warmup_period=5,
             features=None,
             categorical_features=None,
+            pca_feature=False,
             max_categories=3,
             min_category_frequency=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
@@ -30,6 +31,7 @@ class BaskervillehallIsolationForest(object):
             warmup_period=warmup_period,
             features=features,
             categorical_features=categorical_features,
+            pca_feature=pca_feature,
             max_categories=max_categories,
             min_category_frequency=min_category_frequency,
             datetime_format=datetime_format,
@@ -45,6 +47,9 @@ class BaskervillehallIsolationForest(object):
         self.random_state = random_state
         self.isolation_forest = None
 
+    def clear_embeddings(self):
+        self.feature_extractor.clear_embeddings()
+
     def set_n_estimators(self, n_estimators):
         self.n_estimators = n_estimators
 
@@ -53,14 +58,16 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_bot_ua(ua):
-        ua_lowercase = ua.lower()
-        return 'bot' in ua_lowercase or 'spider' in ua_lowercase or 'crawl' in ua_lowercase
+        name = ua
+        if isinstance(ua, dict):
+            name = ua.get('name', '')
+        name_lowercase = name.lower()
+        return 'bot' in name_lowercase or 'spider' in name_lowercase or 'crawl' in name_lowercase
 
     @staticmethod
     def is_human(session):
-        # return (session['primary_session'] is False and
-        #         not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
-        return not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
+        return (session['primary_session'] is False and
+                not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
 
     def fit(
             self,
