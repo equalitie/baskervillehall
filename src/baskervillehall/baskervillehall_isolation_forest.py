@@ -69,6 +69,24 @@ class BaskervillehallIsolationForest(object):
         return (session['primary_session'] is False and
                 not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
 
+    @staticmethod
+    def is_bad_bot(session):
+        if session['primary_session'] is False:
+            return False
+
+        if not BaskervillehallIsolationForest.is_bot_ua(session):
+            return True
+
+        # a legit bot does not change its user agent
+        uas = set()
+        for r in session['requests']:
+            ua = r.get('ua', '')
+            if len(ua) < 5:
+                return True
+            uas.add(ua)
+        if len(uas) > 1:
+            return True
+
     def fit(
             self,
             sessions,

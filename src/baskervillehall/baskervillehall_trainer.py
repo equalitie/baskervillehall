@@ -218,8 +218,9 @@ class BaskervillehallTrainer(object):
                                 if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(session)
                             else:
-                                if len(batch[host]['bot']) < self.num_sessions:
-                                    batch[host]['bot'].append(session)
+                                if not BaskervillehallIsolationForest.is_bad_bot(session):
+                                    if len(batch[host]['bot']) < self.num_sessions:
+                                        batch[host]['bot'].append(session)
 
                 self.logger.info('The new batch:')
                 for host, v in batch.items():

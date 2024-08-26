@@ -29,7 +29,7 @@ spec:
             memory: "4Gi"
             cpu: "2000m"
           limits:
-            memory: "8Gi"
+            memory: "14Gi"
             cpu: "3000m"
         command:
           - python

@@ -98,31 +98,32 @@ class PCAFeature(object):
     def embed_urls(self, sessions):
         index = 0
         extra_urls = []
+        url_index_extra = OrderedDict()
         for s in sessions:
             for r in s['requests']:
                 url = r['url']
                 if url not in self.url_index:
                     extra_urls.append(url)
-                    self.url_index[url] = index
+                    url_index_extra[url] = index
                     index += 1
 
-        urls_extra_vectors = self.urls_to_vec(extra_urls)
+        url_vectors_extra = self.urls_to_vec(extra_urls)
+        return url_index_extra, url_vectors_extra
 
-        if self.url_vectors is None:
-            self.url_vectors = urls_extra_vectors
+    def get_vector(self, url, url_index_extra, url_vectors_extra):
+        if url in self.url_index:
+            return self.url_vectors[self.url_index[url]]
         else:
-            self.url_vectors = tf.concat([self.url_vectors, urls_extra_vectors], 0)
-
-    def get_vector(self, url):
-        return self.url_vectors[self.url_index[url]]
+            assert url in url_index_extra
+            return url_vectors_extra[url_index_extra[url]]
 
     def create_dataset(self, sessions):
-        self.embed_urls(sessions)
+        url_index_extra, url_vectors_extra = self.embed_urls(sessions)
         X = []
         for s in sessions:
             vector_average = []
             for r in s['requests']:
-                vector_average.append(self.get_vector(r['url']))
+                vector_average.append(self.get_vector(r['url'], url_index_extra, url_vectors_extra))
             X.append(np.average(vector_average, axis=0))
         return np.array(X)
 

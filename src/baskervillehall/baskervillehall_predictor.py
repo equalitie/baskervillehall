@@ -203,6 +203,9 @@ class BaskervillehallPredictor(object):
                     for i in range(scores.shape[0]):
                         score = scores[i]
                         prediction = score < 0
+                        if BaskervillehallIsolationForest.is_bad_bot(session):
+                            prediction = True
+
                         session = sessions[i]
                         debug = self._is_debug_enabled(session)
                         ip = session['ip']
