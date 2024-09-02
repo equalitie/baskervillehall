@@ -149,7 +149,8 @@ def main():
             'maxsize_pending': int(os.environ.get('MAXSIZE_PENDING')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
-            'whitelist_url': os.environ.get('WHITELIST_URL')
+            'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True'
         }
 
         predictor = BaskervillehallPredictor(

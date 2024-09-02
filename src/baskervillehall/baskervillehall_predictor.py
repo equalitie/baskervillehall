@@ -46,6 +46,7 @@ class BaskervillehallPredictor(object):
             whitelist_ip=None,
             whitelist_url=None,
             white_list_refresh_period=5,
+            bad_bot_challenge=True,
             debug_ip=None
     ):
         super().__init__()
@@ -78,6 +79,7 @@ class BaskervillehallPredictor(object):
         self.max_offences_before_blocking = max_offences_before_blocking
         self.whitelist_url = whitelist_url
         self.white_list_refresh_period = white_list_refresh_period
+        self.bad_bot_challenge = bad_bot_challenge
 
     def _is_debug_enabled(self, value):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
@@ -203,7 +205,8 @@ class BaskervillehallPredictor(object):
                     for i in range(scores.shape[0]):
                         score = scores[i]
                         prediction = score < 0
-                        if BaskervillehallIsolationForest.is_bad_bot(session):
+
+                        if self.bad_bot_challenge and BaskervillehallIsolationForest.is_bad_bot(session):
                             prediction = True
 
                         session = sessions[i]
