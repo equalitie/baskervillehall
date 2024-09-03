@@ -3,6 +3,7 @@ import urllib.parse
 import random
 import string
 
+from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -117,7 +118,9 @@ class BaskervillehallSession(object):
             'primary_session': session.get('primary_session', False),
             'requests': requests_formatted,
             'passed_challenge': passed_challenge,
-            'deflect_password': deflect_password
+            'deflect_password': deflect_password,
+            'human': BaskervillehallIsolationForest.is_human(session),
+            'bad_bot': BaskervillehallIsolationForest.is_bad_bot(session)
         }
         self.producer.send(
             self.topic_sessions,

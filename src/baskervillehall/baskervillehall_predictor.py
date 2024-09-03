@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 
-from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
+from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest, ModelType
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
@@ -92,7 +92,7 @@ class BaskervillehallPredictor(object):
         model_storage_human = ModelStorage(
             self.s3_connection,
             self.s3_path,
-            human=True,
+            model_type=ModelType.HUMAN,
             reload_in_minutes=self.model_reload_in_minutes,
             logger=self.logger)
         model_storage_human.start()
@@ -100,7 +100,15 @@ class BaskervillehallPredictor(object):
         model_storage_bot = ModelStorage(
             self.s3_connection,
             self.s3_path,
-            human=False,
+            model_type=ModelType.BOT,
+            reload_in_minutes=self.model_reload_in_minutes,
+            logger=self.logger)
+        model_storage_bot.start()
+
+        model_storage_generic = ModelStorage(
+            self.s3_connection,
+            self.s3_path,
+            model_type=ModelType.GENERIC,
             reload_in_minutes=self.model_reload_in_minutes,
             logger=self.logger)
         model_storage_bot.start()
@@ -190,8 +198,7 @@ class BaskervillehallPredictor(object):
                     model = model_storage_human.get_model(host) if human else\
                         model_storage_bot.get_model(host)
                     if model is None:
-                        model = model_storage_bot.get_model(host) if human else \
-                            model_storage_human.get_model(host)
+                        model = model_storage_generic.get_model(host)
 
                     if model is None:
                         continue

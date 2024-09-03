@@ -51,7 +51,7 @@ class FeatureExtractor(object):
             'duration',
             'edge_count',
             'static_ratio',
-            'ua_count',
+            'ua_count'
         ]
         self.pca_feature = pca_feature
         if features is None:
@@ -61,7 +61,12 @@ class FeatureExtractor(object):
         if len(not_supported_features) > 0:
             raise RuntimeError(f'Feature(s) {not_supported_features} not supported.')
 
-        supported_categorical_features = ['country', 'primary_session']
+        supported_categorical_features = [
+            'country',
+            'primary_session',
+            'bad_bot',
+            'human'
+        ]
         if categorical_features is None:
             categorical_features = supported_categorical_features
         self.categorical_features = categorical_features
@@ -200,7 +205,7 @@ class FeatureExtractor(object):
     def get_categorical_vectors(self, sessions):
         data = []
         for s in sessions:
-            data.append([s[f] for f in self.categorical_features])
+            data.append([s.get(f, False) for f in self.categorical_features])
         return np.array(data)
 
     def get_vectors(self, sessions):
