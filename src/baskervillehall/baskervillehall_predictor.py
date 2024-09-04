@@ -212,11 +212,12 @@ class BaskervillehallPredictor(object):
                     for i in range(scores.shape[0]):
                         score = scores[i]
                         prediction = score < 0
-
+                        session = sessions[i]
+                        meta = ''
                         if self.bad_bot_challenge and BaskervillehallIsolationForest.is_bad_bot(session):
                             prediction = True
+                            meta += 'Bad bot rule.'
 
-                        session = sessions[i]
                         debug = self._is_debug_enabled(session)
                         ip = session['ip']
                         end = session['end']
@@ -253,6 +254,7 @@ class BaskervillehallPredictor(object):
                                 self.logger.info(f'Blocking multiple offences ip = {ip}, session = {session_id} '
                                                  f' offences = {offences[ip][session_id]} '
                                                  f'host = {host}')
+                                meta += f'Multiple offences {offences[ip][session_id]}'
                                 if primary_session:
                                     # if is_static_session(session):
                                     #     command = 'block_ip_table'
@@ -273,7 +275,7 @@ class BaskervillehallPredictor(object):
                                     'Value': f'{ip}',
                                     'session_id': session_id,
                                     'host': host,
-                                    'source': 'baskervillehall',
+                                    'source': meta,
                                     'start': session['start'],
                                     'end': session['end'],
                                     'duration': session['duration'],
@@ -282,26 +284,7 @@ class BaskervillehallPredictor(object):
                                 }
                             ).encode('utf-8')
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
-
-                            # # for backward compatibility with  production
-                            # if not primary_session:
-                            #     if host != 'palestinechronicle.com':
-                            #         message = json.dumps(
-                            #             {
-                            #                 'Name': 'challenge_ip',
-                            #                 'Value': f'{ip}',
-                            #                 'session_id': '-',
-                            #                 'forwarded': True,
-                            #                 'host': host,
-                            #                 'source': 'baskervillehall',
-                            #                 'start': session['start'],
-                            #                 'end': session['end'],
-                            #                 'duration': session['duration'],
-                            #                 'score': score,
-                            #                 'num_requests': len(session['requests'])
-                            #             }
-                            #         ).encode('utf-8')
-                            #         producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                            self.logger.info(message)
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
                                  f'predicted = {predicted}, whitelisted = {ip_whitelisted}')
