@@ -4,7 +4,7 @@ import json
 from collections import deque
 import numpy as np
 
-from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
+from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest, ModelType
 from baskervillehall.host_selector import HostSelector
 from baskervillehall.model_io import ModelIO
 from kafka import KafkaConsumer, TopicPartition
@@ -90,11 +90,21 @@ class BaskervillehallTrainer(object):
         self.dataset_delay_from_now_in_minutes = dataset_delay_from_now_in_minutes
         self.accepted_contamination = accepted_contamination
 
-    def train_and_save_model(self, sessions, host, human):
+    def train_and_save_model(
+            self,
+            sessions,
+            host,
+            model_type
+    ):
         if len(sessions) == 0:
-            return
+            return False
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
-
+        categorical_features = self.categorical_features
+        if model_type == ModelType.GENERIC:
+            if 'human' not in categorical_features:
+                categorical_features.append('human')
+            if 'bad_bot' not in categorical_features:
+                categorical_features.append('bad_bot')
         model = BaskervillehallIsolationForest(
             n_estimators=self.n_estimators,
             max_samples=self.max_samples,
@@ -102,7 +112,7 @@ class BaskervillehallTrainer(object):
             max_features=self.max_features,
             warmup_period=self.warmup_period,
             features=self.features,
-            categorical_features=self.categorical_features,
+            categorical_features=categorical_features,
             pca_feature=self.pca_feature,
             max_categories=self.max_categories,
             min_category_frequency=self.min_category_frequency,
@@ -113,21 +123,21 @@ class BaskervillehallTrainer(object):
             logger=self.logger,
         )
 
-        old_model = model_io.load(self.s3_path, host, human)
+        old_model = model_io.load(self.s3_path, host, model_type)
         if old_model:
             scores = old_model.transform(sessions)
             contamination = float(len(scores[scores < 0])) / len(scores)
             if contamination > self.accepted_contamination:
                 self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
-                                 f'Host = {host}. {scores.shape[0]} records, human={human}')
-                return
+                                 f'Host = {host}. {scores.shape[0]} records, type={model_type.value}')
+                return False
 
-        self.logger.info(f'Training host {host}, dataset size {len(sessions)}, human={human}')
+        self.logger.info(f'Training host {host}, dataset size {len(sessions)}, type={model_type.value}')
 
         if len(sessions) <= self.min_dataset_size:
             self.logger.info(f'Skipping training. Too few sessions: {len(sessions)}. Host = {host}.'
-                             f'The minimum is {self.min_dataset_size}, human={human}')
-            return
+                             f'The minimum is {self.min_dataset_size}, type={model_type.value}')
+            return False
 
         if len(sessions) <= self.small_dataset_size:
             model.set_n_estimators(len(self.features))
@@ -138,9 +148,10 @@ class BaskervillehallTrainer(object):
 
         model.fit(sessions)
 
-        self.logger.info(f'@@@ Saving model for {host}, human={human}...')
+        self.logger.info(f'@@@ Saving model for {host}, type={model_type.value}...')
         model.clear_embeddings()
-        model_io.save(model, self.s3_path, host, human)
+        model_io.save(model, self.s3_path, host, model_type=model_type)
+        return True
 
     def run(self):
         try:
@@ -210,23 +221,22 @@ class BaskervillehallTrainer(object):
                                 else:
                                     continue
 
-                            # self.logger.info(f'is_human={BaskervillehallIsolationForest.is_human(session)}, '
-                            #                  f'primary_session={session["primary_session"]}'
-                            #                  f'session_id={session["session_id"]} ua={session["ua"]}'
-                            #                  f'end={session["end"]}')
                             if BaskervillehallIsolationForest.is_human(session):
                                 if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(session)
                             else:
-                                if len(batch[host]['bot']) < self.num_sessions:
-                                    batch[host]['bot'].append(session)
+                                if not BaskervillehallIsolationForest.is_bad_bot(session):
+                                    if len(batch[host]['bot']) < self.num_sessions:
+                                        batch[host]['bot'].append(session)
 
                 self.logger.info('The new batch:')
                 for host, v in batch.items():
                     self.logger.info(f'---{host}: humans={len(v["human"])}, bots={len(v["bot"])}')
                 for host, v in batch.items():
-                    self.train_and_save_model(v['human'], host, human=True)
-                    self.train_and_save_model(v['bot'], host, human=False)
+                    if not self.train_and_save_model(v['human'], host, ModelType.HUMAN) or \
+                    not self.train_and_save_model(v['bot'], host, ModelType.BOT):
+                        self.train_and_save_model(v['bot']+v['human'], host, ModelType.GENERIC)
+
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

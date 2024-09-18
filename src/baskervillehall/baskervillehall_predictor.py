@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 
-from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
+from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest, ModelType
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
@@ -46,6 +46,7 @@ class BaskervillehallPredictor(object):
             whitelist_ip=None,
             whitelist_url=None,
             white_list_refresh_period=5,
+            bad_bot_challenge=True,
             debug_ip=None
     ):
         super().__init__()
@@ -78,6 +79,7 @@ class BaskervillehallPredictor(object):
         self.max_offences_before_blocking = max_offences_before_blocking
         self.whitelist_url = whitelist_url
         self.white_list_refresh_period = white_list_refresh_period
+        self.bad_bot_challenge = bad_bot_challenge
 
     def _is_debug_enabled(self, value):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
@@ -90,7 +92,7 @@ class BaskervillehallPredictor(object):
         model_storage_human = ModelStorage(
             self.s3_connection,
             self.s3_path,
-            human=True,
+            model_type=ModelType.HUMAN,
             reload_in_minutes=self.model_reload_in_minutes,
             logger=self.logger)
         model_storage_human.start()
@@ -98,16 +100,29 @@ class BaskervillehallPredictor(object):
         model_storage_bot = ModelStorage(
             self.s3_connection,
             self.s3_path,
-            human=False,
+            model_type=ModelType.BOT,
             reload_in_minutes=self.model_reload_in_minutes,
             logger=self.logger)
         model_storage_bot.start()
+
+        model_storage_generic = ModelStorage(
+            self.s3_connection,
+            self.s3_path,
+            model_type=ModelType.GENERIC,
+            reload_in_minutes=self.model_reload_in_minutes,
+            logger=self.logger)
+        model_storage_generic.start()
 
         pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
 
         offences = TTLCache(
             maxsize=10000,
+            ttl=60 * 60
+        )
+
+        ip_with_sessions = TTLCache(
+            maxsize=100000,
             ttl=60 * 60
         )
 
@@ -180,6 +195,9 @@ class BaskervillehallPredictor(object):
                     if session.get('deflect_password', False):
                         continue
 
+                    if not session.get('primary_session', False):
+                        ip_with_sessions[session['ip']] = True
+
                     batch[(host, human)].append(session)
                     predicting_total += 1
 
@@ -188,8 +206,7 @@ class BaskervillehallPredictor(object):
                     model = model_storage_human.get_model(host) if human else\
                         model_storage_bot.get_model(host)
                     if model is None:
-                        model = model_storage_bot.get_model(host) if human else \
-                            model_storage_human.get_model(host)
+                        model = model_storage_generic.get_model(host)
 
                     if model is None:
                         continue
@@ -202,10 +219,18 @@ class BaskervillehallPredictor(object):
 
                     for i in range(scores.shape[0]):
                         score = scores[i]
+                        ip = session['ip']
                         prediction = score < 0
                         session = sessions[i]
+                        meta = ''
+                        if (self.bad_bot_challenge
+                                and BaskervillehallIsolationForest.is_bad_bot(session) \
+                                and ip not in ip_with_sessions.keys()):
+                            prediction = True
+                            meta += 'Bad bot rule'
+
                         debug = self._is_debug_enabled(session)
-                        ip = session['ip']
+
                         end = session['end']
 
                         if debug:
@@ -240,6 +265,7 @@ class BaskervillehallPredictor(object):
                                 self.logger.info(f'Blocking multiple offences ip = {ip}, session = {session_id} '
                                                  f' offences = {offences[ip][session_id]} '
                                                  f'host = {host}')
+                                meta += f'Multiple offences {offences[ip][session_id]}'
                                 if primary_session:
                                     # if is_static_session(session):
                                     #     command = 'block_ip_table'
@@ -253,14 +279,15 @@ class BaskervillehallPredictor(object):
                                 command = 'challenge_ip' if primary_session else 'challenge_session'
 
                             self.logger.info(f'Challenging for ip={ip}, '
-                                             f'session_id={session_id}, host={host}, end={end}, score={score}.')
+                                             f'session_id={session_id}, host={host}, end={end}, score={score}.'
+                                             f'meta = {meta}')
                             message = json.dumps(
                                 {
                                     'Name': command,
                                     'Value': f'{ip}',
                                     'session_id': session_id,
                                     'host': host,
-                                    'source': 'baskervillehall',
+                                    'source': meta,
                                     'start': session['start'],
                                     'end': session['end'],
                                     'duration': session['duration'],
@@ -269,26 +296,6 @@ class BaskervillehallPredictor(object):
                                 }
                             ).encode('utf-8')
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
-
-                            # # for backward compatibility with  production
-                            # if not primary_session:
-                            #     if host != 'palestinechronicle.com':
-                            #         message = json.dumps(
-                            #             {
-                            #                 'Name': 'challenge_ip',
-                            #                 'Value': f'{ip}',
-                            #                 'session_id': '-',
-                            #                 'forwarded': True,
-                            #                 'host': host,
-                            #                 'source': 'baskervillehall',
-                            #                 'start': session['start'],
-                            #                 'end': session['end'],
-                            #                 'duration': session['duration'],
-                            #                 'score': score,
-                            #                 'num_requests': len(session['requests'])
-                            #             }
-                            #         ).encode('utf-8')
-                            #         producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
                                  f'predicted = {predicted}, whitelisted = {ip_whitelisted}')

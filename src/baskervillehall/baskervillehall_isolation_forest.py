@@ -1,8 +1,13 @@
 import logging
 from sklearn.ensemble import IsolationForest
+from enum import Enum
 
 from baskervillehall.feature_extractor import FeatureExtractor
 
+class ModelType(Enum):
+    HUMAN = 'human'
+    BOT = 'bot'
+    GENERIC = 'generic'
 
 class BaskervillehallIsolationForest(object):
 
@@ -66,8 +71,26 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_human(session):
-        return (session['primary_session'] is False and
-                not BaskervillehallIsolationForest.is_bot_ua(session['ua']))
+        return not session.get('primary_session', False) and \
+                not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
+
+    @staticmethod
+    def is_bad_bot(session):
+        if not session.get('primary_session', False):
+            return False
+
+        if not BaskervillehallIsolationForest.is_bot_ua(session):
+            return True
+
+        # a legit bot does not change its user agent
+        uas = set()
+        for r in session['requests']:
+            ua = r.get('ua', '')
+            if len(ua) < 5:
+                return True
+            uas.add(ua)
+        if len(uas) > 1:
+            return True
 
     def fit(
             self,

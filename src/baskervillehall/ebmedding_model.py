@@ -16,6 +16,7 @@ class EmbeddingModel(metaclass=Singleton):
 
     def get_models(self):
         if self.bert_model is None or self.bert_preprocess_model is None:
+            self.logger.info('Embedding singleton: loading embeddings models...')
             map_name_to_handle = {
                 'bert_en_uncased_L-12_H-768_A-12':
                     'https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/3',
