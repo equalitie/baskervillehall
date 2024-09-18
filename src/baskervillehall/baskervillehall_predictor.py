@@ -111,13 +111,18 @@ class BaskervillehallPredictor(object):
             model_type=ModelType.GENERIC,
             reload_in_minutes=self.model_reload_in_minutes,
             logger=self.logger)
-        model_storage_bot.start()
+        model_storage_generic.start()
 
         pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
 
         offences = TTLCache(
             maxsize=10000,
+            ttl=60 * 60
+        )
+
+        ip_with_sessions = TTLCache(
+            maxsize=100000,
             ttl=60 * 60
         )
 
@@ -190,6 +195,9 @@ class BaskervillehallPredictor(object):
                     if session.get('deflect_password', False):
                         continue
 
+                    if not session.get('primary_session', False):
+                        ip_with_sessions[session['ip']] = True
+
                     batch[(host, human)].append(session)
                     predicting_total += 1
 
@@ -211,15 +219,18 @@ class BaskervillehallPredictor(object):
 
                     for i in range(scores.shape[0]):
                         score = scores[i]
+                        ip = session['ip']
                         prediction = score < 0
                         session = sessions[i]
                         meta = ''
-                        if self.bad_bot_challenge and BaskervillehallIsolationForest.is_bad_bot(session):
+                        if (self.bad_bot_challenge
+                                and BaskervillehallIsolationForest.is_bad_bot(session) \
+                                and ip not in ip_with_sessions.keys()):
                             prediction = True
-                            meta += 'Bad bot rule.'
+                            meta += 'Bad bot rule'
 
                         debug = self._is_debug_enabled(session)
-                        ip = session['ip']
+
                         end = session['end']
 
                         if debug:
@@ -268,7 +279,8 @@ class BaskervillehallPredictor(object):
                                 command = 'challenge_ip' if primary_session else 'challenge_session'
 
                             self.logger.info(f'Challenging for ip={ip}, '
-                                             f'session_id={session_id}, host={host}, end={end}, score={score}.')
+                                             f'session_id={session_id}, host={host}, end={end}, score={score}.'
+                                             f'meta = {meta}')
                             message = json.dumps(
                                 {
                                     'Name': command,
@@ -284,7 +296,6 @@ class BaskervillehallPredictor(object):
                                 }
                             ).encode('utf-8')
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
-                            self.logger.info(message)
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
                                  f'predicted = {predicted}, whitelisted = {ip_whitelisted}')

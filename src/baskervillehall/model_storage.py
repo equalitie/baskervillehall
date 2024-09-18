@@ -44,7 +44,7 @@ class ModelStorage(object):
             return None
 
     def _run(self):
-        self.logger.info('Starting ModelStorage thread...')
+        self.logger.info(f'Starting ModelStorage thread ({self.model_type.value})...')
 
         while True:
             with self.lock:
