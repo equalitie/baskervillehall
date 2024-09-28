@@ -150,7 +150,8 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
-            'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True'
+            'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
+            'use_shapley': os.environ.get('USE_SHAPLEY') == 'True'
         }
 
         predictor = BaskervillehallPredictor(

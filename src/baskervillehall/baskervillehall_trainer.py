@@ -125,7 +125,7 @@ class BaskervillehallTrainer(object):
 
         old_model = model_io.load(self.s3_path, host, model_type)
         if old_model:
-            scores = old_model.transform(sessions)
+            scores, _ = old_model.transform(sessions)
             contamination = float(len(scores[scores < 0])) / len(scores)
             if contamination > self.accepted_contamination:
                 self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '

@@ -119,6 +119,7 @@ class BaskervillehallSession(object):
             'requests': requests_formatted,
             'passed_challenge': passed_challenge,
             'deflect_password': deflect_password,
+            'verified_bot': session['verified_bot'],
             'human': BaskervillehallIsolationForest.is_human(session),
             'bad_bot': BaskervillehallIsolationForest.is_bad_bot(session)
         }
@@ -134,10 +135,11 @@ class BaskervillehallSession(object):
                 f'end={session["end"]}, num_requests={len(session["requests"])}')
 
     @staticmethod
-    def create_session(ua, host, country, ip, session_id, ts, request):
+    def create_session(ua, host, country, ip, session_id, verified_bot, ts, request):
         return {
             'ua': ua,
             'host': host,
+            'verified_bot': verified_bot,
             'country': country,
             'ip': ip,
             'session_id': session_id,
@@ -234,6 +236,7 @@ class BaskervillehallSession(object):
                     'ua': sessions[0]['ua'],
                     'host': host,
                     'country': sessions[0]['country'],
+                    'verified_bot': sessions[0]['verified_bot'],
                     'ip': ip,
                     'session_id': '-',
                     'start': requests[0]['ts'],
@@ -303,6 +306,8 @@ class BaskervillehallSession(object):
                         ts, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
 
                         ip = data['client_ip']
+                        verified_bot = data.get('cloudflareProperties',
+                                                {}).get('botManagement', {}).get('verifiedBot', False)
 
                         self.debugging = self.is_debugging_mode(data)
 
@@ -368,7 +373,8 @@ class BaskervillehallSession(object):
                             if self.is_session_expired(session, ts):
                                 if self.debugging:
                                     self.logger.info('session is expired')
-                                session = self.create_session(ua, host, country, ip, session_id, ts, request)
+                                session = self.create_session(ua, host, country, ip, session_id,
+                                                              verified_bot, ts, request)
                                 self.ips[ip][session_id] = session
                             else:
                                 if self.debugging:
@@ -390,7 +396,8 @@ class BaskervillehallSession(object):
                             self.flush()
                         else:
                             # primary session
-                            session = self.create_session(ua, host, country, ip, session_id, ts, request)
+                            session = self.create_session(ua, host, country, ip, session_id,
+                                                          verified_bot, ts, request)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session
