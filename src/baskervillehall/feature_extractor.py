@@ -221,7 +221,7 @@ class FeatureExtractor(object):
     def _normalize(self, X):
         return (X - self.mean) / self.std
 
-    def feature_columns(self):
+    def get_all_features(self):
         res = []
         res += self.features
         if self.pca_feature:

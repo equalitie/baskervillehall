@@ -1,6 +1,8 @@
 import logging
 from sklearn.ensemble import IsolationForest
 from enum import Enum
+import shap
+import pandas as pd
 
 from baskervillehall.feature_extractor import FeatureExtractor
 
@@ -51,6 +53,7 @@ class BaskervillehallIsolationForest(object):
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.isolation_forest = None
+        self.shapley = None
 
     def clear_embeddings(self):
         self.feature_extractor.clear_embeddings()
@@ -71,11 +74,17 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_human(session):
+        if session.get('verified_bot', False):
+            return False
+
         return not session.get('primary_session', False) and \
                 not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
 
     @staticmethod
     def is_bad_bot(session):
+        if session.get('verified_bot', False):
+            return False
+
         if not session.get('primary_session', False):
             return False
 
@@ -92,10 +101,14 @@ class BaskervillehallIsolationForest(object):
         if len(uas) > 1:
             return True
 
+    def get_all_features(self):
+        return self.feature_extractor.get_all_features()
+
     def fit(
             self,
             sessions,
     ):
+        self.shapley = None
         vectors = self.feature_extractor.fit_transform(sessions)
 
         self.isolation_forest = IsolationForest(
@@ -108,9 +121,20 @@ class BaskervillehallIsolationForest(object):
             random_state=self.random_state
         )
 
-        self.isolation_forest.fit(vectors)
+        df = pd.DataFrame(data=vectors, columns=self.get_all_features())
 
-    def transform(self, sessions):
+        self.isolation_forest.fit(df)
+
+    def get_shapley(self):
+        if self.shapley:
+            return self.shapley
+        self.shapley = shap.TreeExplainer(self.isolation_forest)
+        return self.shapley
+
+    def transform(self, sessions, use_shapley=True):
         vectors = self.feature_extractor.transform(sessions)
-        scores = self.isolation_forest.decision_function(vectors)
-        return scores
+        df = pd.DataFrame(data=vectors, columns=self.get_all_features())
+        scores = self.isolation_forest.decision_function(df)
+
+        shap_values = self.get_shapley()(vectors, check_additivity=False) if use_shapley else None
+        return scores, shap_values

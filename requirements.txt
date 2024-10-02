@@ -5,3 +5,7 @@ boto3
 cachetools==5.3.0
 kubernetes==27.2.0
 requests
+shap==0.46.0
+tensorflow
+tensorflow-text
+tensorflow-hub

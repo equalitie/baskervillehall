@@ -47,7 +47,7 @@ def urls_to_text(urls):
             # Find all words in the combined string
             words += word_pattern.findall(combined)
 
-        texts.append(' '.join([w for w in words if len(w) > 2]))
+        texts.append(' '.join([w for w in words if len(w) >= 5]))
     return texts
 
 
@@ -65,7 +65,7 @@ class PCAFeature(object):
         self.components = None
         self.threshold = None
         self.projector = None
-        self.url_index = OrderedDict()
+        self.url_index = None
         self.url_vectors = None
         self.bert_model_name = bert_model_name
 
@@ -102,7 +102,7 @@ class PCAFeature(object):
         for s in sessions:
             for r in s['requests']:
                 url = r['url']
-                if url not in self.url_index:
+                if not self.url_index or url not in self.url_index:
                     extra_urls.append(url)
                     url_index_extra[url] = index
                     index += 1
@@ -111,7 +111,7 @@ class PCAFeature(object):
         return url_index_extra, url_vectors_extra
 
     def get_vector(self, url, url_index_extra, url_vectors_extra):
-        if url in self.url_index:
+        if self.url_index and url in self.url_index:
             return self.url_vectors[self.url_index[url]]
         else:
             assert url in url_index_extra
@@ -119,6 +119,7 @@ class PCAFeature(object):
 
     def create_dataset(self, sessions):
         url_index_extra, url_vectors_extra = self.embed_urls(sessions)
+
         X = []
         for s in sessions:
             vector_average = []
@@ -138,6 +139,7 @@ class PCAFeature(object):
 
     def fit_transform(self, sessions):
         self.create_embeddings()
+        self.url_index, self.url_vectors = self.embed_urls(sessions)
         Y = self.create_dataset(sessions)
 
         self.logger.info('Normalizing...')

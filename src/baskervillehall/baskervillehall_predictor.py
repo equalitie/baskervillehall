@@ -47,7 +47,8 @@ class BaskervillehallPredictor(object):
             whitelist_url=None,
             white_list_refresh_period=5,
             bad_bot_challenge=True,
-            debug_ip=None
+            debug_ip=None,
+            use_shapley=True
     ):
         super().__init__()
 
@@ -80,6 +81,7 @@ class BaskervillehallPredictor(object):
         self.whitelist_url = whitelist_url
         self.white_list_refresh_period = white_list_refresh_period
         self.bad_bot_challenge = bad_bot_challenge
+        self.use_shapley = use_shapley
 
     def _is_debug_enabled(self, value):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
@@ -212,7 +214,7 @@ class BaskervillehallPredictor(object):
                         continue
 
                     ts = datetime.now()
-                    scores = model.transform(sessions)
+                    scores, shap_values = model.transform(sessions, use_shapley=self.use_shapley)
                     predicted += scores.shape[0]
                     self.logger.info(f'score() time = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
                                      f'{scores.shape[0]} items')
@@ -240,13 +242,11 @@ class BaskervillehallPredictor(object):
                         if prediction:
                             session_id = session['session_id']
 
-                            # if ip_storage.is_challenge_passed(session_id):
-                            #     if debug:
-                            #         self.logger.info(f'ip = {ip} is in challenged_passed_storage')
-                            #     continue
-                            #
-
                             primary_session = session['primary_session']
+                            verified_bot = session.get('verified_bot', False)
+
+                            if verified_bot:
+                                continue
 
                             if primary_session:
                                 if ip in pending_ip:
@@ -278,6 +278,15 @@ class BaskervillehallPredictor(object):
                             else:
                                 command = 'challenge_ip' if primary_session else 'challenge_session'
 
+                            shapley = []
+                            if shap_values:
+                                shap_value = shap_values[i]
+                                for i in range(len(shap_value.values)):
+                                    if shap_value.values[i] < 0:
+                                        shapley.append((model.get_all_features()[i],
+                                                         shap_value.values[i], shap_value.data[i]))
+                                shapley = sorted(shapley, key=lambda tup: tup[1])
+
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.'
                                              f'meta = {meta}')
@@ -288,6 +297,7 @@ class BaskervillehallPredictor(object):
                                     'session_id': session_id,
                                     'host': host,
                                     'source': meta,
+                                    'shapley': shapley,
                                     'start': session['start'],
                                     'end': session['end'],
                                     'duration': session['duration'],
