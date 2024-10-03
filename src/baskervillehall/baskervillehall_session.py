@@ -4,6 +4,7 @@ import random
 import string
 
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
+from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -65,6 +66,7 @@ class BaskervillehallSession(object):
         self.ips_primary = dict()
         self.flush_size_primary = dict()
         self.debugging = False
+        self.bot_verificator = BotVerificator()
 
     @staticmethod
     def get_timestamp_and_data(data):
@@ -306,8 +308,11 @@ class BaskervillehallSession(object):
                         ts, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
 
                         ip = data['client_ip']
-                        verified_bot = data.get('cloudflareProperties',
-                                                {}).get('botManagement', {}).get('verifiedBot', False)
+                        if 'cloudflareProperties' in data:
+                            verified_bot = data['cloudflareProperties'].get(
+                                'botManagement', {}).get('verifiedBot', False)
+                        else:
+                            verified_bot = self.bot_verificator.is_verified_bot(ip)
 
                         self.debugging = self.is_debugging_mode(data)
 
