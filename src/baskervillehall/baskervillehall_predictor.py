@@ -278,14 +278,15 @@ class BaskervillehallPredictor(object):
                             else:
                                 command = 'challenge_ip' if primary_session else 'challenge_session'
 
-                            shapley = []
+                            shapley = {}
                             if shap_values:
                                 shap_value = shap_values[i]
                                 for i in range(len(shap_value.values)):
                                     if shap_value.values[i] < 0:
-                                        shapley.append((model.get_all_features()[i],
-                                                         shap_value.values[i], shap_value.data[i]))
-                                shapley = sorted(shapley, key=lambda tup: tup[1])
+                                        shapley[model.get_all_features()[i]] = {
+                                            'shapley': round(shap_value.values[i], 2),
+                                            'feature': round(shap_value.data[i], 2)
+                                        }
 
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.'
