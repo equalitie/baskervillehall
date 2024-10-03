@@ -66,7 +66,7 @@ class BaskervillehallSession(object):
         self.ips_primary = dict()
         self.flush_size_primary = dict()
         self.debugging = False
-        self.bot_verifictor = BotVerificator()
+        self.bot_verificator = BotVerificator()
 
     @staticmethod
     def get_timestamp_and_data(data):
