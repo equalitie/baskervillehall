@@ -98,6 +98,7 @@ class BaskervillehallTrainer(object):
     ):
         if len(sessions) == 0:
             return False
+        self.logger.info(f'Training model for {host}, {model_type.value}')
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
         categorical_features = self.categorical_features
         if model_type == ModelType.GENERIC:
