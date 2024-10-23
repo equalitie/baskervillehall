@@ -141,7 +141,7 @@ def main():
             'model_reload_in_minutes': int(os.environ.get('PREDICTOR_MODEL_RELOAD_IN_MINUTES')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
-            'max_offences_before_blocking': int(os.environ.get('MAX_OFFENCES_BEFORE_BLOCKING')),
+            'num_offences_for_difficult_challenge': int(os.environ.get('NUM_OFFENCES_FOR_DIFFICULT_CHALLENGE')),
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
             'whitelist_ip': os.environ.get('WHITELIST_IP'),

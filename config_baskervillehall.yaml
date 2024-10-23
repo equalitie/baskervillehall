@@ -49,7 +49,7 @@ data:
     WHITELIST_IP: "https://dashboard.deflect.ca/api/add_banjax_whitelist?key=f3f7af6a8dcecc0546726f09cfaf27dd91111f8828a0ceffba9ac7ba7afcc35e"
     BOOTSTRAP_SERVERS: "kafka9-0.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093"
     PENDING_TTL: "30"
-    MAX_OFFENCES_BEFORE_BLOCKING: "100"
+    NUM_OFFENCES_FOR_DIFFICULT_CHALLENGE: "100"
     MAXSIZE_PENDING: "10000000"
     BAD_BOT_CHALLENGE: "True"
     USE_SHAPLEY: "True"
