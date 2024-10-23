@@ -37,7 +37,7 @@ class BaskervillehallPredictor(object):
             max_models=10000,
             min_session_duration=20,
             min_number_of_requests=2,
-            max_offences_before_blocking=3,
+            num_offences_for_difficult_challenge=3,
             batch_size=100,
             pending_ttl=30,
             maxsize_pending=10000000,
@@ -77,7 +77,7 @@ class BaskervillehallPredictor(object):
         self.date_time_format = datetime_format
         self.debug_ip = debug_ip
         self.n_jobs_predict = n_jobs_predict
-        self.max_offences_before_blocking = max_offences_before_blocking
+        self.num_offences_for_difficult_challenge = num_offences_for_difficult_challenge
         self.whitelist_url = whitelist_url
         self.white_list_refresh_period = white_list_refresh_period
         self.bad_bot_challenge = bad_bot_challenge
@@ -257,36 +257,43 @@ class BaskervillehallPredictor(object):
                                     continue
                                 pending_session[(ip, session_id)] = True
 
-                            if ip not in offences:
-                                offences[ip] = {}
-                            offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
 
-                            if offences[ip][session_id] > self.max_offences_before_blocking:
-                                self.logger.info(f'Blocking multiple offences ip = {ip}, session = {session_id} '
-                                                 f' offences = {offences[ip][session_id]} '
-                                                 f'host = {host}')
-                                meta += f'Multiple offences {offences[ip][session_id]}'
-                                if primary_session:
-                                    # if is_static_session(session):
-                                    #     command = 'block_ip_table'
-                                    # else:
+                            if session['passed_challenge']:
+                                if ip not in offences:
+                                    offences[ip] = {}
+                                offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
+
+                                if offences[ip][session_id] >= self.num_offences_for_difficult_challenge:
+                                    self.logger.info(f'Multiple offences(show difficult challenge)'
+                                                     f' ip = {ip}, session = {session_id} '
+                                                     f' offences = {offences[ip][session_id]} '
+                                                     f'host = {host}')
+                                    meta += f'Multiple offences {offences[ip][session_id]}'
+                                    difficulty = 2
+                                    # if primary_session:
+                                    #     # if is_static_session(session):
+                                    #     #     command = 'block_ip_table'
+                                    #     # else:
+                                    #     #     command = 'block_ip'
                                     #     command = 'block_ip'
-                                    command = 'block_ip'
-                                else:
-                                    if not whitelist_url.is_host_whitelisted_block_session(host):
-                                        command = 'block_session'
+                                    # else:
+                                    #     if not whitelist_url.is_host_whitelisted_block_session(host):
+                                    #         command = 'block_session'
                             else:
-                                command = 'challenge_ip' if primary_session else 'challenge_session'
+                                difficulty = 1
 
-                            shapley = {}
+                            command = 'challenge_ip' if primary_session else 'challenge_session'
+
+                            shapley = []
                             if shap_values:
                                 shap_value = shap_values[i]
                                 for i in range(len(shap_value.values)):
                                     if shap_value.values[i] < 0:
-                                        shapley[model.get_all_features()[i]] = {
+                                        shapley.append({
+                                            'name': model.get_all_features()[i],
                                             'shapley': round(shap_value.values[i], 2),
                                             'feature': round(shap_value.data[i], 2)
-                                        }
+                                        })
 
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.'
@@ -294,7 +301,11 @@ class BaskervillehallPredictor(object):
                             message = json.dumps(
                                 {
                                     'Name': command,
+                                    'difficulty': difficulty,
                                     'Value': f'{ip}',
+                                    'country': session.get('country', ''),
+                                    'continent': session.get('continent', ''),
+                                    'datacenter_code': session.get('datacenter_code', ''),
                                     'session_id': session_id,
                                     'host': host,
                                     'source': meta,

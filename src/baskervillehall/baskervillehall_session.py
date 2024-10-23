@@ -92,6 +92,12 @@ class BaskervillehallSession(object):
 
     def send_session(self, session):
         requests = session['requests']
+
+        if len(requests) == 1:
+            self.logger.info(f'1 request session')
+            self.logger.info(session)
+            self.logger.info(self.ips_primary[session['ip']])
+
         requests_formatted = []
         passed_challenge = False
         deflect_password = False
@@ -101,10 +107,9 @@ class BaskervillehallSession(object):
         for r in requests_sorted:
             rf = copy.deepcopy(r)
             rf['ts'] = r['ts'].strftime(self.date_time_format)
-            if r['banjax_decision'] == 'ShaChallengePassed':
+            if r['passed_challenge']:
                 passed_challenge = True
-            if (r['banjax_decision'] in
-                    ['PasswordChallengePassed', 'PasswordProtectedPriorityPass', 'PasswordChallengeRoamingPassed']):
+            if r['deflect_password']:
                 deflect_password = True
             requests_formatted.append(rf)
 
@@ -112,6 +117,8 @@ class BaskervillehallSession(object):
             'host': session['host'],
             'ua': session['ua'],
             'country': session['country'],
+            'continent': session['continent'],
+            'datacenter_code': session['datacenter_code'],
             'session_id': session['session_id'],
             'ip': session['ip'],
             'start': requests_formatted[0]['ts'],
@@ -137,12 +144,14 @@ class BaskervillehallSession(object):
                 f'end={session["end"]}, num_requests={len(session["requests"])}')
 
     @staticmethod
-    def create_session(ua, host, country, ip, session_id, verified_bot, ts, request):
+    def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts, request):
         return {
             'ua': ua,
             'host': host,
             'verified_bot': verified_bot,
             'country': country,
+            'continent': continent,
+            'datacenter_code': datacenter_code,
             'ip': ip,
             'session_id': session_id,
             'start': ts,
@@ -238,6 +247,8 @@ class BaskervillehallSession(object):
                     'ua': sessions[0]['ua'],
                     'host': host,
                     'country': sessions[0]['country'],
+                    'continent': sessions[0]['continent'],
+                    'datacenter_code': sessions[0]['datacenter_code'],
                     'verified_bot': sessions[0]['verified_bot'],
                     'ip': ip,
                     'session_id': '-',
@@ -248,7 +259,8 @@ class BaskervillehallSession(object):
                     'primary_session': True
                 }
 
-                if session['duration'] < self.max_session_duration:
+                if session['duration'] < self.max_session_duration and \
+                    len(session['requests']) > self.max_primary_sessions_per_ip:
                     if self.debugging:
                         self.logger.info('flushing primary session')
                         self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
@@ -264,9 +276,20 @@ class BaskervillehallSession(object):
     def is_debugging_mode(self, data):
         if self.debug_ip and data['client_ip'] == self.debug_ip:
             return True
-        if 'Baskerville' in data.get('client_ua', ''):
+        if 'client_ua' in data:
+            ua = data['client_ua']
+        else:
+            ua = data.get('client_user_agent', '')
+        if 'Baskerville' in ua:
             return True
         return False
+
+    def get_session_cookie(self, data):
+        if 'deflect_session' in data:
+            return data.get('deflect_session', '')
+        if 'cookies' in data:
+            return data['cookies'].get('sessionCookie', '')
+        return ''
 
     def run(self):
         whitelist_url = WhitelistURL(url=self.whitelist_url,
@@ -308,11 +331,17 @@ class BaskervillehallSession(object):
                         ts, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
 
                         ip = data['client_ip']
+
                         if 'cloudflareProperties' in data:
-                            verified_bot = data['cloudflareProperties'].get(
+                            prop = data['cloudflareProperties']
+                            verified_bot = prop.get(
                                 'botManagement', {}).get('verifiedBot', False)
+                            continent = prop.get('continent', '')
+                            datacenter_code = prop.get('cloudflare_datacenter_code', '')
                         else:
                             verified_bot = self.bot_verificator.is_verified_bot(ip)
+                            continent = ''
+                            datacenter_code = ''
 
                         self.debugging = self.is_debugging_mode(data)
 
@@ -338,23 +367,32 @@ class BaskervillehallSession(object):
                         else:
                             ua = data.get('client_user_agent', '')
 
-                        country = data.get('geoip', {}).get('country_code2', '')
+                        geoip = data.get('geoip', {})
+                        country = geoip.get('country_code2', geoip.get('country_code', ''))
 
-                        session_id = ''
-                        if 'deflect_session' in data:
-                            session_id = data.get('deflect_session', '')
-                        else:
-                            if 'cookies' in data:
-                                session_id = data['cookies'].get('sessionCookie', '')
+                        session_id = self.get_session_cookie(data)
 
                         if len(session_id) < 5:
                             session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits)
                                                        for _ in range(7))
 
                         if self.debugging:
-                            deflect_session = data['deflect_session']
                             client_url = data['client_url']
-                            self.logger.info(f'@@@@ {deflect_session}, {client_url}')
+                            self.logger.info(f'@@@@ {self.get_session_cookie(data)}, {client_url}')
+
+                        passed_challenge = False
+                        deflect_password = False
+
+                        if 'banjax_decision' in data:
+                            banjax_decision = data['banjax_decision']
+                            if banjax_decision == 'ShaChallengePassed':
+                                passed_challenge = True
+                            if (banjax_decision in
+                                    ['PasswordChallengePassed', 'PasswordProtectedPriorityPass',
+                                     'PasswordChallengeRoamingPassed']):
+                                deflect_password = True
+                        elif 'cloudflareProperties' in data:
+                            passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         request = {
                             'ts': ts,
@@ -367,7 +405,8 @@ class BaskervillehallSession(object):
                             'method': data['client_request_method'],
                             'edge': data.get('edge', ''),
                             'static': data.get('loc_in', '') == 'static_file',
-                            'banjax_decision': data.get('banjax_decision', '')
+                            'passed_challenge': passed_challenge,
+                            'deflect_password': deflect_password
                         }
 
                         if ip in self.ips and session_id in self.ips[ip]:
@@ -378,7 +417,8 @@ class BaskervillehallSession(object):
                             if self.is_session_expired(session, ts):
                                 if self.debugging:
                                     self.logger.info('session is expired')
-                                session = self.create_session(ua, host, country, ip, session_id,
+                                session = self.create_session(ua, host, country, continent, datacenter_code,
+                                                              ip, session_id,
                                                               verified_bot, ts, request)
                                 self.ips[ip][session_id] = session
                             else:
@@ -401,7 +441,8 @@ class BaskervillehallSession(object):
                             self.flush()
                         else:
                             # primary session
-                            session = self.create_session(ua, host, country, ip, session_id,
+                            session = self.create_session(ua, host, country, continent, datacenter_code,
+                                                          ip, session_id,
                                                           verified_bot, ts, request)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
