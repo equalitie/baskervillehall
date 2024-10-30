@@ -6,6 +6,7 @@ from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
 from baskervillehall.model_storage import ModelStorage
+from baskervillehall.settings_postgres import SettingsPostgres
 from baskervillehall.whitelist_ip import WhitelistIP
 import json
 from datetime import datetime
@@ -48,12 +49,17 @@ class BaskervillehallPredictor(object):
             white_list_refresh_period=5,
             bad_bot_challenge=True,
             debug_ip=None,
-            use_shapley=True
+            use_shapley=True,
+            postgres_connection = None,
+            postgres_refresh_period_in_seconds=180,
+            sensitivity_factor = 0.05
     ):
         super().__init__()
 
         if s3_connection is None:
             s3_connection = {}
+        if postgres_connection is None:
+            postgres_connection = {}
         if kafka_connection is None:
             kafka_connection = {'bootstrap_servers': 'localhost:9092'}
         self.topic_sessions = topic_sessions
@@ -62,6 +68,7 @@ class BaskervillehallPredictor(object):
         self.topic_commands = topic_commands
         self.kafka_connection = kafka_connection
         self.s3_connection = s3_connection
+        self.postgres_connection = postgres_connection
         self.s3_path = s3_path
         self.min_session_duration = min_session_duration
         self.min_number_of_requests = min_number_of_requests
@@ -82,6 +89,10 @@ class BaskervillehallPredictor(object):
         self.white_list_refresh_period = white_list_refresh_period
         self.bad_bot_challenge = bad_bot_challenge
         self.use_shapley = use_shapley
+
+        self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
+                                         **self.postgres_connection)
+        self.sensitivity_factor = sensitivity_factor
 
     def _is_debug_enabled(self, value):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
@@ -221,6 +232,7 @@ class BaskervillehallPredictor(object):
 
                     for i in range(scores.shape[0]):
                         score = scores[i]
+                        score -= self.settings.get_sensitivity(host) * self.sensitivity_factor
                         ip = session['ip']
                         prediction = score < 0
                         session = sessions[i]

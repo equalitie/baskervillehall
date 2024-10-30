@@ -60,7 +60,7 @@ class ModelStorage(object):
                 continue
             with self.lock:
                 self.models[host] = (model, datetime.now())
-                self.logger.info(f'Loaded model for host {host} {self.model_type.value}). '
+                self.logger.info(f'Loaded model for host {host} {self.model_type.value}. '
                                  f'Total models = {len(self.models.keys())}')
 
     def start(self):

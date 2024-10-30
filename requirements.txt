@@ -9,3 +9,4 @@ shap==0.46.0
 tensorflow
 tensorflow-text
 tensorflow-hub
+psycopg2-binary
