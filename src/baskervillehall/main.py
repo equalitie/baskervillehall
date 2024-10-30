@@ -69,6 +69,14 @@ def main():
         's3_region': os.environ.get('S3_REGION'),
     }
 
+    postgres_connection = {
+        'postgres_host': os.environ.get('POSTGRES_HOST'),
+        'postgres_user': os.environ.get('POSTGRES_USER'),
+        'postgres_password': os.environ.get('POSTGRES_PASSWORD'),
+        'database_name': os.environ.get('POSTGRES_DATABASE_NAME'),
+        'postgres_port': int(os.environ.get('POSTGRES_PORT'))
+    }
+
     if args.pipeline == 'session':
         session_parameters = {
             'read_from_beginning': os.environ.get('READ_FROM_BEGINNING') == 'True',
@@ -86,6 +94,7 @@ def main():
             'whitelist_url': os.environ.get('WHITELIST_URL'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
         }
+
         sessionizer = BaskervillehallSession(
             **session_parameters,
             kafka_connection=kafka_connection,
@@ -151,7 +160,10 @@ def main():
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
-            'use_shapley': os.environ.get('USE_SHAPLEY') == 'True'
+            'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
+            'postgres_connection': postgres_connection,
+            'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
+            'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR'))
         }
 
         predictor = BaskervillehallPredictor(
