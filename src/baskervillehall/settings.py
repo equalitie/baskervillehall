@@ -15,6 +15,9 @@ class Settings(object):
         pass
 
     def get_sensitivity(self, host):
+        if host == 'parniplus.com':
+            return -2
+
         self.refresh()
         return self.settings.get(host, {}).get('sensitivity', 0)
 

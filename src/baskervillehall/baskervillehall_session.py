@@ -6,7 +6,7 @@ import string
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.whitelist_ip import WhitelistIP
-from baskervillehall.whitelist_url import WhitelistURL
+from baskervillehall.deflect_config import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 import json
 from datetime import datetime

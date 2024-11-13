@@ -11,7 +11,7 @@ from baskervillehall.whitelist_ip import WhitelistIP
 import json
 from datetime import datetime
 
-from baskervillehall.whitelist_url import WhitelistURL
+from baskervillehall.deflect_config import WhitelistURL
 
 
 def is_static_session(session):
@@ -91,7 +91,7 @@ class BaskervillehallPredictor(object):
         self.use_shapley = use_shapley
 
         self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
-                                         **self.postgres_connection)
+                                         postgres_connection=postgres_connection)
         self.sensitivity_factor = sensitivity_factor
 
     def _is_debug_enabled(self, value):
@@ -303,8 +303,10 @@ class BaskervillehallPredictor(object):
                                     if shap_value.values[i] < 0:
                                         shapley.append({
                                             'name': model.get_all_features()[i],
-                                            'shapley': round(shap_value.values[i], 2),
-                                            'feature': round(shap_value.data[i], 2)
+                                            'values': {
+                                                'shapley': round(shap_value.values[i], 2),
+                                                'feature': round(shap_value.data[i], 2)
+                                            }
                                         })
 
                             self.logger.info(f'Challenging for ip={ip}, '

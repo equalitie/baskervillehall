@@ -5,33 +5,19 @@ import psycopg2
 class SettingsPostgres(Settings):
 
     def __init__(self,
-                 postgres_host,
-                 postgres_user,
-                 postgres_password,
-                 database_name,
-                 postgres_port=5432,
+                 postgres_connection=None,
                  refresh_period_in_seconds=180,
                  ):
         super().__init__(
             refresh_period_in_seconds=refresh_period_in_seconds
         )
-
-        self.postgres_host = postgres_host
-        self.postgres_port = postgres_port
-        self.postgres_user = postgres_user
-        self.postgres_password = postgres_password
-        self.database_name = database_name
+        self.postgres_connection = postgres_connection
 
     def read(self):
-        if not self.postgres_port or len(self.postgres_host) == 0:
+        if len(self.postgres_connection['host']) == 0:
             return
 
-        connection = psycopg2.connect(
-            database=self.database_name,
-            user=self.postgres_user,
-            password=self.postgres_password,
-            host=self.postgres_host,
-            port=self.postgres_port)
+        connection = psycopg2.connect(**self.postgres_connection)
 
         cursor = connection.cursor()
         cursor.execute('select hostname, 0 as sensitivity from hostname '

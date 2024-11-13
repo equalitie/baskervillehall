@@ -2,26 +2,26 @@
 apiVersion: "apps/v1"
 kind: "StatefulSet"
 metadata:
-  name: "baskervillehall-storage"
+  name: "baskervillehall-storage-ch"
   namespace: "default"
   labels:
-    app: "baskervillehall-storage"
+    app: "baskervillehall-storage-ch"
 spec:
   replicas: 3
-  serviceName: "baskervillehall-storage"
+  serviceName: "baskervillehall-storage-ch"
   updateStrategy:
     type: RollingUpdate
   selector:
     matchLabels:
-      app: "baskervillehall-storage"
+      app: "baskervillehall-storage-ch"
   template:
     metadata:
       labels:
-        app: "baskervillehall-storage"
+        app: "baskervillehall-storage-ch"
     spec:
       restartPolicy: Always
       containers:
-      - name: "baskervillehall-storage"
+      - name: "baskervillehall-storage-ch"
         image: "equalitie/baskervillehall:latest"
         imagePullPolicy: Always
         resources:
