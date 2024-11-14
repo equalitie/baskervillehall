@@ -3,7 +3,7 @@ import logging
 from baskervillehall.json_url_reader import JsonUrlReader
 
 
-class DeflectCon(object):
+class WhitelistURL(object):
 
     def __init__(
             self,

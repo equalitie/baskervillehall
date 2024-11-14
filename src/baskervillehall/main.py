@@ -93,6 +93,7 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
         }
 
@@ -160,6 +161,7 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
             'postgres_connection': postgres_connection,
