@@ -7,6 +7,7 @@ from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
+from baskervillehall.session_storage import SessionStorage
 
 logger = None
 
@@ -70,15 +71,15 @@ def main():
     }
 
     postgres_connection = {
-        'postgres_host': os.environ.get('POSTGRES_HOST'),
-        'postgres_user': os.environ.get('POSTGRES_USER'),
-        'postgres_password': os.environ.get('POSTGRES_PASSWORD'),
-        'database_name': os.environ.get('POSTGRES_DATABASE_NAME'),
-        'postgres_port': int(os.environ.get('POSTGRES_PORT'))
+        'host': os.environ.get('POSTGRES_HOST'),
+        'user': os.environ.get('POSTGRES_USER'),
+        'password': os.environ.get('POSTGRES_PASSWORD'),
+        'database': os.environ.get('POSTGRES_DATABASE_NAME'),
+        'port': int(os.environ.get('POSTGRES_PORT'))
     }
 
     if args.pipeline == 'session':
-        session_parameters = {
+        params = {
             'read_from_beginning': os.environ.get('READ_FROM_BEGINNING') == 'True',
             'flush_increment': int(os.environ.get('FLUSH_INCREMENT')),
             'topic_weblogs': os.environ.get('TOPIC_WEBLOGS'),
@@ -92,11 +93,12 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
         }
 
         sessionizer = BaskervillehallSession(
-            **session_parameters,
+            **params,
             kafka_connection=kafka_connection,
             debug_ip=debug_ip,
             logger=logger
@@ -104,7 +106,7 @@ def main():
         sessionizer.run()
 
     elif args.pipeline == 'train':
-        trainer_parameters = {
+        params = {
             'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'features': os.environ.get('FEATURES').split(','),
@@ -134,14 +136,14 @@ def main():
             'n_jobs': int(os.environ.get('N_JOBS'))
         }
         trainer = BaskervillehallTrainer(
-            **trainer_parameters,
+            **params,
             kafka_connection=kafka_connection,
             s3_connection=s3_connection,
             logger=logger
         )
         trainer.run()
     elif args.pipeline == 'predict':
-        predictor_parameters = {
+        params = {
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'num_partitions': int(os.environ.get('NUM_PARTITIONS')),
@@ -159,6 +161,7 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
             'whitelist_url': os.environ.get('WHITELIST_URL'),
+            'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
             'postgres_connection': postgres_connection,
@@ -167,15 +170,31 @@ def main():
         }
 
         predictor = BaskervillehallPredictor(
-            **predictor_parameters,
+            **params,
             kafka_connection=kafka_connection,
             s3_connection=s3_connection,
             debug_ip=debug_ip,
             logger=logger
         )
         predictor.run()
+    elif args.pipeline == 'storage':
+        params = {
+            'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
+            'partition': partition,
+            'batch_size': int(os.environ.get('BATCH_SIZE')),
+            'datetime_format': os.environ.get('DATETIME_FORMAT'),
+            'postgres_connection': postgres_connection,
+            'ttl_records_days': int(os.environ.get('TTL_RECORDS_DAYS'))
+        }
+
+        predictor = SessionStorage(
+            **params,
+            kafka_connection=kafka_connection,
+            logger=logger
+        )
+        predictor.run()
     else:
-        logger.error('Pipeline is not specified. Use session, predict or train')
+        logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 
     logger.info('Pipeline finished.')
     exit()

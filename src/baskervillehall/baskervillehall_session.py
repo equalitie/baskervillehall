@@ -5,6 +5,7 @@ import string
 
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.bot_verificator import BotVerificator
+from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -26,6 +27,7 @@ class BaskervillehallSession(object):
             session_inactivity=1,
             garbage_collection_period=2,
             whitelist_url=None,
+            deflect_config_url=None,
             whitelist_url_default=[],
             whitelist_ip=None,
             white_list_refresh_period=5,
@@ -47,6 +49,7 @@ class BaskervillehallSession(object):
         self.whitelist_url_default = whitelist_url_default
         self.whitelist_ip = whitelist_ip
         self.whitelist_url = whitelist_url
+        self.deflect_config_url = deflect_config_url
         self.reset_duration = reset_duration
         self.white_list_refresh_period = white_list_refresh_period
 
@@ -297,6 +300,11 @@ class BaskervillehallSession(object):
                                      logger=self.logger,
                                      refresh_period_in_seconds=60 * self.white_list_refresh_period)
 
+        settings = SettingsDeflectAPI(url=self.deflect_config_url,
+                                    whitelist_default=self.whitelist_url_default,
+                                    logger=self.logger,
+                                    refresh_period_in_seconds=60 * self.white_list_refresh_period)
+
         whitelist_ip = WhitelistIP(self.whitelist_ip, logger=self.logger,
                                    refresh_period_in_seconds=60 * self.white_list_refresh_period)
 
@@ -356,12 +364,20 @@ class BaskervillehallSession(object):
                                 self.logger.info(f'ip {ip} is whitelisted')
                             continue
 
+                        if settings.is_host_whitelisted(host):
+                            if self.debugging:
+                                self.logger.info(f'host {host} is whitelisted')
+                            continue
+
                         url = data['client_url']
                         if whitelist_url.is_in_whitelist(url):
                             if self.debugging:
                                 self.logger.info(f'host {host} url {url} is whitelisted')
                             continue
-
+                        if settings.is_in_whitelist(url):
+                            if self.debugging:
+                                self.logger.info(f'host {host} url {url} is whitelisted')
+                            continue
                         if 'client_ua' in data:
                             ua = data['client_ua']
                         else:

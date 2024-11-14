@@ -5,6 +5,7 @@ from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsol
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
+from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.model_storage import ModelStorage
 from baskervillehall.settings_postgres import SettingsPostgres
 from baskervillehall.whitelist_ip import WhitelistIP
@@ -46,6 +47,7 @@ class BaskervillehallPredictor(object):
             logger=None,
             whitelist_ip=None,
             whitelist_url=None,
+            deflect_config_url=None,
             white_list_refresh_period=5,
             bad_bot_challenge=True,
             debug_ip=None,
@@ -86,12 +88,18 @@ class BaskervillehallPredictor(object):
         self.n_jobs_predict = n_jobs_predict
         self.num_offences_for_difficult_challenge = num_offences_for_difficult_challenge
         self.whitelist_url = whitelist_url
+        self.deflect_config_url = deflect_config_url
         self.white_list_refresh_period = white_list_refresh_period
         self.bad_bot_challenge = bad_bot_challenge
         self.use_shapley = use_shapley
 
-        self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
-                                         **self.postgres_connection)
+        if deflect_config_url is None or len(deflect_config_url) == 0:
+            self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
+                                             postgres_connection=postgres_connection)
+        else:
+            self.settings = SettingsDeflectAPI(url=self.deflect_config_url,
+                                               logger=self.logger,
+                                               refresh_period_in_seconds=60 * self.white_list_refresh_period)
         self.sensitivity_factor = sensitivity_factor
 
     def _is_debug_enabled(self, value):
@@ -101,7 +109,6 @@ class BaskervillehallPredictor(object):
         whitelist_url = WhitelistURL(url=self.whitelist_url,
                                      logger=self.logger,
                                      refresh_period_in_seconds=60 * self.white_list_refresh_period)
-
         model_storage_human = ModelStorage(
             self.s3_connection,
             self.s3_path,
@@ -303,8 +310,10 @@ class BaskervillehallPredictor(object):
                                     if shap_value.values[i] < 0:
                                         shapley.append({
                                             'name': model.get_all_features()[i],
-                                            'shapley': round(shap_value.values[i], 2),
-                                            'feature': round(shap_value.data[i], 2)
+                                            'values': {
+                                                'shapley': round(shap_value.values[i], 2),
+                                                'feature': round(shap_value.data[i], 2)
+                                            }
                                         })
 
                             self.logger.info(f'Challenging for ip={ip}, '

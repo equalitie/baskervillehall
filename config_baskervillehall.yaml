@@ -47,6 +47,7 @@ data:
     WHITELIST_URL_DEFAULT: "indymedia.org,splintercon.net"
     WHITELIST_IP: "https://dashboard.deflect.ca/api/add_banjax_whitelist?key=f3f7af6a8dcecc0546726f09cfaf27dd91111f8828a0ceffba9ac7ba7afcc35e"
     WHITELIST_URL: "https://dashboard.deflect.ca/api/baskerville_config?key=d402688fd0baea4d5f10c24e739635ff2f16a6ae3791346f617ff26d1a5d656f"
+    DEFLECT_CONFIG_URL: "https://dashboard.deflect.ca/api/baskerville_config_v2?key=d402688fd0baea4d5f10c24e739635ff2f16a6ae3791346f617ff26d1a5d656f"
     BOOTSTRAP_SERVERS: "kafka9-0.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093,kafka9-2.kafka9-headless.default.svc.cluster.local:9093"
     PENDING_TTL: "30"
     NUM_OFFENCES_FOR_DIFFICULT_CHALLENGE: "100"
@@ -60,3 +61,4 @@ data:
     POSTGRES_USER: ""
     POSTGRES_PASSWORD: ""
     POSTGRES_DATABASE_NAME: ""
+    TTL_RECORDS_DAYS: "7"
