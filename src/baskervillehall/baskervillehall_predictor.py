@@ -335,7 +335,8 @@ class BaskervillehallPredictor(object):
                                     'end': session['end'],
                                     'duration': session['duration'],
                                     'score': score,
-                                    'num_requests': len(session['requests'])
+                                    'num_requests': len(session['requests']),
+                                    'session': session
                                 }
                             ).encode('utf-8')
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))

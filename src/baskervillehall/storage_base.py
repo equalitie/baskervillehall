@@ -107,6 +107,8 @@ class StorageBase(object):
             )
         return json.dumps(requests)
 
+    def get_number_of_useragents(self, session):
+        return len(set([r['ua'] for r in session['requests']]))
 
     def run(self):
         consumer = KafkaConsumer(

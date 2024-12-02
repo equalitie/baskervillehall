@@ -3,11 +3,12 @@ import logging
 
 import os
 
+from baskervillehall.storage_commands import StorageCommands
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
-from baskervillehall.session_storage import SessionStorage
+from baskervillehall.storage_sessions import StorageSessions
 
 logger = None
 
@@ -179,20 +180,31 @@ def main():
         predictor.run()
     elif args.pipeline == 'storage':
         params = {
-            'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'postgres_connection': postgres_connection,
             'ttl_records_days': int(os.environ.get('TTL_RECORDS_DAYS'))
         }
+        num_requests = int(os.environ.get("NUM_REQUESTS_IN_STORAGE"))
 
-        predictor = SessionStorage(
+        storage_sessions = StorageSessions(
             **params,
+            topic=os.environ.get('TOPIC_SESSIONS'),
             kafka_connection=kafka_connection,
+            num_requests=num_requests,
             logger=logger
         )
-        predictor.run()
+        storage_sessions.run()
+
+        storage_sessions = StorageCommands(
+            **params,
+            topic=os.environ.get('TOPIC_COMMANDS'),
+            kafka_connection=kafka_connection,
+            num_requests=num_requests,
+            logger=logger
+        )
+        storage_sessions.run()
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 

@@ -12,7 +12,8 @@ class StorageSessions(StorageBase):
             ttl_records_days=7,
             logger=None,
             postgres_connection=None,
-            num_requests=20
+            num_requests=20,
+            table=None
     ):
         super().__init__(
             topic=topic,
@@ -23,6 +24,7 @@ class StorageSessions(StorageBase):
             ttl_records_days=ttl_records_days,
             logger=logger,
             postgres_connection=postgres_connection,
+            table=table
         )
         self.num_requests = num_requests
 
@@ -35,7 +37,7 @@ class StorageSessions(StorageBase):
             return None
         hits = len(session['requests'])
         duration = session['duration']
-        num_ua = len(set([r['ua'] for r in session['requests']]))
+        num_ua = self.get_number_of_useragents(session)
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip, session_cookie, ip_cookie, '\
             f'primary_session, user_agent, country, continent, '\
