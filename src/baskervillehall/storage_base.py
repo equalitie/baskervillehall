@@ -1,6 +1,8 @@
 
 
 import logging
+import threading
+
 import psycopg2
 
 from kafka import KafkaConsumer, TopicPartition
@@ -20,7 +22,8 @@ class StorageBase(object):
             ttl_records_days=7,
             logger=None,
             postgres_connection=None,
-            table=None
+            table=None,
+            autocreate_hostname_id=True
     ):
         super().__init__()
 
@@ -40,9 +43,11 @@ class StorageBase(object):
         self.hostname_id = None
         self.ttl_records_days = ttl_records_days
         self.table = table
+        self.autocreate_hostname_id = autocreate_hostname_id
 
     def get_host_id(self, host):
         if self.host_id_timestamp is None or \
+                host not in self.hostname_id or \
                 (datetime.now() - self.host_id_timestamp).total_seconds() > 60 * 10:
             self.host_id_timestamp = datetime.now()
 
@@ -55,6 +60,17 @@ class StorageBase(object):
                 self.hostname_id = dict()
                 for r in cur.fetchall():
                     self.hostname_id[r[0]] = r[1]
+
+                if host not in self.hostname_id:
+                    if self.autocreate_hostname_id:
+                        sql = f'insert into public.hostname '\
+                            f'(hostname, created_at, updated_at, updated_by) values '\
+                            f'(\'{host}\', current_timestamp, current_timestamp, \'pipeline\') RETURNING hostname_id;'
+                        cur.execute(sql)
+                        for r in cur.fetchall():
+                            self.hostname_id[host] = r[0]
+                        conn.commit()
+                        self.logger.info(f'New hostname_id added {host} = {self.hostname_id[host]}')
 
             except psycopg2.DatabaseError as error:
                 if conn:
@@ -109,6 +125,11 @@ class StorageBase(object):
 
     def get_number_of_useragents(self, session):
         return len(set([r['ua'] for r in session['requests']]))
+
+    def start(self):
+        t = threading.Thread(target=self.run)
+        t.start()
+        return t
 
     def run(self):
         consumer = KafkaConsumer(

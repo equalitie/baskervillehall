@@ -56,3 +56,12 @@ helm upgrade --cleanup-on-fail \
 kubectl port-forward service/proxy-public 8080:http
 ```
 Please, use user `admin` with an empth password.
+
+### Postgres deployment
+kubectl apply -f deployment/postgres/postgres-baskervillehall-secret.yaml
+kubectl apply -f deployment/postgres/postgres-baskervillehall-pv.yaml
+kubectl apply -f deployment/postgres/postgres-baskervillehall-pvc.yaml
+kubectl apply -f deployment/postgres/postgres-baskervillehall.yaml
+kubectl apply -f deployment/postgres/postgres-baskervillehall-service.yaml
+
+kubectl port-forward service/postgres-baskervillehall 5433:5432

@@ -19,6 +19,15 @@ spec:
       labels:
         app: "baskervillehall-session"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - workers-node-6a9f33
       containers:
       - name: "baskervillehall-session"
         image: "equalitie/baskervillehall:latest"

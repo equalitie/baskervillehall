@@ -184,7 +184,8 @@ def main():
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'postgres_connection': postgres_connection,
-            'ttl_records_days': int(os.environ.get('TTL_RECORDS_DAYS'))
+            'ttl_records_days': int(os.environ.get('TTL_RECORDS_DAYS')),
+            'autocreate_hostname_id': os.environ.get('AUTOCREATE_HOSTNAME_ID') == 'True'
         }
         num_requests = int(os.environ.get("NUM_REQUESTS_IN_STORAGE"))
 
@@ -193,18 +194,23 @@ def main():
             topic=os.environ.get('TOPIC_SESSIONS'),
             kafka_connection=kafka_connection,
             num_requests=num_requests,
+            table=os.environ.get('SQL_TABLE_SESSIONS'),
             logger=logger
         )
-        storage_sessions.run()
+        t1 = storage_sessions.start()
 
-        storage_sessions = StorageCommands(
+        storage_commands = StorageCommands(
             **params,
             topic=os.environ.get('TOPIC_COMMANDS'),
             kafka_connection=kafka_connection,
             num_requests=num_requests,
+            table=os.environ.get('SQL_TABLE_COMMANDS'),
             logger=logger
         )
-        storage_sessions.run()
+        t2 = storage_commands.start()
+
+        t1.join()
+        t2.join()
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 

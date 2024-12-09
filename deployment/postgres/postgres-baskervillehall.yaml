@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-baskervillehall
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-baskervillehall
+  template:
+    metadata:
+      labels:
+        app: postgres-baskervillehall
+    spec:
+      volumes:
+        - name: postgres-pv-storage
+          persistentVolumeClaim:
+            claimName: postgres-baskervillehall-pvc
+      containers:
+        - name: postgres
+          image: postgres:11
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-baskervillehall-secret
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-pv-storage

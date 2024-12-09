@@ -13,7 +13,8 @@ class StorageSessions(StorageBase):
             logger=None,
             postgres_connection=None,
             num_requests=20,
-            table=None
+            table=None,
+            autocreate_hostname_id=True
     ):
         super().__init__(
             topic=topic,
@@ -24,19 +25,22 @@ class StorageSessions(StorageBase):
             ttl_records_days=ttl_records_days,
             logger=logger,
             postgres_connection=postgres_connection,
-            table=table
+            table=table,
+            autocreate_hostname_id=autocreate_hostname_id
         )
         self.num_requests = num_requests
 
     def get_sql(self, record):
         session = record
-        requests = self.get_session_requests(self.num_requests)
+        requests = self.get_session_requests(session, self.num_requests)
         host = session["host"]
         host_id = self.get_host_id(host)
         if len(host_id) == 0:
             return None
         hits = len(session['requests'])
         duration = session['duration']
+        if duration < 1:
+            duration = 1
         num_ua = self.get_number_of_useragents(session)
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip, session_cookie, ip_cookie, '\

@@ -239,7 +239,8 @@ class BaskervillehallPredictor(object):
 
                     for i in range(scores.shape[0]):
                         score = scores[i]
-                        score -= self.settings.get_sensitivity(host) * self.sensitivity_factor
+                        sensitivity_shift = self.settings.get_sensitivity(host) * self.sensitivity_factor
+                        score -= sensitivity_shift
                         ip = session['ip']
                         prediction = score < 0
                         session = sessions[i]
@@ -304,21 +305,29 @@ class BaskervillehallPredictor(object):
                             command = 'challenge_ip' if primary_session else 'challenge_session'
 
                             shapley = []
+                            shapley_feature = ''
                             if shap_values:
                                 shap_value = shap_values[i]
-                                for i in range(len(shap_value.values)):
-                                    if shap_value.values[i] < 0:
+                                min_shapley = 0
+                                for k in range(len(shap_value.values)):
+                                    shap_value.values[k] -= sensitivity_shift
+                                    if shap_value.values[k] < 0:
+                                        if min_shapley > shap_value.values[k]:
+                                            min_shapley = shap_value.values[k]
+                                            shapley_feature = model.get_all_features()[k]
                                         shapley.append({
-                                            'name': model.get_all_features()[i],
+                                            'name': model.get_all_features()[k],
                                             'values': {
-                                                'shapley': round(shap_value.values[i], 2),
-                                                'feature': round(shap_value.data[i], 2)
+                                                'shapley': round(shap_value.values[k], 2),
+                                                'feature': round(shap_value.data[k], 2)
                                             }
                                         })
 
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.'
                                              f'meta = {meta}')
+
+                            session['requests'] = session['requests'][0:20]
                             message = json.dumps(
                                 {
                                     'Name': command,
@@ -329,8 +338,9 @@ class BaskervillehallPredictor(object):
                                     'datacenter_code': session.get('datacenter_code', ''),
                                     'session_id': session_id,
                                     'host': host,
-                                    'source': meta,
+                                    'source': f'{shapley_feature},{meta}',
                                     'shapley': shapley,
+                                    'shapley_feature': shapley_feature,
                                     'start': session['start'],
                                     'end': session['end'],
                                     'duration': session['duration'],

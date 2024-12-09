@@ -1,5 +1,4 @@
 import copy
-import urllib.parse
 import random
 import string
 
