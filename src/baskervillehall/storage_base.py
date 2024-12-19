@@ -118,7 +118,7 @@ class StorageBase(object):
             requests.append(
                 (
                     (datetime.strptime(r['ts'], self.datetime_format) - start).total_seconds(),
-                    r['url']
+                    r['url'].replace('\'', '')
                 )
             )
         return json.dumps(requests)

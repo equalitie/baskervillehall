@@ -54,7 +54,8 @@ class BaskervillehallPredictor(object):
             use_shapley=True,
             postgres_connection = None,
             postgres_refresh_period_in_seconds=180,
-            sensitivity_factor = 0.05
+            sensitivity_factor = 0.05,
+            max_sessions_for_ip = 10
     ):
         super().__init__()
 
@@ -92,6 +93,7 @@ class BaskervillehallPredictor(object):
         self.white_list_refresh_period = white_list_refresh_period
         self.bad_bot_challenge = bad_bot_challenge
         self.use_shapley = use_shapley
+        self.max_sessions_for_ip = max_sessions_for_ip
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
@@ -268,19 +270,29 @@ class BaskervillehallPredictor(object):
                             if verified_bot:
                                 continue
 
+                            too_many_sessions = False
                             if primary_session:
                                 if ip in pending_ip:
                                     continue
                                 pending_ip[ip] = True
                             else:
-                                if (ip, session_id) in pending_session:
+                                if ip not in pending_session:
+                                    pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+
+                                if session_id in pending_session[ip]:
                                     continue
-                                pending_session[(ip, session_id)] = True
+                                pending_session[ip][session_id] = True
 
+                                if len(pending_session[ip]) >= self.max_sessions_for_ip:
+                                    too_many_sessions = True
+                                    meta += 'Too many sessions.'
+                                    self.logger.info(f'Too many sessions ({len(pending_session[ip])}) for ip '
+                                                     f'{ip}, host {host}')
 
+                            difficulty = 1
                             if session['passed_challenge']:
                                 if ip not in offences:
-                                    offences[ip] = {}
+                                    offences[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
                                 offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
 
                                 if offences[ip][session_id] >= self.num_offences_for_difficult_challenge:
@@ -299,10 +311,11 @@ class BaskervillehallPredictor(object):
                                     # else:
                                     #     if not whitelist_url.is_host_whitelisted_block_session(host):
                                     #         command = 'block_session'
-                            else:
-                                difficulty = 1
 
-                            command = 'challenge_ip' if primary_session else 'challenge_session'
+                            if primary_session or too_many_sessions:
+                                command = 'challenge_ip'
+                            else:
+                                command = 'challenge_session'
 
                             shapley = []
                             shapley_feature = ''
@@ -340,6 +353,7 @@ class BaskervillehallPredictor(object):
                                     'host': host,
                                     'source': f'{shapley_feature},{meta}',
                                     'shapley': shapley,
+                                    'meta': meta,
                                     'shapley_feature': shapley_feature,
                                     'start': session['start'],
                                     'end': session['end'],

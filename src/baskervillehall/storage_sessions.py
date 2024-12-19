@@ -44,12 +44,13 @@ class StorageSessions(StorageBase):
         num_ua = self.get_number_of_useragents(session)
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip, session_cookie, ip_cookie, '\
-            f'primary_session, user_agent, country, continent, '\
+            f'primary_session, human, user_agent, country, continent, '\
             f'datacenter, hits, \n'\
             f'hit_rate, num_user_agent,'\
             f'duration, session_start, session_end, requests)\n'\
             f'values (\'{host_id}\', \'{host}\', \'{session["ip"]}\', \'{session["session_id"]}\',\n'\
             f'\'{session["ip"]}_{session["session_id"]}\',{int(session["primary_session"])},\n'\
+            f'{int(session["human"])},'\
             f'\'{session["ua"]}\', \n \'{session["country"]}\', \'{session["continent"]}\', '\
             f'\'{session["datacenter_code"]}\',\n'\
             f'{hits}, {hits * 60.0 / duration:.1f}, {num_ua}, '\

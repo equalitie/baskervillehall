@@ -167,7 +167,8 @@ def main():
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
             'postgres_connection': postgres_connection,
             'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
-            'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR'))
+            'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
+            'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP'))
         }
 
         predictor = BaskervillehallPredictor(

@@ -24,6 +24,7 @@ CREATE TABLE public.sessions (
 	session_cookie text NOT NULL,
 	ip_cookie text NOT NULL,
 	primary_session int4 DEFAULT 0 NULL,
+	human int4 DEFAULT 0 NULL,
 	passed_challenge int4 DEFAULT 0 NULL,
 	user_agent text NULL,
 	country text NULL,
@@ -40,7 +41,7 @@ CREATE TABLE public.sessions (
 	CONSTRAINT sessions_key PRIMARY KEY (session_id)
 );
 ALTER TABLE public.sessions ADD CONSTRAINT sessions_hostname_id_fkey FOREIGN KEY (hostname_id) REFERENCES public.hostname(hostname_id) ON DELETE CASCADE;
-
+CREATE INDEX sessions_index ON sessions (session_end, host_name);
 
 -- DROP TABLE public.challenge_command_history;
 
@@ -53,6 +54,8 @@ CREATE TABLE public.challenge_command_history (
 	session_cookie text DEFAULT ''::text NOT NULL,
 	ip_cookie text NOT NULL,
 	primary_session int4 DEFAULT 0 NULL,
+	human int4 DEFAULT 0 NULL,
+	passed_challenge int4 DEFAULT 0 NULL,
 	user_agent text NULL,
 	country text NULL,
 	continent text NULL,
@@ -66,6 +69,7 @@ CREATE TABLE public.challenge_command_history (
 	session_start timestamp NOT NULL,
 	session_end timestamp NOT NULL,
 	requests text NULL,
+	meta text DEFAULT ''::text NOT NULL,
 	"source" text DEFAULT ''::text NOT NULL,
 	created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -76,6 +80,8 @@ CREATE TABLE public.challenge_command_history (
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);
+CREATE INDEX commands_index ON challenge_command_history (session_end, host_name);
+
 
 
 -- public.challenge_command_history foreign keys

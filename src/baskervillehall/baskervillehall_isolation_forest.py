@@ -101,6 +101,8 @@ class BaskervillehallIsolationForest(object):
         if len(uas) > 1:
             return True
 
+        return False
+
     def get_all_features(self):
         return self.feature_extractor.get_all_features()
 
