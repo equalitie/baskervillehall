@@ -67,4 +67,15 @@ data:
     SQL_TABLE_COMMANDS: "challenge_command_history"
     AUTOCREATE_HOSTNAME_ID: "True"
     MAX_SESSIONS_FOR_IP: "10"
+    ALERT_WEBHOOK: "https://mattermost.equalit.ie/hooks/nuaqffhajibg5gtcq6kzn1qeay"
+    ALERT_CC: '@anton'
+    ALERT_WHITELIST: "[]"
+    ALERT_MIN_NUM_SESSIONS: "10"
+    ALERT_AGGREGATION_WINDOW_IN_MINUTES: "5"
+    ALERT_DATASET_IN_HOURS: "12"
+    ALERT_ZSCORE_HITS: "2.0"
+    ALERT_ZSCORE_CHALLENGE_RATE: "2.2"
+    ALERT_PENDING_PERIOD_IN_MINUTES: "30"
+    ALERT_HOST_WHITE_LIST: ""
+    ALERT_THRESHOLD_CHALLENGE_RATE: "22"
 

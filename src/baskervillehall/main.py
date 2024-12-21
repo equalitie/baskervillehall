@@ -3,8 +3,8 @@ import logging
 
 import os
 
+from baskervillehall.alert_challenge_rate import AlertChallengeRate
 from baskervillehall.storage_commands import StorageCommands
-from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
@@ -209,6 +209,24 @@ def main():
             logger=logger
         )
         t2 = storage_commands.start()
+
+        if partition == 0:
+            alert = AlertChallengeRate(
+                postgres_connection=postgres_connection,
+                aggregation_window_in_minutes=int(os.environ.get('ALERT_AGGREGATION_WINDOW_IN_MINUTES')),
+                dataset_in_hours=int(os.environ.get('ALERT_DATASET_IN_HOURS')),
+                zscore_hits=float(os.environ.get('ALERT_ZSCORE_HITS')),
+                zscore_challenge_rate=float(os.environ.get('ALERT_ZSCORE_CHALLENGE_RATE')),
+                pending_period_in_minutes=int(os.environ.get('ALERT_PENDING_PERIOD_IN_MINUTES')),
+                min_num_sessions=int(os.environ.get('ALERT_MIN_NUM_SESSIONS')),
+                host_white_list=os.environ.get('ALERT_HOST_WHITE_LIST').split(','),
+                webhook=os.environ.get('ALERT_WEBHOOK'),
+                cc=os.environ.get('ALERT_CC'),
+                threshold_challenge_rate=int(os.environ.get('ALERT_THRESHOLD_CHALLENGE_RATE')),
+                logger=logger
+            )
+            t3 = alert.start()
+            t3.join()
 
         t1.join()
         t2.join()
