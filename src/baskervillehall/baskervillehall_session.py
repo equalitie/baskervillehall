@@ -25,7 +25,6 @@ class BaskervillehallSession(object):
             reset_duration=5,
             session_inactivity=1,
             garbage_collection_period=2,
-            whitelist_url=None,
             deflect_config_url=None,
             whitelist_url_default=[],
             whitelist_ip=None,
@@ -47,7 +46,6 @@ class BaskervillehallSession(object):
         self.garbage_collection_period = garbage_collection_period
         self.whitelist_url_default = whitelist_url_default
         self.whitelist_ip = whitelist_ip
-        self.whitelist_url = whitelist_url
         self.deflect_config_url = deflect_config_url
         self.reset_duration = reset_duration
         self.white_list_refresh_period = white_list_refresh_period
@@ -89,8 +87,11 @@ class BaskervillehallSession(object):
                     size > self.min_number_of_requests:
                 if 'flush_size' not in session or \
                         size - session.get('flush_size') > self.flush_increment:
-                    self.send_session(session)
-                    session['flush_size'] = size
+                    if 'flush_end' not in session or \
+                            (session['end'] - session['flush_end']).total_seconds() > 0:
+                        self.send_session(session)
+                        session['flush_size'] = size
+                        session['flush_end'] = session['end']
 
     def send_session(self, session):
         requests = session['requests']
@@ -294,11 +295,6 @@ class BaskervillehallSession(object):
         return ''
 
     def run(self):
-        whitelist_url = WhitelistURL(url=self.whitelist_url,
-                                     whitelist_default=self.whitelist_url_default,
-                                     logger=self.logger,
-                                     refresh_period_in_seconds=60 * self.white_list_refresh_period)
-
         settings = SettingsDeflectAPI(url=self.deflect_config_url,
                                     whitelist_default=self.whitelist_url_default,
                                     logger=self.logger,
@@ -353,11 +349,6 @@ class BaskervillehallSession(object):
                         self.debugging = self.is_debugging_mode(data)
 
                         host = message.key.decode('utf-8')
-                        if whitelist_url.is_host_whitelisted(host):
-                            if self.debugging:
-                                self.logger.info(f'host {host} is whitelisted')
-                            continue
-
                         if whitelist_ip.is_in_whitelist(host, ip):
                             if self.debugging:
                                 self.logger.info(f'ip {ip} is whitelisted')
@@ -369,10 +360,6 @@ class BaskervillehallSession(object):
                             continue
 
                         url = data['client_url']
-                        if whitelist_url.is_in_whitelist(url):
-                            if self.debugging:
-                                self.logger.info(f'host {host} url {url} is whitelisted')
-                            continue
                         if settings.is_in_whitelist(url):
                             if self.debugging:
                                 self.logger.info(f'host {host} url {url} is whitelisted')
