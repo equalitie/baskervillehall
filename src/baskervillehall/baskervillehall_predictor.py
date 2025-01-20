@@ -228,21 +228,24 @@ class BaskervillehallPredictor(object):
                     if model is None:
                         model = model_storage_generic.get_model(host)
 
-                    if model is None:
-                        continue
-
                     ts = datetime.now()
-                    scores, shap_values = model.transform(sessions, use_shapley=self.use_shapley)
-                    predicted += scores.shape[0]
-                    self.logger.info(f'score() time = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
-                                     f'{scores.shape[0]} items')
+                    scores, shap_values = None, None
+                    if model:
+                        scores, shap_values = model.transform(sessions, use_shapley=self.use_shapley)
+                        predicted += scores.shape[0]
+                        self.logger.info(f'score() time = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
+                                         f'{scores.shape[0]} items')
 
-                    for i in range(scores.shape[0]):
-                        score = scores[i]
-                        sensitivity_shift = self.settings.get_sensitivity(host) * self.sensitivity_factor
-                        score -= sensitivity_shift
+                    for i in range(len(sessions)):
                         ip = session['ip']
-                        prediction = score < 0
+                        if scores is not None:
+                            score = scores[i]
+                            sensitivity_shift = self.settings.get_sensitivity(host) * self.sensitivity_factor
+                            score -= sensitivity_shift
+                            prediction = score < 0
+                        else:
+                            score = 0.0
+                            prediction = False
                         session = sessions[i]
                         meta = ''
                         if (self.bad_bot_challenge
