@@ -375,6 +375,8 @@ class BaskervillehallSession(object):
                         session_id = self.get_session_cookie(data)
 
                         if len(session_id) < 5:
+                            if data.get('loc_in', '') == 'static_file':
+                                continue
                             session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits)
                                                        for _ in range(7))
 

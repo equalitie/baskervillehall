@@ -133,7 +133,7 @@ class BaskervillehallPredictor(object):
         model_storage_generic.start()
 
         pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
-        ip_sessions = TTLCache(maxsize=self.maxsize_ip_sessions, ttl=self.ip_sessions_ttl_in_minutes*60)
+        host_ip_sessions = dict()
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
 
         offences = TTLCache(
@@ -269,13 +269,17 @@ class BaskervillehallPredictor(object):
 
                         if not primary_session:
                             too_many_sessions = False
-                            if ip not in ip_sessions:
-                                ip_sessions[ip] = set()
-                            ip_sessions[ip].add(session_id)
-                            if len(ip_sessions[ip]) >= self.max_sessions_for_ip:
+                            if host not in host_ip_sessions:
+                                host_ip_sessions[host] = TTLCache(maxsize=self.maxsize_ip_sessions,
+                                                                  ttl=120*60)
+                            if ip not in host_ip_sessions[host]:
+                                host_ip_sessions[host][ip] = TTLCache(maxsize=self.maxsize_ip_sessions,
+                                                                  ttl=self.ip_sessions_ttl_in_minutes*60)
+                            host_ip_sessions[host][ip][session_id] = True
+                            if len(host_ip_sessions[host][ip]) >= self.max_sessions_for_ip:
                                 too_many_sessions = True
                                 meta += 'Too many sessions.'
-                                self.logger.info(f'Too many sessions ({len(ip_sessions[ip])}) for ip '
+                                self.logger.info(f'Too many sessions ({len(host_ip_sessions[host][ip])}) for ip '
                                                  f'{ip}, host {host}')
                                 hits = len(session['requests'])
                                 session['requests'] = session['requests'][0:20]
