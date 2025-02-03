@@ -3,11 +3,12 @@ import logging
 
 import os
 
-from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
+from baskervillehall.alert_challenge_rate import AlertChallengeRate
+from baskervillehall.storage_commands import StorageCommands
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
-from baskervillehall.session_storage import SessionStorage
+from baskervillehall.storage_sessions import StorageSessions
 
 logger = None
 
@@ -92,7 +93,6 @@ def main():
             'max_primary_sessions_per_ip': int(os.environ.get('MAX_PRIMARY_SESSIONS_PER_IP')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
-            'whitelist_url': os.environ.get('WHITELIST_URL'),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
         }
@@ -160,13 +160,13 @@ def main():
             'maxsize_pending': int(os.environ.get('MAXSIZE_PENDING')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
-            'whitelist_url': os.environ.get('WHITELIST_URL'),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
             'postgres_connection': postgres_connection,
             'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
-            'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR'))
+            'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
+            'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP'))
         }
 
         predictor = BaskervillehallPredictor(
@@ -179,20 +179,55 @@ def main():
         predictor.run()
     elif args.pipeline == 'storage':
         params = {
-            'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'partition': partition,
             'batch_size': int(os.environ.get('BATCH_SIZE')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'postgres_connection': postgres_connection,
-            'ttl_records_days': int(os.environ.get('TTL_RECORDS_DAYS'))
+            'ttl_records_days': int(os.environ.get('TTL_RECORDS_DAYS')),
+            'autocreate_hostname_id': os.environ.get('AUTOCREATE_HOSTNAME_ID') == 'True'
         }
+        num_requests = int(os.environ.get("NUM_REQUESTS_IN_STORAGE"))
 
-        predictor = SessionStorage(
+        storage_sessions = StorageSessions(
             **params,
+            topic=os.environ.get('TOPIC_SESSIONS'),
             kafka_connection=kafka_connection,
+            num_requests=num_requests,
+            table=os.environ.get('SQL_TABLE_SESSIONS'),
             logger=logger
         )
-        predictor.run()
+        t1 = storage_sessions.start()
+
+        storage_commands = StorageCommands(
+            **params,
+            topic=os.environ.get('TOPIC_COMMANDS'),
+            kafka_connection=kafka_connection,
+            num_requests=num_requests,
+            table=os.environ.get('SQL_TABLE_COMMANDS'),
+            logger=logger
+        )
+        t2 = storage_commands.start()
+
+        if partition == 0:
+            alert = AlertChallengeRate(
+                postgres_connection=postgres_connection,
+                aggregation_window_in_minutes=int(os.environ.get('ALERT_AGGREGATION_WINDOW_IN_MINUTES')),
+                dataset_in_hours=int(os.environ.get('ALERT_DATASET_IN_HOURS')),
+                zscore_hits=float(os.environ.get('ALERT_ZSCORE_HITS')),
+                zscore_challenge_rate=float(os.environ.get('ALERT_ZSCORE_CHALLENGE_RATE')),
+                pending_period_in_minutes=int(os.environ.get('ALERT_PENDING_PERIOD_IN_MINUTES')),
+                min_num_sessions=int(os.environ.get('ALERT_MIN_NUM_SESSIONS')),
+                host_white_list=os.environ.get('ALERT_HOST_WHITE_LIST').split(','),
+                webhook=os.environ.get('ALERT_WEBHOOK'),
+                cc=os.environ.get('ALERT_CC'),
+                threshold_challenge_rate=int(os.environ.get('ALERT_THRESHOLD_CHALLENGE_RATE')),
+                logger=logger
+            )
+            t3 = alert.start()
+            t3.join()
+
+        t1.join()
+        t2.join()
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 

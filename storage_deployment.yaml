@@ -1,0 +1,46 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-storage"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-storage"
+spec:
+  replicas: 3
+  serviceName: "baskervillehall-storage"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-storage"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-storage"
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: "baskervillehall-storage"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "300m"
+          limits:
+            memory: "2Gi"
+            cpu: "500m"
+        command:
+          - python
+        args:
+          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - storage
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name

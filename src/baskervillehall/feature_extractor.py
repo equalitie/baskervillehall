@@ -1,5 +1,6 @@
 import logging
 import math
+import copy
 from sklearn.preprocessing import OrdinalEncoder
 from datetime import datetime
 from collections import defaultdict
@@ -94,12 +95,14 @@ class FeatureExtractor(object):
             return requests
 
         parse_datetime = isinstance(requests[0]['ts'], str)
+        result = []
         for r in requests:
+            rf = copy.deepcopy(r)
             if parse_datetime:
-                r['ts'] = datetime.strptime(r['ts'], self.datetime_format)
+                rf['ts'] = datetime.strptime(rf['ts'], self.datetime_format)
+            result.append(rf)
 
-        requests = sorted(requests, key=lambda x: x['ts'])
-        return requests
+        return sorted(result, key=lambda x: x['ts'])
 
     def calculate_entropy(self, counts):
         entropy = 0.0

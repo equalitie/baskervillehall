@@ -1,4 +1,8 @@
+
+
 import logging
+import threading
+
 import psycopg2
 
 from kafka import KafkaConsumer, TopicPartition
@@ -7,10 +11,10 @@ import json
 from datetime import datetime, timedelta
 
 
-class SessionStorage(object):
+class StorageBase(object):
     def __init__(
             self,
-            topic_sessions='BASKERVILLEHALL_SESSIONS',
+            topic='',
             partition=0,
             batch_size=100,
             kafka_connection=None,
@@ -18,6 +22,8 @@ class SessionStorage(object):
             ttl_records_days=7,
             logger=None,
             postgres_connection=None,
+            table=None,
+            autocreate_hostname_id=True
     ):
         super().__init__()
 
@@ -25,7 +31,7 @@ class SessionStorage(object):
             postgres_connection = {}
         if kafka_connection is None:
             kafka_connection = {'bootstrap_servers': 'localhost:9092'}
-        self.topic_sessions = topic_sessions
+        self.topic = topic
         self.partition = partition
         self.batch_size = batch_size
         self.kafka_connection = kafka_connection
@@ -36,9 +42,12 @@ class SessionStorage(object):
         self.delete_old_records_timestamp = None
         self.hostname_id = None
         self.ttl_records_days = ttl_records_days
+        self.table = table
+        self.autocreate_hostname_id = autocreate_hostname_id
 
     def get_host_id(self, host):
         if self.host_id_timestamp is None or \
+                host not in self.hostname_id or \
                 (datetime.now() - self.host_id_timestamp).total_seconds() > 60 * 10:
             self.host_id_timestamp = datetime.now()
 
@@ -52,6 +61,17 @@ class SessionStorage(object):
                 for r in cur.fetchall():
                     self.hostname_id[r[0]] = r[1]
 
+                if host not in self.hostname_id:
+                    if self.autocreate_hostname_id:
+                        sql = f'insert into public.hostname '\
+                            f'(hostname, created_at, updated_at, updated_by) values '\
+                            f'(\'{host}\', current_timestamp, current_timestamp, \'pipeline\') RETURNING hostname_id;'
+                        cur.execute(sql)
+                        for r in cur.fetchall():
+                            self.hostname_id[host] = r[0]
+                        conn.commit()
+                        self.logger.info(f'New hostname_id added {host} = {self.hostname_id[host]}')
+
             except psycopg2.DatabaseError as error:
                 if conn:
                     conn.rollback()
@@ -62,8 +82,8 @@ class SessionStorage(object):
 
         return self.hostname_id.get(host, '')
 
-    def get_delete_query(self, table, ts):
-        return f"delete from {table} where created_at < \'{ts.strftime(self.datetime_format)}\';"
+    def get_delete_query(self, ts):
+        return f"delete from {self.table} where created_at < \'{ts.strftime(self.datetime_format)}\';"
 
     def delete_old_records(self):
         if self.delete_old_records_timestamp is None or \
@@ -77,7 +97,7 @@ class SessionStorage(object):
                 conn = psycopg2.connect(**self.postgres_connection)
                 cur = conn.cursor()
                 self.logger.info(f'Deleting records older than {ts_cutoff}...')
-                sql = self.get_delete_query('sessions', ts_cutoff)
+                sql = self.get_delete_query(ts_cutoff)
                 cur.execute(sql)
                 conn.commit()
             except psycopg2.DatabaseError as error:
@@ -88,6 +108,29 @@ class SessionStorage(object):
                 if conn:
                     conn.close()
 
+    def get_sql(self, record):
+        return None
+
+    def get_session_requests(self, session, num_requests):
+        start = datetime.strptime(session['start'], self.datetime_format)
+        requests = []
+        for r in session['requests'][0:num_requests]:
+            requests.append(
+                (
+                    (datetime.strptime(r['ts'], self.datetime_format) - start).total_seconds(),
+                    r['url'].replace('\'', '')
+                )
+            )
+        return json.dumps(requests)
+
+    def get_number_of_useragents(self, session):
+        return len(set([r['ua'] for r in session['requests']]))
+
+    def start(self):
+        t = threading.Thread(target=self.run)
+        t.start()
+        return t
+
     def run(self):
         consumer = KafkaConsumer(
             **self.kafka_connection,
@@ -97,9 +140,10 @@ class SessionStorage(object):
             api_version=(0, 11, 5),
         )
 
-        self.logger.info(f'Starting session storage on topic {self.topic_sessions}, partition {self.partition}')
+        self.logger.info(f'Starting session storage on topic '
+                         f'{self.topic}, partition {self.partition}, table {self.table}')
 
-        consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
+        consumer.assign([TopicPartition(self.topic, self.partition)])
         consumer.seek_to_end()
         ts_lag_report = datetime.now()
         while True:
@@ -107,7 +151,7 @@ class SessionStorage(object):
             raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
             for topic_partition, messages in raw_messages.items():
                 self.logger.info(f'Batch size {len(messages)}')
-                sessions = []
+                records = []
                 for message in messages:
                     if (datetime.now() - ts_lag_report).total_seconds() > 5:
                         highwater = consumer.highwater(topic_partition)
@@ -117,45 +161,17 @@ class SessionStorage(object):
 
                     if not message.value:
                         continue
-                    sessions.append(json.loads(message.value.decode("utf-8")))
+                    records.append(json.loads(message.value.decode("utf-8")))
 
                 conn = None
                 try:
                     conn = psycopg2.connect(**self.postgres_connection)
                     cur = conn.cursor()
 
-                    for s in sessions:
-                        requests = []
-                        start = datetime.strptime(s['start'], self.datetime_format)
-                        for r in s['requests'][0:20]:
-                            requests.append(
-                                (
-                                    (datetime.strptime(r['ts'], self.datetime_format) - start).total_seconds(),
-                                    r['url']
-                                )
-                            )
-                        requests = json.dumps(requests)
-                        host = s["host"]
-                        host_id = self.get_host_id(host)
-                        if len(host_id) == 0:
-                            continue
-                        hits = len(s['requests'])
-                        duration = s['duration']
-                        num_ua = len(set([r['ua'] for r in s['requests']]))
-                        cur.execute(f'insert into sessions (\n'
-                                    f'hostname_id, host_name, ip, session_cookie, ip_cookie, '
-                                    f'primary_session, user_agent, country, continent, '
-                                    f'datacenter, hits, \n'
-                                    f'hit_rate, num_user_agent,'
-                                    f'duration, session_start, session_end, requests)\n'
-                                    f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{s["session_id"]}\',\n'
-                                    f'\'{s["ip"]}_{s["session_id"]}\',{int(s["primary_session"])},\n'
-                                    f'\'{s["ua"]}\', \n \'{s["country"]}\', \'{s["continent"]}\', '
-                                    f'\'{s["datacenter_code"]}\',\n'
-                                    f'{hits}, {hits * 60.0 / duration:.1f}, {num_ua}, '
-                                    f'{duration:.1f}, \'{s["start"]}\', \'{s["end"]}\',\n'
-                                    f'\'{requests}\''
-                                    f');')
+                    for r in records:
+                        sql = self.get_sql(r)
+                        if sql:
+                            cur.execute(sql)
                     conn.commit()
                     cur.close()
                 except psycopg2.DatabaseError as error:
@@ -166,4 +182,4 @@ class SessionStorage(object):
                     if conn:
                         conn.close()
 
-                self.logger.info(f'batch={len(sessions)} saved')
+                self.logger.info(f'batch={len(records)} saved')
