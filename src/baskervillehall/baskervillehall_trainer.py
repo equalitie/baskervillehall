@@ -226,7 +226,8 @@ class BaskervillehallTrainer(object):
                                 if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(session)
                             else:
-                                if not BaskervillehallIsolationForest.is_bad_bot(session):
+                                if not BaskervillehallIsolationForest.is_bad_bot(session) and \
+                                        not session['verified_bot']:
                                     if len(batch[host]['bot']) < self.num_sessions:
                                         batch[host]['bot'].append(session)
 
