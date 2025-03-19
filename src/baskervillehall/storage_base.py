@@ -150,7 +150,6 @@ class StorageBase(object):
             self.delete_old_records()
             raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
             for topic_partition, messages in raw_messages.items():
-                self.logger.info(f'Batch size {len(messages)}')
                 records = []
                 for message in messages:
                     if (datetime.now() - ts_lag_report).total_seconds() > 5:
@@ -175,11 +174,10 @@ class StorageBase(object):
                     conn.commit()
                     cur.close()
                 except psycopg2.DatabaseError as error:
+                    self.logger.info(sql)
                     if conn:
                         conn.rollback()
                     self.logger.error(error)
                 finally:
                     if conn:
                         conn.close()
-
-                self.logger.info(f'batch={len(records)} saved')

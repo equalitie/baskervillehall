@@ -42,6 +42,7 @@ class StorageSessions(StorageBase):
         if duration < 1:
             duration = 1
         num_ua = self.get_number_of_useragents(session)
+        ua = session["ua"].replace("\'", "")
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip, session_cookie, ip_cookie, '\
             f'primary_session, human, user_agent, country, continent, '\
@@ -51,7 +52,7 @@ class StorageSessions(StorageBase):
             f'values (\'{host_id}\', \'{host}\', \'{session["ip"]}\', \'{session["session_id"]}\',\n'\
             f'\'{session["ip"]}_{session["session_id"]}\',{int(session["primary_session"])},\n'\
             f'{int(session["human"])},'\
-            f'\'{session["ua"]}\', \n \'{session["country"]}\', \'{session["continent"]}\', '\
+            f'\'{ua}\', \n \'{session["country"]}\', \'{session["continent"]}\', '\
             f'\'{session["datacenter_code"]}\',\n'\
             f'{hits}, {hits * 60.0 / duration:.1f}, {num_ua}, '\
             f'{duration:.1f}, \'{session["start"]}\', \'{session["end"]}\',\n'\

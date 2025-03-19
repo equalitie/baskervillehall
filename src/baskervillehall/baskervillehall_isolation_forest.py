@@ -6,10 +6,12 @@ import pandas as pd
 
 from baskervillehall.feature_extractor import FeatureExtractor
 
+
 class ModelType(Enum):
     HUMAN = 'human'
     BOT = 'bot'
     GENERIC = 'generic'
+
 
 class BaskervillehallIsolationForest(object):
 
@@ -65,6 +67,42 @@ class BaskervillehallIsolationForest(object):
         self.contamination = contamination
 
     @staticmethod
+    def is_weak_cipher(session):
+        cipher = session.get('cipher', '')
+        if 'RSA' in cipher and 'PFS' not in cipher:
+            return True
+        if 'CBC' in cipher or '3DES' in cipher or 'MD5' in cipher or 'RC4' in cipher:
+            return True
+        return False
+
+    @staticmethod
+    def is_valid_browser_chiper(session):
+        # if 'ciphers' not in session or len(session['ciphers']) == 0:
+        #     return True # this is temporal, just for compatibility with old session datasets
+
+        ciphers = session.get('ciphers', [])
+        if len(ciphers) < 5:
+            return False
+        if 'TLS_AES_128_GCM_SHA256' not in ciphers and \
+                'TLS_AES_256_GCM_SHA384' not in ciphers and \
+                'TLS_CHACHA20_POLY1305_SHA256' not in ciphers:
+            return False
+
+        ECDHE_exists = False
+        for c in ciphers:
+            if 'ECDHE' in c:
+                ECDHE_exists = True
+
+        if not ECDHE_exists:
+            return False
+
+        if BaskervillehallIsolationForest.is_weak_cipher(session):
+            return False
+
+        return True
+
+
+    @staticmethod
     def is_bot_ua(ua):
         name = ua
         if isinstance(ua, dict):
@@ -76,9 +114,13 @@ class BaskervillehallIsolationForest(object):
     def is_human(session):
         if session.get('verified_bot', False):
             return False
-
-        return not session.get('primary_session', False) and \
-                not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
+        if session.get('primary_session', False):
+            return False
+        if BaskervillehallIsolationForest.is_bot_ua(session['ua']):
+            return False
+        if not BaskervillehallIsolationForest.is_valid_browser_chiper(session):
+            return False
+        return True
 
     @staticmethod
     def is_bad_bot(session):

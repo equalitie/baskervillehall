@@ -106,6 +106,11 @@ class BaskervillehallTrainer(object):
                 categorical_features.append('human')
             if 'bad_bot' not in categorical_features:
                 categorical_features.append('bad_bot')
+
+        if model_type == ModelType.GENERIC or model_type == ModelType.BOT:
+            if 'valid_browser_cipher' not in categorical_features:
+                categorical_features.append('valid_browser_cipher')
+
         model = BaskervillehallIsolationForest(
             n_estimators=self.n_estimators,
             max_samples=self.max_samples,

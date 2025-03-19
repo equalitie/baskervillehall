@@ -19,6 +19,16 @@ spec:
       labels:
         app: "baskervillehall-storage"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - workers-node-eac0c8
+                      - workers-node-c83aa9
       restartPolicy: Always
       containers:
       - name: "baskervillehall-storage"
