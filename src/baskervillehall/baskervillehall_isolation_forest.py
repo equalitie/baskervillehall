@@ -6,10 +6,12 @@ import pandas as pd
 
 from baskervillehall.feature_extractor import FeatureExtractor
 
+
 class ModelType(Enum):
     HUMAN = 'human'
     BOT = 'bot'
     GENERIC = 'generic'
+
 
 class BaskervillehallIsolationForest(object):
 
@@ -64,21 +66,69 @@ class BaskervillehallIsolationForest(object):
     def set_contamination(self, contamination):
         self.contamination = contamination
 
+
+    @staticmethod
+    def is_weak_cipher(cipher):
+        if 'RSA' in cipher and 'PFS' not in cipher:
+            return True
+        if 'CBC' in cipher or '3DES' in cipher or 'MD5' in cipher or 'RC4' in cipher:
+            return True
+        return False
+
+    @staticmethod
+    def is_valid_browser_ciphers(ciphers):
+        # if 'ciphers' not in session or len(session['ciphers']) == 0:
+        #     return True # this is temporal, just for compatibility with old session datasets
+
+        if len(ciphers) < 5:
+            return False
+        if 'TLS_AES_128_GCM_SHA256' not in ciphers and \
+                'TLS_AES_256_GCM_SHA384' not in ciphers and \
+                'TLS_CHACHA20_POLY1305_SHA256' not in ciphers:
+            return False
+
+        ECDHE_exists = False
+        for c in ciphers:
+            if 'ECDHE' in c:
+                ECDHE_exists = True
+
+        if not ECDHE_exists:
+            return False
+
+        return True
+
+
     @staticmethod
     def is_bot_ua(ua):
         name = ua
         if isinstance(ua, dict):
             name = ua.get('name', '')
         name_lowercase = name.lower()
-        return 'bot' in name_lowercase or 'spider' in name_lowercase or 'crawl' in name_lowercase
+        return 'bot' in name_lowercase or 'spider' in name_lowercase \
+                or 'crawl' in name_lowercase or 'slurp' in name_lowercase
+
+    def is_headless_ua(ua):
+        return 'HeadlessChrome' in ua
 
     @staticmethod
     def is_human(session):
+        if session.get('datacenter_asn', False):
+            return False
         if session.get('verified_bot', False):
             return False
-
-        return not session.get('primary_session', False) and \
-                not BaskervillehallIsolationForest.is_bot_ua(session['ua'])
+        if session.get('primary_session', False):
+            return False
+        # if session.get('language_header', False):
+        #     return False
+        if session.get('headless_ua', False):
+            return False
+        if session.get('bot_ua', False):
+            return False
+        if not BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']):
+            return False
+        if session.get('weak_cipher', False):
+            return False
+        return True
 
     @staticmethod
     def is_bad_bot(session):

@@ -6,6 +6,18 @@ Bot mitigation
 kubectl apply -f config_baskervillehall.yaml
 ```
 
+## ASN database
+* Download the updated bad-asn-list.csv from <https://github.com/brianhama/bad-asn-list/blob/master/bad-asn-list.csv>
+* unzip the file to deployment/bad_asn/bad-asn-list.csv
+* create docker image
+```
+cd deployment/bad_asn
+docker build -t equalitie/baskervillehall_bad_asn:latest .
+docker push equalitie/baskervillehall_bad_asn:latest
+cd ../..
+```
+
+
 ### Building
 ```
 docker build . -t equalitie/baskervillehall:base
@@ -65,3 +77,4 @@ kubectl apply -f deployment/postgres/postgres-baskervillehall.yaml
 kubectl apply -f deployment/postgres/postgres-baskervillehall-service.yaml
 
 kubectl port-forward service/postgres-baskervillehall 5433:5432
+

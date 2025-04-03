@@ -52,7 +52,9 @@ class FeatureExtractor(object):
             'duration',
             'edge_count',
             'static_ratio',
-            'ua_count'
+            'ua_count',
+            'api_ratio',
+            'num_ciphers'
         ]
         self.pca_feature = pca_feature
         if features is None:
@@ -66,13 +68,19 @@ class FeatureExtractor(object):
             'country',
             'primary_session',
             'bad_bot',
-            'human'
+            'human',
+            'cipher',
+            'valid_browser_cipher',
+            'weak_cipher',
+            'headless_ua',
+            'bot_ua',
+            'verified_bot'
         ]
         if categorical_features is None:
             categorical_features = supported_categorical_features
         self.categorical_features = categorical_features
         not_supported_categorical_features = set(self.categorical_features) - \
-                                             set(supported_categorical_features)
+                                          set(supported_categorical_features)
         if len(not_supported_categorical_features) > 0:
             raise RuntimeError(f'Categorical feature(s) {not_supported_features} not supported.')
 
@@ -111,6 +119,25 @@ class FeatureExtractor(object):
             entropy += - px * math.log(px, 2)
         return entropy
 
+    def is_api_request(self, request):
+        ctype = request.get('type', 'text/html')
+        if ctype == 'application/json' or \
+           ctype == 'application/xml' or \
+           ctype == 'application/graphql' or \
+           ctype == 'application/ld+json' or \
+           ctype == 'multipart/form-data' or \
+           ctype == 'application/x-www-form-urlencoded':
+            return True
+
+        url = request.get('url', '/')
+        if '/api/' in url or '/v1/' in url or '/rest/' in url or \
+           '/graphql/' in url or '/gql/' in url or \
+           '/auth/' in url or '/oauth/' in url or '/token/' in url or \
+           '/webhook/' in url or '/callback/' in url or \
+           '/payment/' in url or '/checkout/' in url or '/orders/' in url or \
+           '/system/' in url or '/monitoring/' in url:
+            return True
+
     def calculate_features_dict(self, session):
         # assert (len(session['requests']) > 0)
 
@@ -133,6 +160,7 @@ class FeatureExtractor(object):
         payloads = []
         num_post = 0
         num_static = 0
+        api_count = 0
 
         for i in range(len(requests)):
             r = requests[i]
@@ -154,21 +182,23 @@ class FeatureExtractor(object):
             query_map[r.get('query', '')] += 1
             content_type = r.get('type', 'text/html')
             if content_type == 'text/html' or \
-                    content_type == 'text/html; charset=UTF-8' or \
-                    content_type == 'text/html; charset=utf-8':
+               content_type == 'text/html; charset=UTF-8' or \
+               content_type == 'text/html; charset=utf-8':
                 num_html += 1
             elif 'image' in content_type:
                 num_image += 1
             elif 'javascript' in content_type:
                 num_js += 1
             elif content_type == 'text/css' or \
-                    content_type == 'text/css; charset=UTF-8' or \
-                    content_type == 'text/css; charset=utf-8':
+                 content_type == 'text/css; charset=UTF-8' or \
+                 content_type == 'text/css; charset=utf-8':
                 num_css += 1
             if r.get('method', 'GET') == 'POST':
                 num_post += 1
             if r.get('static', False):
                 num_static += 1
+            if self.is_api_request(r):
+                api_count += 1
 
         intervals = np.array(intervals)
         unique_path = float(len(url_map.keys()))
@@ -183,25 +213,27 @@ class FeatureExtractor(object):
         features['post_rate'] = num_post / hits
         mean_intervals = np.mean(intervals)
         features['request_interval_average'] = mean_intervals
-        features['request_interval_std'] = np.sqrt(np.mean((intervals - mean_intervals) ** 2))
+        features['request_interval_std'] = np.std(intervals) if len(intervals) > 1 else 0  
         features['response4xx_to_request_ratio'] = num_4xx / hits
         features['response5xx_to_request_ratio'] = num_5xx / hits
         features['top_page_to_request_ratio'] = max(url_map.values()) / hits
         features['unique_path_rate'] = unique_path / session_duration * 60
         features['unique_path_to_request_ratio'] = unique_path / hits
         features['unique_query_rate'] = unique_query / session_duration * 60
-        features['unique_query_to_unique_path_ratio'] = unique_query / unique_path
+        features['unique_query_to_unique_path_ratio'] = unique_query / unique_path if unique_path > 0 else 0 
         features['image_to_html_ratio'] = float(num_image) / num_html if num_html > 0 else 10.0
         features['js_to_html_ratio'] = float(num_js) / num_html if num_html > 0 else 10.0
         features['css_to_html_ratio'] = float(num_css) / num_html if num_html > 0 else 10.0
         mean_depth = np.mean(slash_counts)
         features['path_depth_average'] = mean_depth
-        features['path_depth_std'] = np.sqrt(np.mean((len(slash_counts) - mean_depth) ** 2))
+        features['path_depth_std'] = np.std(slash_counts) if len(slash_counts) > 1 else 0  
         features['payload_size_log_average'] = np.mean(np.log(payloads))
         features['entropy'] = self.calculate_entropy(url_map)
         features['edge_count'] = len(edge_map.keys())
         features['ua_count'] = len(ua_map.keys())
         features['static_ratio'] = float(num_static) / hits
+        features['api_ratio'] = float(api_count) / hits
+        features['num_ciphers'] = len(session.get('ciphers', []))
 
         return features
 
@@ -276,4 +308,3 @@ class FeatureExtractor(object):
             X = np.concatenate((X, X_cat), axis=1)
 
         return X
-

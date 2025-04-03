@@ -46,6 +46,7 @@ class BaskervillehallTrainer(object):
             kafka_timeout_ms=1000,
             kafka_max_size=200,
             wait_time_minutes=5,
+            single_model=False,
             logger=None
     ):
         super().__init__()
@@ -89,6 +90,7 @@ class BaskervillehallTrainer(object):
         self.small_dataset_size = small_dataset_size
         self.dataset_delay_from_now_in_minutes = dataset_delay_from_now_in_minutes
         self.accepted_contamination = accepted_contamination
+        self.single_model = single_model
 
     def train_and_save_model(
             self,
@@ -104,8 +106,19 @@ class BaskervillehallTrainer(object):
         if model_type == ModelType.GENERIC:
             if 'human' not in categorical_features:
                 categorical_features.append('human')
-            if 'bad_bot' not in categorical_features:
-                categorical_features.append('bad_bot')
+
+        if model_type == ModelType.GENERIC or model_type == ModelType.BOT:
+            if 'valid_browser_cipher' not in categorical_features:
+                categorical_features.append('valid_browser_cipher')
+            if 'weak_cipher' not in categorical_features:
+                categorical_features.append('weak_cipher')
+            if 'headless_ua' not in categorical_features:
+                categorical_features.append('headless_ua')
+            if 'bot_ua' not in categorical_features:
+                categorical_features.append('bot_ua')
+            if 'verified_bot' not in categorical_features:
+                categorical_features.append('verified_bot')
+
         model = BaskervillehallIsolationForest(
             n_estimators=self.n_estimators,
             max_samples=self.max_samples,
@@ -222,11 +235,11 @@ class BaskervillehallTrainer(object):
                                 else:
                                     continue
 
-                            if BaskervillehallIsolationForest.is_human(session):
+                            if session.get('human', False):
                                 if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(session)
                             else:
-                                if not BaskervillehallIsolationForest.is_bad_bot(session) and \
+                                if not session.get('bad_bot', False) and \
                                         not session['verified_bot']:
                                     if len(batch[host]['bot']) < self.num_sessions:
                                         batch[host]['bot'].append(session)
@@ -235,9 +248,12 @@ class BaskervillehallTrainer(object):
                 for host, v in batch.items():
                     self.logger.info(f'---{host}: humans={len(v["human"])}, bots={len(v["bot"])}')
                 for host, v in batch.items():
-                    if not self.train_and_save_model(v['human'], host, ModelType.HUMAN) or \
-                    not self.train_and_save_model(v['bot'], host, ModelType.BOT):
-                        self.train_and_save_model(v['bot']+v['human'], host, ModelType.GENERIC)
+                    if self.single_model:
+                        self.train_and_save_model(v['bot'] + v['human'], host, ModelType.GENERIC)
+                    else:
+                        if not self.train_and_save_model(v['human'], host, ModelType.HUMAN) or \
+                        not self.train_and_save_model(v['bot'], host, ModelType.BOT):
+                            self.train_and_save_model(v['bot']+v['human'], host, ModelType.GENERIC)
 
 
         except Exception as ex:

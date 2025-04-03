@@ -45,6 +45,7 @@ class StorageCommands(StorageBase):
             duration = 1
         num_ua = self.get_number_of_useragents(session)
         shapley_formatted = json.dumps(command['shapley'])
+        ua = session["ua"].replace("\'", "")
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip_address, session_cookie, ip_cookie, '\
             f'primary_session, human, passed_challenge, user_agent, country, continent, '\
@@ -54,7 +55,7 @@ class StorageCommands(StorageBase):
             f'values (\'{host_id}\', \'{host}\', \'{session["ip"]}\', \'{session["session_id"]}\',\n'\
             f'\'{session["ip"]}_{session["session_id"]}\',{int(session["primary_session"])},\n'\
             f'{int(session["human"])},'\
-            f'{int(session["passed_challenge"])}, \'{session["ua"]}\', \n \'{session["country"]}\','\
+            f'{int(session["passed_challenge"])}, \'{ua}\', \n \'{session["country"]}\','\
             f' \'{session["continent"]}\', '\
             f'\'{session["datacenter_code"]}\',\n'\
             f'{hits}, {command["score"]},\'{command.get("shapley_feature","")}\','\

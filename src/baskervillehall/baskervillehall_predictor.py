@@ -54,7 +54,9 @@ class BaskervillehallPredictor(object):
             sensitivity_factor = 0.05,
             max_sessions_for_ip = 10,
             maz_size_ip_sessions = 100000,
-            ip_sessions_ttl_in_minutes=30
+            ip_sessions_ttl_in_minutes=30,
+            max_requests_in_command=20,
+            single_model=False
     ):
         super().__init__()
 
@@ -94,6 +96,8 @@ class BaskervillehallPredictor(object):
         self.max_sessions_for_ip = max_sessions_for_ip
         self.maxsize_ip_sessions = maz_size_ip_sessions
         self.ip_sessions_ttl_in_minutes = ip_sessions_ttl_in_minutes
+        self.max_requests_in_command = max_requests_in_command
+        self.single_model = single_model
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
@@ -108,21 +112,25 @@ class BaskervillehallPredictor(object):
         return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
 
     def run(self):
-        model_storage_human = ModelStorage(
-            self.s3_connection,
-            self.s3_path,
-            model_type=ModelType.HUMAN,
-            reload_in_minutes=self.model_reload_in_minutes,
-            logger=self.logger)
-        model_storage_human.start()
+        if self.single_model:
+            model_storage_human = None
+            model_storage_bot = None
+        else:
+            model_storage_human = ModelStorage(
+                self.s3_connection,
+                self.s3_path,
+                model_type=ModelType.HUMAN,
+                reload_in_minutes=self.model_reload_in_minutes,
+                logger=self.logger)
+            model_storage_human.start()
 
-        model_storage_bot = ModelStorage(
-            self.s3_connection,
-            self.s3_path,
-            model_type=ModelType.BOT,
-            reload_in_minutes=self.model_reload_in_minutes,
-            logger=self.logger)
-        model_storage_bot.start()
+            model_storage_bot = ModelStorage(
+                self.s3_connection,
+                self.s3_path,
+                model_type=ModelType.BOT,
+                reload_in_minutes=self.model_reload_in_minutes,
+                logger=self.logger)
+            model_storage_bot.start()
 
         model_storage_generic = ModelStorage(
             self.s3_connection,
@@ -196,7 +204,7 @@ class BaskervillehallPredictor(object):
                         continue
 
                     session = json.loads(message.value.decode("utf-8"))
-                    human = BaskervillehallIsolationForest.is_human(session)
+                    human = session.get('human', False)
 
                     ip = session['ip']
 
@@ -223,10 +231,14 @@ class BaskervillehallPredictor(object):
 
                 predicted = 0
                 for (host, human), sessions in batch.items():
-                    model = model_storage_human.get_model(host) if human else\
-                        model_storage_bot.get_model(host)
-                    if model is None:
+                    model = None
+                    if self.single_model:
                         model = model_storage_generic.get_model(host)
+                    else:
+                        model = model_storage_human.get_model(host) if human else\
+                            model_storage_bot.get_model(host)
+                        if model is None:
+                            model = model_storage_generic.get_model(host)
 
                     ts = datetime.now()
                     scores, shap_values = None, None
@@ -267,6 +279,47 @@ class BaskervillehallPredictor(object):
                         primary_session = session['primary_session']
                         verified_bot = session.get('verified_bot', False)
 
+                        if verified_bot:
+                            continue
+                        hits = len(session['requests'])
+                        session['requests'] = session['requests'][0:self.max_requests_in_command]
+
+                        if session.get('weak_cipher', False):
+                            if ip in pending_ip:
+                                continue
+                            pending_ip[ip] = True
+
+                            meta = 'Weak cipher'
+                            self.logger.info(f'Weak cipher for ip '
+                                             f'{ip}, host {host}')
+                            message = json.dumps(
+                                {
+                                    'Name': 'challenge_ip',
+                                    'difficulty': 2,
+                                    'Value': f'{ip}',
+                                    'country': session.get('country', ''),
+                                    'continent': session.get('continent', ''),
+                                    'datacenter_code': session.get('datacenter_code', ''),
+                                    'session_id': session_id,
+                                    'host': host,
+                                    'source': meta,
+                                    'shapley': '',
+                                    'meta': meta,
+                                    'shapley_feature': '',
+                                    'start': session['start'],
+                                    'end': session['end'],
+                                    'duration': session['duration'],
+                                    'score': score,
+                                    'num_requests': hits,
+                                    'user_agent': session.get('ua'),
+                                    'human': session.get('human', ''),
+                                    'datacenter_asn': session.get('datacenter_asn', ''),
+                                    'session': session
+                                }
+                            ).encode('utf-8')
+                            producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                            continue
+
                         if not primary_session:
                             too_many_sessions = False
                             if host not in host_ip_sessions:
@@ -277,12 +330,14 @@ class BaskervillehallPredictor(object):
                                                                   ttl=self.ip_sessions_ttl_in_minutes*60)
                             host_ip_sessions[host][ip][session_id] = True
                             if len(host_ip_sessions[host][ip]) >= self.max_sessions_for_ip:
+                                if ip in pending_ip:
+                                    continue
+                                pending_ip[ip] = True
+
                                 too_many_sessions = True
-                                meta += 'Too many sessions.'
+                                meta = 'Too many sessions.'
                                 self.logger.info(f'Too many sessions ({len(host_ip_sessions[host][ip])}) for ip '
                                                  f'{ip}, host {host}')
-                                hits = len(session['requests'])
-                                session['requests'] = session['requests'][0:20]
                                 message = json.dumps(
                                     {
                                         'Name': 'challenge_ip',
@@ -302,6 +357,9 @@ class BaskervillehallPredictor(object):
                                         'duration': session['duration'],
                                         'score': score,
                                         'num_requests': hits,
+                                        'user_agent': session.get('ua'),
+                                        'human': session.get('human', ''),
+                                        'datacenter_asn': session.get('datacenter_asn', ''),
                                         'session': session
                                     }
                                 ).encode('utf-8')
@@ -309,9 +367,6 @@ class BaskervillehallPredictor(object):
                                 continue
 
                         if prediction:
-                            if verified_bot:
-                                continue
-
                             if primary_session:
                                 if ip in pending_ip:
                                     continue
@@ -323,7 +378,6 @@ class BaskervillehallPredictor(object):
                                 if session_id in pending_session[ip]:
                                     continue
                                 pending_session[ip][session_id] = True
-
                             difficulty = 1
                             if session['passed_challenge']:
                                 if ip not in offences:
@@ -354,29 +408,33 @@ class BaskervillehallPredictor(object):
 
                             shapley = []
                             shapley_feature = ''
+                            api_ratio = 0.0
                             if shap_values:
                                 shap_value = shap_values[i]
                                 min_shapley = 0
                                 for k in range(len(shap_value.values)):
-                                    shap_value.values[k] -= sensitivity_shift
+                                    feature = model.get_all_features()[k]
+                                    if feature == 'api_ratio':
+                                        api_ratio = round(shap_value.data[k], 2)
                                     if shap_value.values[k] < 0:
                                         if min_shapley > shap_value.values[k]:
                                             min_shapley = shap_value.values[k]
-                                            shapley_feature = model.get_all_features()[k]
+                                            shapley_feature = feature
                                         shapley.append({
-                                            'name': model.get_all_features()[k],
+                                            'name': feature,
                                             'values': {
                                                 'shapley': round(shap_value.values[k], 2),
                                                 'feature': round(shap_value.data[k], 2)
                                             }
                                         })
 
+                            if api_ratio == 1.0:
+                                self.logger.info(f'Skipping challenge for ip={ip}, host={host} since api_ratio is 1.0')
+                                continue
+
                             self.logger.info(f'Challenging for ip={ip}, '
                                              f'session_id={session_id}, host={host}, end={end}, score={score}.'
                                              f'meta = {meta}')
-
-                            hits = len(session['requests'])
-                            session['requests'] = session['requests'][0:20]
                             message = json.dumps(
                                 {
                                     'Name': command,
@@ -396,6 +454,9 @@ class BaskervillehallPredictor(object):
                                     'duration': session['duration'],
                                     'score': score,
                                     'num_requests': hits,
+                                    'user_agent': session.get('ua'),
+                                    'human': session.get('human', ''),
+                                    'datacenter_asn': session.get('datacenter_asn', ''),
                                     'session': session
                                 }
                             ).encode('utf-8')

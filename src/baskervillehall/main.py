@@ -101,6 +101,7 @@ def main():
             **params,
             kafka_connection=kafka_connection,
             debug_ip=debug_ip,
+            asn_database_path=os.environ.get('BAD_ASN_FILE'),
             logger=logger
         )
         sessionizer.run()
@@ -133,7 +134,8 @@ def main():
             'small_dataset_size': int(os.environ.get('SMALL_DATASET_SIZE')),
             'wait_time_minutes': int(os.environ.get('TRAINER_WAIT_TIME_MINUTES')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
-            'n_jobs': int(os.environ.get('N_JOBS'))
+            'n_jobs': int(os.environ.get('N_JOBS')),
+            'single_model': os.environ.get('SINGLE_MODEL') == 'True'
         }
         trainer = BaskervillehallTrainer(
             **params,
@@ -166,7 +168,8 @@ def main():
             'postgres_connection': postgres_connection,
             'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
-            'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP'))
+            'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
+            'single_model': os.environ.get('SINGLE_MODEL') == 'True'
         }
 
         predictor = BaskervillehallPredictor(
