@@ -70,7 +70,11 @@ class FeatureExtractor(object):
             'bad_bot',
             'human',
             'cipher',
-            'valid_browser_cipher'
+            'valid_browser_cipher',
+            'weak_cipher',
+            'headless_ua',
+            'bot_ua',
+            'verified_bot'
         ]
         if categorical_features is None:
             categorical_features = supported_categorical_features

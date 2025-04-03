@@ -2,6 +2,7 @@ import copy
 import random
 import string
 
+from baskervillehall.asn_database import ASNDatabase
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
@@ -35,6 +36,7 @@ class BaskervillehallSession(object):
             min_number_of_requests=10,
             debug_ip=None,
             logger=None,
+            asn_database_path = '',
     ):
         super().__init__()
         self.topic_weblogs = topic_weblogs
@@ -67,6 +69,7 @@ class BaskervillehallSession(object):
         self.flush_size_primary = dict()
         self.debugging = False
         self.bot_verificator = BotVerificator()
+        self.asn_database = ASNDatabase(asn_database_path)
 
     def get_timestamp_and_data(self, data):
         if 'message' in data:
@@ -117,6 +120,7 @@ class BaskervillehallSession(object):
         if 'cipher' not in session:
             self.logger.info('no cipher in session')
             self.logger.info(session)
+
         message = {
             'host': session['host'],
             'ua': session['ua'],
@@ -133,12 +137,15 @@ class BaskervillehallSession(object):
             'passed_challenge': passed_challenge,
             'deflect_password': deflect_password,
             'verified_bot': session['verified_bot'],
-            'cipher': session['cipher'],
-            'ciphers': session['ciphers'],
-            'weak_cipher': BaskervillehallIsolationForest.is_weak_cipher(session),
-            'valid_browser_cipher': BaskervillehallIsolationForest.is_valid_browser_chiper(session),
+            'cipher': session.get('cipher', ''),
+            'ciphers': session.get('ciphers', ''),
+            'valid_browser_ciphers': BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']),
             'human': BaskervillehallIsolationForest.is_human(session),
-            'bad_bot': BaskervillehallIsolationForest.is_bad_bot(session)
+            'bad_bot': BaskervillehallIsolationForest.is_bad_bot(session),
+            'weak_cipher': BaskervillehallIsolationForest.is_weak_cipher(session.get('cipher', '')),
+            'datacenter_asn': session['datacenter_asn'],
+            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua']),
+            'bot_ua': BaskervillehallIsolationForest.is_bot_ua(session['ua']),
         }
         self.producer.send(
             self.topic_sessions,
@@ -153,7 +160,7 @@ class BaskervillehallSession(object):
 
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request):
+                       cipher, ciphers, request, datacenter_asn):
         return {
             'ua': ua,
             'host': host,
@@ -169,7 +176,8 @@ class BaskervillehallSession(object):
             'time_now': datetime.now(),
             'cipher': cipher,
             'ciphers': ciphers,
-            'requests': [request] if request else []
+            'requests': [request] if request else [],
+            'datacenter_asn': datacenter_asn
         }
 
     @staticmethod
@@ -269,7 +277,8 @@ class BaskervillehallSession(object):
                     'ciphers': sessions[0]['ciphers'],
                     'duration': (requests[-1]['ts'] - requests[0]['ts']).total_seconds(),
                     'requests': requests,
-                    'primary_session': True
+                    'primary_session': True,
+                    'datacenter_asn': sessions[0]['datacenter_asn'],
                 }
 
                 if session['duration'] < self.max_session_duration and \
@@ -427,6 +436,8 @@ class BaskervillehallSession(object):
 
                         cipher = data.get('ssl_cipher', '')
                         ciphers = data.get('ssl_ciphers', '').split(':')
+                        datacenter_asn = self.asn_database.is_datacenter_asn(
+                            asn=data.get('geoip_asn', {}).get('as', {}).get('number', '-'))
 
                         if ip in self.ips and session_id in self.ips[ip]:
                             # existing session
@@ -438,7 +449,8 @@ class BaskervillehallSession(object):
                                     self.logger.info('session is expired')
                                 session = self.create_session(ua, host, country, continent, datacenter_code,
                                                               ip, session_id,
-                                                              verified_bot, ts, cipher, ciphers, request)
+                                                              verified_bot, ts, cipher, ciphers, request,
+                                                              datacenter_asn)
                                 self.ips[ip][session_id] = session
                             else:
                                 if self.debugging:
@@ -462,7 +474,8 @@ class BaskervillehallSession(object):
                             # primary session
                             session = self.create_session(ua, host, country, continent, datacenter_code,
                                                           ip, session_id,
-                                                          verified_bot, ts, cipher, ciphers, request)
+                                                          verified_bot, ts, cipher, ciphers, request,
+                                                          datacenter_asn)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session

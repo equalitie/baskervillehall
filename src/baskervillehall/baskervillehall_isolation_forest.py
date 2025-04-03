@@ -66,9 +66,9 @@ class BaskervillehallIsolationForest(object):
     def set_contamination(self, contamination):
         self.contamination = contamination
 
+
     @staticmethod
-    def is_weak_cipher(session):
-        cipher = session.get('cipher', '')
+    def is_weak_cipher(cipher):
         if 'RSA' in cipher and 'PFS' not in cipher:
             return True
         if 'CBC' in cipher or '3DES' in cipher or 'MD5' in cipher or 'RC4' in cipher:
@@ -76,11 +76,10 @@ class BaskervillehallIsolationForest(object):
         return False
 
     @staticmethod
-    def is_valid_browser_chiper(session):
+    def is_valid_browser_ciphers(ciphers):
         # if 'ciphers' not in session or len(session['ciphers']) == 0:
         #     return True # this is temporal, just for compatibility with old session datasets
 
-        ciphers = session.get('ciphers', [])
         if len(ciphers) < 5:
             return False
         if 'TLS_AES_128_GCM_SHA256' not in ciphers and \
@@ -96,9 +95,6 @@ class BaskervillehallIsolationForest(object):
         if not ECDHE_exists:
             return False
 
-        if BaskervillehallIsolationForest.is_weak_cipher(session):
-            return False
-
         return True
 
 
@@ -108,17 +104,29 @@ class BaskervillehallIsolationForest(object):
         if isinstance(ua, dict):
             name = ua.get('name', '')
         name_lowercase = name.lower()
-        return 'bot' in name_lowercase or 'spider' in name_lowercase or 'crawl' in name_lowercase
+        return 'bot' in name_lowercase or 'spider' in name_lowercase \
+                or 'crawl' in name_lowercase or 'slurp' in name_lowercase
+
+    def is_headless_ua(ua):
+        return 'HeadlessChrome' in ua
 
     @staticmethod
     def is_human(session):
+        if session.get('datacenter_asn', False):
+            return False
         if session.get('verified_bot', False):
             return False
         if session.get('primary_session', False):
             return False
-        if BaskervillehallIsolationForest.is_bot_ua(session['ua']):
+        # if session.get('language_header', False):
+        #     return False
+        if session.get('headless_ua', False):
             return False
-        if not BaskervillehallIsolationForest.is_valid_browser_chiper(session):
+        if session.get('bot_ua', False):
+            return False
+        if not BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']):
+            return False
+        if session.get('weak_cipher', False):
             return False
         return True
 

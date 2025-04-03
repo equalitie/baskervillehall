@@ -29,9 +29,22 @@ spec:
                     values:
                       - workers-node-eac0c8
                       - workers-node-c83aa9
+      volumes:
+        - name: bad-asn-volume
+          emptyDir: {}
+      initContainers:
+        - name: load-bad-asn
+          image: equalitie/baskervillehall_bad_asn:latest
+          command: ["sh", "-c", "cp /data/bad-asn-list.csv /mnt/bad_asn/"]
+          volumeMounts:
+            - name: bad-asn-volume
+              mountPath: /mnt/bad_asn
       containers:
       - name: "baskervillehall-session"
         image: "equalitie/baskervillehall:latest"
+        volumeMounts:
+            - name: bad-asn-volume
+              mountPath: /mnt/bad_asn
         imagePullPolicy: Always
         resources:
           requests:
@@ -49,6 +62,8 @@ spec:
           - configMapRef:
               name: baskervillehall
         env:
+        - name: BAD_ASN_FILE
+          value: "/mnt/bad_asn/bad-asn-list.csv"
         - name: MY_POD_NAME
           valueFrom:
             fieldRef:
