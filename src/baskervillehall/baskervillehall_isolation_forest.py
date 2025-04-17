@@ -3,6 +3,7 @@ from sklearn.ensemble import IsolationForest
 from enum import Enum
 import shap
 import pandas as pd
+import re
 
 from baskervillehall.feature_extractor import FeatureExtractor
 
@@ -66,6 +67,37 @@ class BaskervillehallIsolationForest(object):
     def set_contamination(self, contamination):
         self.contamination = contamination
 
+    @staticmethod
+    def count_accepted_languages(header: str) -> int:
+        """
+        Count distinct language codes in an Accept-Language HTTP header.
+        Ignores q-values.
+        """
+        if not header:
+            return 0
+
+        languages = set()
+        for lang_entry in header.split(","):
+            lang_code = lang_entry.split(";")[0].strip().lower()
+            if lang_code:
+                languages.add(lang_code)
+        return len(languages)
+
+    @staticmethod
+    def is_asset_only_session(session):
+        requests = session['requests']
+        asset_mime_types = {'image/', 'text/css', 'application/javascript'}
+        non_asset_types = {'text/html', 'application/json'}
+
+        seen_asset = False
+        for r in requests:
+            ct = r.get('type', '')
+            if any(ct.startswith(asset) for asset in asset_mime_types):
+                seen_asset = True
+            elif any(ct.startswith(nt) for nt in non_asset_types):
+                return False  # this is a real content request
+
+        return seen_asset
 
     @staticmethod
     def is_weak_cipher(cipher):
@@ -77,9 +109,6 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_valid_browser_ciphers(ciphers):
-        # if 'ciphers' not in session or len(session['ciphers']) == 0:
-        #     return True # this is temporal, just for compatibility with old session datasets
-
         if len(ciphers) < 5:
             return False
         if 'TLS_AES_128_GCM_SHA256' not in ciphers and \
@@ -97,48 +126,135 @@ class BaskervillehallIsolationForest(object):
 
         return True
 
+    @staticmethod
+    def is_short_user_agent(user_agent):
+        return user_agent is None or len(user_agent.strip()) < 50
+    
+    @staticmethod
+    def is_bot_user_agent(user_agent):
+        ua = user_agent
+        if isinstance(user_agent, dict):
+            ua = user_agent.get('name', '')
+        ua = ua.lower()
+
+        known_crawlers = [
+            # Generic catch-all patterns (important!)
+            r'bot', 
+            r'spider',
+            r'crawl',
+            r'slurp',
+
+            # Known legit crawlers
+            r'googlebot',
+            r'bingbot',
+            r'baiduspider',
+            r'yandexbot',
+            r'duckduckbot',
+            r'sogou',
+            r'exabot',
+            r'seznambot',
+            r'petalbot',
+            r'applebot',
+            r'facebookexternalhit',
+            r'facebookcatalog',
+            r'twitterbot',
+            r'linkedinbot',
+            r'pinterestbot',
+            r'whatsapp',
+            r'telegrambot',
+            r'slackbot',
+            r'discordbot',
+            r'ahrefsbot',
+            r'semrushbot',
+            r'mj12bot',
+            r'dotbot',
+            r'uptimerobot',
+            r'structured-data',
+        ]
+
+        return any(re.search(pattern, ua) for pattern in known_crawlers)
+
 
     @staticmethod
-    def is_bot_ua(ua):
-        name = ua
-        if isinstance(ua, dict):
-            name = ua.get('name', '')
-        name_lowercase = name.lower()
-        return 'bot' in name_lowercase or 'spider' in name_lowercase \
-                or 'crawl' in name_lowercase or 'slurp' in name_lowercase
-
     def is_headless_ua(ua):
         return 'HeadlessChrome' in ua
 
     @staticmethod
     def is_human(session):
-        if session.get('datacenter_asn', False):
+        if session['datacenter_asn'] and not session['vpn_asn']:
             return False
-        if session.get('verified_bot', False):
+        if session['verified_bot']:
             return False
-        if session.get('primary_session', False):
+        if session['primary_session']:
             return False
-        # if session.get('language_header', False):
-        #     return False
-        if session.get('headless_ua', False):
+        if session['num_languages'] == 0:
             return False
-        if session.get('bot_ua', False):
+        if session['headless_ua']:
             return False
-        if not BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']):
+        if session['bot_ua']:
             return False
-        if session.get('weak_cipher', False):
+        if session['short_ua']:
+            return False
+        if session['ai_bot_ua']:
+            return False
+        if session['asset_only']:
+            return False
+        if not session['valid_browser_ciphers']:
+            return False
+        if session['weak_cipher']:
             return False
         return True
 
+
+    @staticmethod
+    def is_ai_bot_user_agent(user_agent: str) -> bool:
+        """
+        Returns True if the user-agent matches a known AI crawler or training-related bot.
+        """
+        if not user_agent:
+            return False
+
+        ua = user_agent.lower()
+
+        known_ai_crawlers = [
+            r"gptbot",  # OpenAI
+            r"openai.*crawler",  # OpenAI legacy
+            r"openai-httplib",  # Python OpenAI lib
+            r"chatgpt",  # Any generic ChatGPT client
+
+            r"anthropic",  # Claude / Anthropic
+            r"claudebot",  # ClaudeBot
+
+            r"google-extended",  # Google's opt-out agent
+            r"ai crawler",  # Generic
+
+            r"bytespider",  # ByteDance
+            r"yisouspider",  # Baidu affiliate
+            r"youdao",  # NetEase AI
+
+            r"ccbot",  # Common Crawl (training source)
+            r"petalbot",  # Huawei
+
+            r"facebookbot",  # Facebook/Meta AI research
+            r"facebot",  # Meta
+            r"amazonbot",  # Amazon AI research
+            r"yandexbot",  # Russia's search/LLM training
+            r"cohere",  # Cohere.ai
+            r"ai\scrawler",  # catch-all
+            r"meta-externalagent",  # ← facebook training
+        ]
+
+        return any(re.search(pattern, ua) for pattern in known_ai_crawlers)
+
     @staticmethod
     def is_bad_bot(session):
-        if session.get('verified_bot', False):
+        if session['verified_bot']:
             return False
 
-        if not session.get('primary_session', False):
+        if not session['primary_session']:
             return False
 
-        if not BaskervillehallIsolationForest.is_bot_ua(session):
+        if not session['bot_ua'] or not session['ai_bot_ua']:
             return True
 
         # a legit bot does not change its user agent

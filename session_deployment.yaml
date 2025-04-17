@@ -32,6 +32,8 @@ spec:
       volumes:
         - name: bad-asn-volume
           emptyDir: {}
+        - name: vpn-asn-volume
+          emptyDir: { }
       initContainers:
         - name: load-bad-asn
           image: equalitie/baskervillehall_bad_asn:latest
@@ -39,12 +41,20 @@ spec:
           volumeMounts:
             - name: bad-asn-volume
               mountPath: /mnt/bad_asn
+        - name: load-vpn-asn
+          image: equalitie/baskervillehall_vpn_asn:latest
+          command: ["sh", "-c", "cp -r /data/ASN-Lists /mnt/vpn_asn/"]
+          volumeMounts:
+            - name: vpn-asn-volume
+              mountPath: /mnt/vpn_asn
       containers:
       - name: "baskervillehall-session"
         image: "equalitie/baskervillehall:latest"
         volumeMounts:
             - name: bad-asn-volume
               mountPath: /mnt/bad_asn
+            - name: vpn-asn-volume
+              mountPath: /mnt/vpn_asn
         imagePullPolicy: Always
         resources:
           requests:
@@ -64,6 +74,8 @@ spec:
         env:
         - name: BAD_ASN_FILE
           value: "/mnt/bad_asn/bad-asn-list.csv"
+        - name: VPN_ASN_PATH
+          value: "/mnt/vpn_asn/ASN-Lists"
         - name: MY_POD_NAME
           valueFrom:
             fieldRef:

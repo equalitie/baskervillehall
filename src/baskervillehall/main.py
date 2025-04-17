@@ -94,7 +94,8 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
-            'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(',')
+            'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(','),
+            'postgres_connection': postgres_connection
         }
 
         sessionizer = BaskervillehallSession(
@@ -102,6 +103,7 @@ def main():
             kafka_connection=kafka_connection,
             debug_ip=debug_ip,
             asn_database_path=os.environ.get('BAD_ASN_FILE'),
+            asn_database2_path=os.environ.get('VPN_ASN_PATH'),
             logger=logger
         )
         sessionizer.run()

@@ -10,3 +10,4 @@ tensorflow
 tensorflow-text
 tensorflow-hub
 psycopg2-binary
+xgboost
