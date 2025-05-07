@@ -108,16 +108,22 @@ class BaskervillehallTrainer(object):
                 categorical_features.append('human')
 
         if model_type == ModelType.GENERIC or model_type == ModelType.BOT:
-            if 'valid_browser_cipher' not in categorical_features:
-                categorical_features.append('valid_browser_cipher')
+            if 'valid_browser_ciphers' not in categorical_features:
+                categorical_features.append('valid_browser_ciphers')
             if 'weak_cipher' not in categorical_features:
                 categorical_features.append('weak_cipher')
             if 'headless_ua' not in categorical_features:
                 categorical_features.append('headless_ua')
             if 'bot_ua' not in categorical_features:
                 categorical_features.append('bot_ua')
+            if 'short_ua' not in categorical_features:
+                categorical_features.append('short_ua')
+            if 'ai_bot_ua' not in categorical_features:
+                categorical_features.append('ai_bot_ua')
             if 'verified_bot' not in categorical_features:
                 categorical_features.append('verified_bot')
+            if 'asset_only' not in categorical_features:
+                categorical_features.append('asset_only')
 
         model = BaskervillehallIsolationForest(
             n_estimators=self.n_estimators,
@@ -221,6 +227,8 @@ class BaskervillehallTrainer(object):
                             host = message.key.decode("utf-8")
                             if host not in batch:
                                 continue
+                            if session.get('asset_only', False):
+                                continue
                             if len(batch[host]['bot']) >= self.num_sessions and \
                                     len(batch[host]['human']) >= self.num_sessions:
                                 batch_complete = True
@@ -239,8 +247,7 @@ class BaskervillehallTrainer(object):
                                 if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(session)
                             else:
-                                if not session.get('bad_bot', False) and \
-                                        not session['verified_bot']:
+                                if not session.get('bad_bot', False):
                                     if len(batch[host]['bot']) < self.num_sessions:
                                         batch[host]['bot'].append(session)
 

@@ -2,10 +2,13 @@ import copy
 import random
 import string
 
+from baskervillehall.vpn_detector import VpnDetector
 from baskervillehall.asn_database import ASNDatabase
+from baskervillehall.asn_database2 import ASNDatabase2
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest
 from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
+from baskervillehall.tor_exit_scanner import TorExitScanner
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -36,7 +39,9 @@ class BaskervillehallSession(object):
             min_number_of_requests=10,
             debug_ip=None,
             logger=None,
-            asn_database_path = '',
+            asn_database_path='',
+            asn_database2_path='',
+            postgres_connection=None
     ):
         super().__init__()
         self.topic_weblogs = topic_weblogs
@@ -70,14 +75,28 @@ class BaskervillehallSession(object):
         self.debugging = False
         self.bot_verificator = BotVerificator()
         self.asn_database = ASNDatabase(asn_database_path)
+        self.asn_database2 = ASNDatabase2(asn_database2_path)
+        self.tor_exit_scnaner = TorExitScanner()
+        self.vpn_detector = VpnDetector(
+            asn_db=self.asn_database2,
+            tor_exit_scanner=self.tor_exit_scnaner,
+            logger=self.logger,
+            db_config=postgres_connection
+        )
 
     def get_timestamp_and_data(self, data):
-        if 'message' in data:
-            data = json.loads(data['message'].replace('000', '0'))
-            timestamp = datetime.strptime(data['time_local'].split(' ')[0], '%d/%b/%Y:%H:%M:%S')
-        else:
-            timestamp = datetime.strptime(data['datestamp'], '%Y-%m-%dT%H:%M:%S.%fZ')
-        return timestamp, data
+        try:
+            if 'message' in data:
+                message = data['message']
+                message = message.replace('"banjax_bot_score": ,', '"banjax_bot_score": "",')
+                data = json.loads(message.replace('000', '0'))
+                timestamp = datetime.strptime(data['time_local'].split(' ')[0], '%d/%b/%Y:%H:%M:%S')
+            else:
+                timestamp = datetime.strptime(data['datestamp'], '%Y-%m-%dT%H:%M:%S.%fZ')
+            return timestamp, data
+        except Exception as e:
+            self.logger.error(f"Error parsing timestamp and data: {str(e)}, {data}")
+            return None, None
 
     def flush(self):
         self.producer.flush()
@@ -117,11 +136,8 @@ class BaskervillehallSession(object):
             if r['deflect_password']:
                 deflect_password = True
             requests_formatted.append(rf)
-        if 'cipher' not in session:
-            self.logger.info('no cipher in session')
-            self.logger.info(session)
 
-        message = {
+        session_final = {
             'host': session['host'],
             'ua': session['ua'],
             'country': session['country'],
@@ -140,17 +156,48 @@ class BaskervillehallSession(object):
             'cipher': session.get('cipher', ''),
             'ciphers': session.get('ciphers', ''),
             'valid_browser_ciphers': BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']),
-            'human': BaskervillehallIsolationForest.is_human(session),
-            'bad_bot': BaskervillehallIsolationForest.is_bad_bot(session),
             'weak_cipher': BaskervillehallIsolationForest.is_weak_cipher(session.get('cipher', '')),
-            'datacenter_asn': session['datacenter_asn'],
-            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua']),
-            'bot_ua': BaskervillehallIsolationForest.is_bot_ua(session['ua']),
+            'asn': session['asn'],
+            'bot_ua': BaskervillehallIsolationForest.is_bot_user_agent(session['ua']),
+            'ai_bot_ua': BaskervillehallIsolationForest.is_ai_bot_user_agent(session['ua']),
+            'num_languages': session['num_languages'],
+            'short_ua': BaskervillehallIsolationForest.is_short_user_agent(session['ua']),
+            'asset_only': BaskervillehallIsolationForest.is_asset_only_session(session),
+            'ua_score': BaskervillehallIsolationForest.ua_score(session['ua']),
+            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua'])
         }
+
+        asn = session['asn']
+        vps_asn = self.asn_database2.is_vps_asn(asn)
+        malicious_asn = self.asn_database2.is_malicious_asn(asn)
+        vpn_asn = self.asn_database2.is_vpn_asn(asn)
+        session_final['datacenter_asn'] = self.asn_database.is_datacenter_asn(asn) or \
+                                          vps_asn or malicious_asn or vpn_asn
+        session_final['vpn_asn'] = vpn_asn
+        session_final['malicious_asn'] = malicious_asn
+        session_final['vps_asn'] = vps_asn
+        session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
+
+        session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
+
+        session_final['human'] = BaskervillehallIsolationForest.is_human(session_final)
+        session_final['bad_bot'] = BaskervillehallIsolationForest.is_bad_bot(session_final)
+
+        if session_final['human']:
+            session_final['class'] = 'human'
+        elif session_final['verified_bot']:
+            session_final['class'] = 'verified_bot'
+        elif session_final['ai_bot_ua']:
+            session_final['class'] = 'ai_bot'
+        elif session_final['bad_bot']:
+            session_final['class'] = 'bad_bot'
+        else:
+            session_final['class'] = 'bot'
+
         self.producer.send(
             self.topic_sessions,
             key=bytearray(session['host'], encoding='utf8'),
-            value=json.dumps(message).encode('utf-8')
+            value=json.dumps(session_final).encode('utf-8')
         )
 
         if self.debugging:
@@ -160,7 +207,7 @@ class BaskervillehallSession(object):
 
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request, datacenter_asn):
+                       cipher, ciphers, request, asn, num_languages):
         return {
             'ua': ua,
             'host': host,
@@ -177,7 +224,8 @@ class BaskervillehallSession(object):
             'cipher': cipher,
             'ciphers': ciphers,
             'requests': [request] if request else [],
-            'datacenter_asn': datacenter_asn
+            'asn': asn,
+            'num_languages': num_languages
         }
 
     @staticmethod
@@ -278,11 +326,12 @@ class BaskervillehallSession(object):
                     'duration': (requests[-1]['ts'] - requests[0]['ts']).total_seconds(),
                     'requests': requests,
                     'primary_session': True,
-                    'datacenter_asn': sessions[0]['datacenter_asn'],
+                    'asn': sessions[0]['asn'],
+                    'num_languages': sessions[0]['num_languages']
                 }
 
                 if session['duration'] < self.max_session_duration and \
-                    len(session['requests']) > self.max_primary_sessions_per_ip:
+                        len(session['requests']) > self.max_primary_sessions_per_ip:
                     if self.debugging:
                         self.logger.info('flushing primary session')
                         self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
@@ -296,6 +345,8 @@ class BaskervillehallSession(object):
             self.flush()
 
     def is_debugging_mode(self, data):
+        if data['client_request_host'] == 'farmal.in':
+            return True
         if self.debug_ip and data['client_ip'] == self.debug_ip:
             return True
         if 'client_ua' in data:
@@ -315,9 +366,9 @@ class BaskervillehallSession(object):
 
     def run(self):
         settings = SettingsDeflectAPI(url=self.deflect_config_url,
-                                    whitelist_default=self.whitelist_url_default,
-                                    logger=self.logger,
-                                    refresh_period_in_seconds=60 * self.white_list_refresh_period)
+                                      whitelist_default=self.whitelist_url_default,
+                                      logger=self.logger,
+                                      refresh_period_in_seconds=60 * self.white_list_refresh_period)
 
         whitelist_ip = WhitelistIP(self.whitelist_ip, logger=self.logger,
                                    refresh_period_in_seconds=60 * self.white_list_refresh_period)
@@ -363,13 +414,28 @@ class BaskervillehallSession(object):
                             continent = prop.get('continent', '')
                             datacenter_code = prop.get('cloudflare_datacenter_code', '')
                         else:
-                            verified_bot = self.bot_verificator.is_verified_bot(ip)
+                            if data['banjax_decision'] == 'GlobalAccessGranted':
+                                verified_bot = True
+                            else:
+                                verified_bot = self.bot_verificator.is_verified_bot(ip)
                             continent = ''
                             datacenter_code = ''
 
                         self.debugging = self.is_debugging_mode(data)
 
                         host = message.key.decode('utf-8')
+                        asn = data.get('geoip_asn', {}).get('as', {}).get('number', '0')
+                        asn_name = data.get('geoip_asn', {}).get('as', {}).get('organization', {}).get('name', '')
+                        session_id = self.get_session_cookie(data)
+
+                        if len(session_id) > 5:
+                            self.vpn_detector.log(ip=ip,
+                                                  host=host,
+                                                  session_cookie=session_id,
+                                                  asn_number=asn,
+                                                  asn_name=asn_name,
+                                                  timestamp=ts)
+
                         if whitelist_ip.is_in_whitelist(host, ip):
                             if self.debugging:
                                 self.logger.info(f'ip {ip} is whitelisted')
@@ -392,8 +458,6 @@ class BaskervillehallSession(object):
 
                         geoip = data.get('geoip', {})
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
-
-                        session_id = self.get_session_cookie(data)
 
                         if len(session_id) < 5:
                             if data.get('loc_in', '') == 'static_file':
@@ -436,8 +500,8 @@ class BaskervillehallSession(object):
 
                         cipher = data.get('ssl_cipher', '')
                         ciphers = data.get('ssl_ciphers', '').split(':')
-                        datacenter_asn = self.asn_database.is_datacenter_asn(
-                            asn=data.get('geoip_asn', {}).get('as', {}).get('number', '-'))
+                        num_languages = BaskervillehallIsolationForest.count_accepted_languages(
+                            data.get('accept_language', ''))
 
                         if ip in self.ips and session_id in self.ips[ip]:
                             # existing session
@@ -450,7 +514,7 @@ class BaskervillehallSession(object):
                                 session = self.create_session(ua, host, country, continent, datacenter_code,
                                                               ip, session_id,
                                                               verified_bot, ts, cipher, ciphers, request,
-                                                              datacenter_asn)
+                                                              asn, num_languages)
                                 self.ips[ip][session_id] = session
                             else:
                                 if self.debugging:
@@ -475,7 +539,7 @@ class BaskervillehallSession(object):
                             session = self.create_session(ua, host, country, continent, datacenter_code,
                                                           ip, session_id,
                                                           verified_bot, ts, cipher, ciphers, request,
-                                                          datacenter_asn)
+                                                          asn, num_languages)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session

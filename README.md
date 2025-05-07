@@ -17,6 +17,15 @@ docker push equalitie/baskervillehall_bad_asn:latest
 cd ../..
 ```
 
+## VPN database
+* Clone the repo
+```commandline
+cd deployment/vpn_asn
+git clone git@github.com:NullifiedCode/ASN-Lists.git
+docker build -t equalitie/baskervillehall_vpn_asn:latest .
+docker push equalitie/baskervillehall_vpn_asn:latest
+cd ../..
+```
 
 ### Building
 ```
@@ -28,8 +37,11 @@ docker build -f ./Dockerfile_latest . -t equalitie/baskervillehall:latest
 docker push equalitie/baskervillehall:latest
 ```
 
-### Sessions deployment
+### Pipelines deployment
 kubectl apply -f session_deployment.yaml
+kubectl apply -f prediction_deployment.yaml
+kubectl apply -f trainer_deployment.yaml
+kubectl apply -f storage_deployment.yaml
 
 ## Jupyterhub
 

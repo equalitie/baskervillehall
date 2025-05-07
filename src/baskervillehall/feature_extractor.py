@@ -54,7 +54,9 @@ class FeatureExtractor(object):
             'static_ratio',
             'ua_count',
             'api_ratio',
-            'num_ciphers'
+            'num_ciphers',
+            'num_languages',
+            'ua_score'
         ]
         self.pca_feature = pca_feature
         if features is None:
@@ -70,11 +72,15 @@ class FeatureExtractor(object):
             'bad_bot',
             'human',
             'cipher',
-            'valid_browser_cipher',
+            'valid_browser_ciphers',
             'weak_cipher',
             'headless_ua',
             'bot_ua',
-            'verified_bot'
+            'ai_bot_ua',
+            'verified_bot',
+            'datacenter_asn',
+            'short_ua',
+            'asset_only'
         ]
         if categorical_features is None:
             categorical_features = supported_categorical_features
@@ -82,7 +88,7 @@ class FeatureExtractor(object):
         not_supported_categorical_features = set(self.categorical_features) - \
                                           set(supported_categorical_features)
         if len(not_supported_categorical_features) > 0:
-            raise RuntimeError(f'Categorical feature(s) {not_supported_features} not supported.')
+            raise RuntimeError(f'Categorical feature(s) {not_supported_categorical_features} not supported.')
 
         if self.pca_feature:
             self.pca = PCAFeature(logger=self.logger)
@@ -168,7 +174,7 @@ class FeatureExtractor(object):
                 intervals.append(0)
             else:
                 intervals.append((r['ts'] - requests[i - 1]['ts']).total_seconds())
-            code = r.get('code', 200)
+            code = int(r.get('code', 200))
             if code // 100 == 4:
                 num_4xx += 1
             if code // 100 == 5:
@@ -234,6 +240,8 @@ class FeatureExtractor(object):
         features['static_ratio'] = float(num_static) / hits
         features['api_ratio'] = float(api_count) / hits
         features['num_ciphers'] = len(session.get('ciphers', []))
+        features['num_languages'] = session['num_languages']
+        features['ua_score'] = float(session.get('ua_score', 0.0))
 
         return features
 

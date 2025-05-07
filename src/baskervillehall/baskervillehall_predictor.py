@@ -261,7 +261,7 @@ class BaskervillehallPredictor(object):
                         session = sessions[i]
                         meta = ''
                         if (self.bad_bot_challenge
-                                and BaskervillehallIsolationForest.is_bad_bot(session) \
+                                and session['bad_bot'] \
                                 and ip not in ip_with_sessions.keys()):
                             prediction = True
                             meta += 'Bad bot rule'
@@ -281,16 +281,25 @@ class BaskervillehallPredictor(object):
 
                         if verified_bot:
                             continue
+                        if session['asset_only']:
+                            continue
+
                         hits = len(session['requests'])
                         session['requests'] = session['requests'][0:self.max_requests_in_command]
 
-                        if session.get('weak_cipher', False):
+                        rule = None
+                        if session.get('malicious_asn', False):
+                            rule = 'malicious_asn'
+                        elif session.get('weak_cipher', False):
+                            rule = 'weak_cipher'
+
+                        if rule:
                             if ip in pending_ip:
                                 continue
                             pending_ip[ip] = True
 
-                            meta = 'Weak cipher'
-                            self.logger.info(f'Weak cipher for ip '
+                            meta = rule
+                            self.logger.info(f'Rule {rule} for ip '
                                              f'{ip}, host {host}')
                             message = json.dumps(
                                 {

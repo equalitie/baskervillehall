@@ -25,6 +25,8 @@ CREATE TABLE public.sessions (
 	ip_cookie text NOT NULL,
 	primary_session int4 DEFAULT 0 NULL,
 	human int4 DEFAULT 0 NULL,
+	vpn int4 DEFAULT 0 NULL,
+	class text,
 	passed_challenge int4 DEFAULT 0 NULL,
 	user_agent text NULL,
 	country text NULL,
