@@ -8,6 +8,27 @@ from sqlalchemy.testing.plugin.plugin_base import logging
 from baskervillehall.asn_database2 import ASNDatabase2
 from baskervillehall.tor_exit_scanner import TorExitScanner
 
+
+SAFE_INTERNAL_SWITCH_ASNS = {
+    32934,  # Facebook / Meta
+    15169,  # Google LLC
+    13335,  # Cloudflare, Inc.
+    16509,  # Amazon.com, Inc.
+    14618,  # Amazon AWS (alternate)
+    8075,   # Microsoft Corporation
+    8076,   # Microsoft Azure
+    20940,  # Akamai Technologies
+    54113,  # Fastly
+    2635,   # Automattic (WordPress, etc.)
+    396982, # TikTok Inc.
+    714,    # Apple Inc.
+    19551,  # Incapsula / Imperva
+    46489,  # Twitch / Amazon Video
+    2906,   # Netflix, Inc.
+    9009,   # M247 (Edge network, may or may not be safe depending on usage)
+}
+
+
 class VpnDetector:
     def __init__(self, asn_db: ASNDatabase2,
                  tor_exit_scanner: TorExitScanner,
@@ -29,6 +50,8 @@ class VpnDetector:
         self.last_inserted = {}  # (ip, host) -> last insert time
         self.last_cleanup_time = None
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
+        self.suppressed_internal_switch_asns = SAFE_INTERNAL_SWITCH_ASNS
+
         if db_config:
             self.init_db()
 
@@ -95,6 +118,7 @@ class VpnDetector:
             self.last_cleanup_time = current_time
 
     def detect_anomalies(self, session_cookie):
+        trusted_keywords = {"facebook", "google", "cloudflare", "amazon", "microsoft", "yandex"}
         entries = sorted(self.sessions[session_cookie], key=lambda x: x['timestamp'])
 
         for i in range(1, len(entries)):
@@ -107,10 +131,14 @@ class VpnDetector:
 
             # Fast IP switch: only alert if different /24 or ASN
             if curr['ip'] != prev['ip'] and delta <= self.fast_switch_threshold:
-                if same_prefix and same_asn:
+                asn_name_lower = curr['asn_name'].lower() if curr['asn_name'] else ""
+                is_trusted_name = any(keyword in asn_name_lower for keyword in trusted_keywords)
+
+                if same_prefix and same_asn not in self.suppressed_internal_switch_asns and not is_trusted_name:
                     self.record_alert(curr, 'Internal IP switch')
                 else:
-                    self.record_alert(curr, 'Fast IP switch')
+                    if not is_trusted_name:
+                        self.record_alert(curr, 'Fast IP switch')
 
             if not same_asn:
                 self.record_alert(curr, 'ASN hopping')

@@ -177,11 +177,51 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_headless_ua(ua):
-        return 'HeadlessChrome' in ua
+        headless_keywords = [
+            "headless", "puppeteer", "playwright", "selenium", "phantomjs"
+        ]
+        return any(kw in ua for kw in headless_keywords)
+
+
+    def ua_score(user_agent: str) -> float:
+        if not user_agent:
+            return 1.0  # Empty UA is fully suspicious
+
+        ua = user_agent.strip().lower()
+        score = 0
+        max_score = 7  # Total possible penalties
+
+        # Very short UAs
+        if len(ua) < 20:
+            score += 3  # highly suspicious
+        elif len(ua) < 60:
+            score += 1  # somewhat suspicious
+
+        # Known bot/tool indicators
+        bot_keywords = [
+            "curl", "wget", "python", "httpclient", "libwww", "perl", "okhttp",
+            "aiohttp", "http.rb", "scrapy", "go-http-client", "java", "fetchlib",
+            "phantomjs", "mechanize", "httprequest", "axios", "powershell"
+        ]
+        if any(kw in ua for kw in bot_keywords):
+            score += 2
+
+        if BaskervillehallIsolationForest.is_headless_ua(ua):
+            score += 2
+
+        # Missing browser identifiers
+        browser_keywords = ["mozilla", "chrome", "safari", "firefox", "edge", "gecko", "applewebkit"]
+        if not any(b in ua for b in browser_keywords):
+            score += 1
+
+        # Normalize to [0, 1]
+        return min(score / max_score, 1.0)
 
     @staticmethod
     def is_human(session):
-        if session['datacenter_asn'] and not session['vpn_asn']:
+        if session['ua_score'] > 0.6:
+            return False
+        if session['datacenter_asn'] and not session['vpn']:
             return False
         if session['verified_bot']:
             return False
@@ -189,7 +229,7 @@ class BaskervillehallIsolationForest(object):
             return False
         if session['num_languages'] == 0:
             return False
-        if session['headless_ua']:
+        if session.get('headless_ua', False):
             return False
         if session['bot_ua']:
             return False

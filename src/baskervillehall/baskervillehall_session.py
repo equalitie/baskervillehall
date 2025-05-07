@@ -158,12 +158,13 @@ class BaskervillehallSession(object):
             'valid_browser_ciphers': BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']),
             'weak_cipher': BaskervillehallIsolationForest.is_weak_cipher(session.get('cipher', '')),
             'asn': session['asn'],
-            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua']),
             'bot_ua': BaskervillehallIsolationForest.is_bot_user_agent(session['ua']),
             'ai_bot_ua': BaskervillehallIsolationForest.is_ai_bot_user_agent(session['ua']),
             'num_languages': session['num_languages'],
             'short_ua': BaskervillehallIsolationForest.is_short_user_agent(session['ua']),
-            'asset_only': BaskervillehallIsolationForest.is_asset_only_session(session)
+            'asset_only': BaskervillehallIsolationForest.is_asset_only_session(session),
+            'ua_score': BaskervillehallIsolationForest.ua_score(session['ua']),
+            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua'])
         }
 
         asn = session['asn']
@@ -172,13 +173,12 @@ class BaskervillehallSession(object):
         vpn_asn = self.asn_database2.is_vpn_asn(asn)
         session_final['datacenter_asn'] = self.asn_database.is_datacenter_asn(asn) or \
                                           vps_asn or malicious_asn or vpn_asn
-        session_final['vps_asn'] = vps_asn
-        session_final['malicious_asn'] = malicious_asn
         session_final['vpn_asn'] = vpn_asn
+        session_final['malicious_asn'] = malicious_asn
+        session_final['vps_asn'] = vps_asn
+        session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
 
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
-        if session_final['tor']:
-            self.logger.info(f'Tor ip = {session_final["ip"]}')
 
         session_final['human'] = BaskervillehallIsolationForest.is_human(session_final)
         session_final['bad_bot'] = BaskervillehallIsolationForest.is_bad_bot(session_final)
@@ -345,6 +345,8 @@ class BaskervillehallSession(object):
             self.flush()
 
     def is_debugging_mode(self, data):
+        if data['client_request_host'] == 'farmal.in':
+            return True
         if self.debug_ip and data['client_ip'] == self.debug_ip:
             return True
         if 'client_ua' in data:

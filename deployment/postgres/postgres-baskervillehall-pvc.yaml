@@ -3,7 +3,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: postgres-baskervillehall-pvc
 spec:
-  storageClassName: manual
+  storageClass: csi-cinder-high-speed
   accessModes:
     - ReadWriteOnce
   resources:
