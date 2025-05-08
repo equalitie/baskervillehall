@@ -90,7 +90,10 @@ class BaskervillehallSession(object):
                 message = data['message']
                 message = message.replace('"banjax_bot_score": ,', '"banjax_bot_score": "",')
                 data = json.loads(message.replace('000', '0'))
-                timestamp = datetime.strptime(data['time_local'].split(' ')[0], '%d/%b/%Y:%H:%M:%S')
+                if '0000' in data['time_local']:
+                    timestamp = datetime.strptime(data['time_local'].split(' ')[0], '%d/%b/%Y:%H:%M:%S %z')
+                else:
+                    timestamp = datetime.strptime(data['time_local'].split(' ')[0], '%d/%b/%Y:%H:%M:%S')
             else:
                 timestamp = datetime.strptime(data['datestamp'], '%Y-%m-%dT%H:%M:%S.%fZ')
             return timestamp, data
