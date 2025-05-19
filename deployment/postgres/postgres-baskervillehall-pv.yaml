@@ -5,7 +5,7 @@ metadata:
   labels:
     type: local
 spec:
-  storageClass: csi-cinder-high-speed
+  storageClassName: csi-cinder-high-speed
   capacity:
     storage: 1000Gi
   accessModes:

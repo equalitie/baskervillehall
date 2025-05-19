@@ -58,6 +58,7 @@ CREATE TABLE public.challenge_command_history (
 	primary_session int4 DEFAULT 0 NULL,
 	human int4 DEFAULT 0 NULL,
 	passed_challenge int4 DEFAULT 0 NULL,
+	bot_score float8 DEFAULT -1.0 NOT NULL,
 	user_agent text NULL,
 	country text NULL,
 	continent text NULL,
