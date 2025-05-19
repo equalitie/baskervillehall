@@ -34,6 +34,7 @@ class BaskervillehallSession(object):
             whitelist_ip=None,
             white_list_refresh_period=5,
             max_primary_sessions_per_ip=10,
+            primary_session_expiration=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
             read_from_beginning=False,
             min_number_of_requests=10,
@@ -67,6 +68,7 @@ class BaskervillehallSession(object):
         self.debug_ip = debug_ip
 
         self.num_flushed_primary_sessions = 0  # for debugging only
+        self.primary_session_expiration = primary_session_expiration
         self.min_number_of_requests = min_number_of_requests
         self.producer = None
         self.ips = dict()
@@ -127,6 +129,7 @@ class BaskervillehallSession(object):
 
         requests_formatted = []
         passed_challenge = False
+        bot_score = -1.0
         deflect_password = False
         requests_sorted = sorted(requests, key=lambda x: x['ts'])
         duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds()
@@ -138,6 +141,7 @@ class BaskervillehallSession(object):
                 passed_challenge = True
             if r['deflect_password']:
                 deflect_password = True
+            bot_score = r['bot_score']
             requests_formatted.append(rf)
 
         session_final = {
@@ -154,6 +158,7 @@ class BaskervillehallSession(object):
             'primary_session': session.get('primary_session', False),
             'requests': requests_formatted,
             'passed_challenge': passed_challenge,
+            'bot_score': bot_score,
             'deflect_password': deflect_password,
             'verified_bot': session['verified_bot'],
             'cipher': session.get('cipher', ''),
@@ -246,8 +251,7 @@ class BaskervillehallSession(object):
 
         return False
 
-    def gc(self):
-        time_now = datetime.now()
+    def gc(self, ts):
         total_sessions = 0
         for ip, sessions in self.ips.items():
             if len(sessions) == 0:
@@ -264,7 +268,7 @@ class BaskervillehallSession(object):
             sessions = self.ips[ip]
             for session_id in list(sessions):
                 session = sessions[session_id]
-                if (time_now - session['time_now']).total_seconds() > self.session_inactivity * 60:
+                if (ts - session['end']).total_seconds() > self.session_inactivity * 60:
                     del sessions[session_id]
                     deleted += 1
             if len(sessions) == 0:
@@ -276,11 +280,13 @@ class BaskervillehallSession(object):
             sessions = self.ips_primary[ip]
             for session_id in list(sessions):
                 session = sessions[session_id]
-                if (time_now - session['time_now']).total_seconds() > self.session_inactivity * 60:
+                if (ts - session['end']).total_seconds() > self.primary_session_expiration * 60:
                     del sessions[session_id]
                     deleted_primary += 1
             if len(sessions) == 0:
                 del self.ips_primary[ip]
+                if ip in self.flush_size_primary:
+                    del self.flush_size_primary[ip]
 
         self.flush_size_primary = dict()
 
@@ -474,6 +480,7 @@ class BaskervillehallSession(object):
 
                         passed_challenge = False
                         deflect_password = False
+                        bot_score = data.get('banjax_bot_score', -1.0)
 
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
@@ -498,6 +505,7 @@ class BaskervillehallSession(object):
                             'edge': data.get('edge', ''),
                             'static': data.get('loc_in', '') == 'static_file',
                             'passed_challenge': passed_challenge,
+                            'bot_score': bot_score,
                             'deflect_password': deflect_password
                         }
 
@@ -551,7 +559,7 @@ class BaskervillehallSession(object):
                         time_now = datetime.now()
                         if (time_now - ts_gc).total_seconds() > self.garbage_collection_period * 60:
                             ts_gc = time_now
-                            self.gc()
+                            self.gc(ts)
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

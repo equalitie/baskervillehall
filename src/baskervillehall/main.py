@@ -90,6 +90,7 @@ def main():
             'partition': partition,
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'max_session_duration': int(os.environ.get('MAX_SESSION_DURATION')),
+            'primary_session_expiration': int(os.environ.get('PRIMARY_SESSION_EXPIRATION')),
             'max_primary_sessions_per_ip': int(os.environ.get('MAX_PRIMARY_SESSIONS_PER_IP')),
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
