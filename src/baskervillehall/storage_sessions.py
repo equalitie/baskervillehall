@@ -48,7 +48,7 @@ class StorageSessions(StorageBase):
             f'primary_session, human, class, vpn, user_agent, country, continent, '\
             f'datacenter, hits, \n'\
             f'hit_rate, num_user_agent, passed_challenge, bot_score,'\
-            f'duration, session_start, session_end, requests)\n'\
+            f'duration, session_start, session_end, requests, fingerprints)\n'\
             f'values (\'{host_id}\', \'{host}\', \'{session["ip"]}\', \'{session["session_id"]}\',\n'\
             f'\'{session["ip"]}_{session["session_id"]}\',{int(session["primary_session"])},\n'\
             f'{int(session["human"])},\'{session["class"]}\',{int(session["vpn"])},'\
@@ -57,5 +57,5 @@ class StorageSessions(StorageBase):
             f'{hits}, {hits * 60.0 / duration:.1f}, {num_ua}, '\
             f'{int(session.get("passed_challenge"))},{session.get("bot_score"):2f},'\
             f'{duration:.1f}, \'{session["start"]}\', \'{session["end"]}\',\n'\
-            f'\'{requests}\''\
+            f'\'{requests}\',\'{session["fingerprints"]}\''\
             f');'

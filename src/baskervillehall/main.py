@@ -172,7 +172,8 @@ def main():
             'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
-            'single_model': os.environ.get('SINGLE_MODEL') == 'True'
+            'single_model': os.environ.get('SINGLE_MODEL') == 'True',
+            'bot_score_threshold': float(os.environ.get('BOT_SCORE_THRESHOLD'))
         }
 
         predictor = BaskervillehallPredictor(

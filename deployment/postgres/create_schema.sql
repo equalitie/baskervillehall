@@ -28,6 +28,7 @@ CREATE TABLE public.sessions (
 	vpn int4 DEFAULT 0 NULL,
 	class text,
 	passed_challenge int4 DEFAULT 0 NULL,
+	fingerprints text NULL,
 	user_agent text NULL,
 	country text NULL,
 	continent text NULL,

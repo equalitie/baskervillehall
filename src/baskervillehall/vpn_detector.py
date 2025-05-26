@@ -161,7 +161,6 @@ class VpnDetector:
         last_time = self.last_inserted.get(key)
 
         if last_time is None or now - last_time >= self.insert_interval:
-            self.logger.info(f'VPN alert:{alert}')
             self.alerts.append(alert)
             if self.db_config:
                 self.save_to_db(alert)

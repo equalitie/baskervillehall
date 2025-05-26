@@ -5,6 +5,7 @@ from sklearn.preprocessing import OrdinalEncoder
 from datetime import datetime
 from collections import defaultdict
 import numpy as np
+import pytz
 
 from baskervillehall.pca_feature import PCAFeature
 
@@ -56,7 +57,9 @@ class FeatureExtractor(object):
             'api_ratio',
             'num_ciphers',
             'num_languages',
-            'ua_score'
+            'ua_score',
+            'hour_bucket',
+            'odd_hour'
         ]
         self.pca_feature = pca_feature
         if features is None:
@@ -143,6 +146,35 @@ class FeatureExtractor(object):
            '/payment/' in url or '/checkout/' in url or '/orders/' in url or \
            '/system/' in url or '/monitoring/' in url:
             return True
+
+    @staticmethod
+    def hour_bucket(hour):
+        if 2 <= hour < 5:
+            return 0  # "odd"
+        elif 5 <= hour < 10:
+            return 1  # "morning"
+        elif 10 <= hour < 17:
+            return 2  # "work_hours"
+        elif 17 <= hour < 22:
+            return 3  # "evening"
+        else:
+            return 4  # "late_night"
+
+    def get_hour(self, session):
+        if isinstance(session['start'], str):
+            ts_utc = datetime.strptime(session['start'], self.datetime_format)
+        else:
+            ts_utc = session['start']
+
+        tz = session.get('timezone', '')
+        if len(tz) == 0:
+            return 0
+        user_tz = pytz.timezone(tz)
+        user_local_time = ts_utc.replace(tzinfo=pytz.utc).astimezone(user_tz)
+        return user_local_time.hour
+
+    def is_odd_hour(self, hour):
+        return hour >= 2 and hour < 6
 
     def calculate_features_dict(self, session):
         # assert (len(session['requests']) > 0)
@@ -243,6 +275,9 @@ class FeatureExtractor(object):
         features['num_languages'] = session['num_languages']
         features['ua_score'] = float(session.get('ua_score', 0.0))
 
+        hour = self.get_hour(session)
+        features['hour_bucket'] = self.hour_bucket(hour)
+        features['odd_hour'] = self.is_odd_hour(hour)
         return features
 
     def get_categorical_vectors(self, sessions):
