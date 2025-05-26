@@ -2,6 +2,7 @@ import copy
 import random
 import string
 
+from baskervillehall.session_fingerprints import SessionFingerprints
 from baskervillehall.vpn_detector import VpnDetector
 from baskervillehall.asn_database import ASNDatabase
 from baskervillehall.asn_database2 import ASNDatabase2
@@ -106,7 +107,7 @@ class BaskervillehallSession(object):
     def flush(self):
         self.producer.flush()
 
-    def check_and_send_session(self, session, ts):
+    def check_and_send_session(self, session):
         if session['duration'] < self.max_session_duration:
             size = len(session['requests'])
             if session['duration'] > self.min_session_duration and \
@@ -139,9 +140,9 @@ class BaskervillehallSession(object):
             rf['ts'] = r['ts'].strftime(self.date_time_format)
             if r['passed_challenge']:
                 passed_challenge = True
+                bot_score = r['bot_score']
             if r['deflect_password']:
                 deflect_password = True
-            bot_score = r['bot_score']
             requests_formatted.append(rf)
 
         session_final = {
@@ -169,10 +170,13 @@ class BaskervillehallSession(object):
             'bot_ua': BaskervillehallIsolationForest.is_bot_user_agent(session['ua']),
             'ai_bot_ua': BaskervillehallIsolationForest.is_ai_bot_user_agent(session['ua']),
             'num_languages': session['num_languages'],
+            'accept_language': session['accept_language'],
             'short_ua': BaskervillehallIsolationForest.is_short_user_agent(session['ua']),
             'asset_only': BaskervillehallIsolationForest.is_asset_only_session(session),
             'ua_score': BaskervillehallIsolationForest.ua_score(session['ua']),
-            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua'])
+            'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua']),
+            'fingerprints': SessionFingerprints.get_fingerprints(session),
+            'timezone': session['timezone']
         }
 
         asn = session['asn']
@@ -215,7 +219,7 @@ class BaskervillehallSession(object):
 
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request, asn, num_languages):
+                       cipher, ciphers, request, asn, num_languages, accept_language, timezone):
         return {
             'ua': ua,
             'host': host,
@@ -233,7 +237,9 @@ class BaskervillehallSession(object):
             'ciphers': ciphers,
             'requests': [request] if request else [],
             'asn': asn,
-            'num_languages': num_languages
+            'num_languages': num_languages,
+            'accept_language': accept_language,
+            'timezone': timezone
         }
 
     @staticmethod
@@ -251,49 +257,169 @@ class BaskervillehallSession(object):
 
         return False
 
-    def gc(self, ts):
+    def gc(self, current_event_ts_horizon):  # This is the latest event timestamp we've processed
+        """
+        Garbage collects expired sessions (main and primary), flushing them to Kafka,
+        and flushes/resets long-lived primary sessions.
+        """
+        if current_event_ts_horizon is None:
+            self.logger.warning("GC called with None as current_event_ts_horizon. Skipping inactivity checks.")
+            return
+
+        # Log current state before GC
         total_sessions = 0
         for ip, sessions in self.ips.items():
             if len(sessions) == 0:
                 self.logger.info(f'error ip {ip} has zero sessions ')
             total_sessions += len(sessions)
-        total_primary_sessions = 0
+        total_primary_sessions_before_gc = 0
         for ip, sessions in self.ips_primary.items():
-            total_primary_sessions += len(sessions)
+            total_primary_sessions_before_gc += len(sessions)
         total_ips = len(self.ips)
 
-        deleted = 0
-        deleted_ips = 0
-        for ip in list(self.ips.keys()):
+        deleted_main_sessions_count = 0
+        deleted_main_ips_count = 0
+
+        # --- Process Main Sessions (self.ips) ---
+        for ip in list(self.ips.keys()):  # Iterate over a copy of keys for safe deletion
             sessions = self.ips[ip]
-            for session_id in list(sessions):
+            session_ids_to_delete_main = []
+            for session_id in list(sessions):  # Iterate over a copy of session_ids
                 session = sessions[session_id]
-                if (ts - session['end']).total_seconds() > self.session_inactivity * 60:
-                    del sessions[session_id]
-                    deleted += 1
+
+                # Check if main session has expired due to inactivity
+                if (current_event_ts_horizon - session['end']).total_seconds() > self.session_inactivity * 60:
+                    self.logger.info(
+                        f"Flushing and deleting expired main session for IP: {ip}, Session ID: {session_id} "
+                        f"due to inactivity.")
+                    self.check_and_send_session(session)  # Flush expired main sessions
+                    session_ids_to_delete_main.append(session_id)
+
+            for session_id in session_ids_to_delete_main:
+                del sessions[session_id]
+                deleted_main_sessions_count += 1
+
+            # If all sessions for this IP are deleted, remove the IP entry
             if len(sessions) == 0:
                 del self.ips[ip]
-                deleted_ips += 1
+                deleted_main_ips_count += 1
 
-        deleted_primary = 0
-        for ip in list(self.ips_primary.keys()):
-            sessions = self.ips_primary[ip]
-            for session_id in list(sessions):
-                session = sessions[session_id]
-                if (ts - session['end']).total_seconds() > self.primary_session_expiration * 60:
-                    del sessions[session_id]
-                    deleted_primary += 1
-            if len(sessions) == 0:
-                del self.ips_primary[ip]
+        # --- Process Primary Sessions (self.ips_primary) ---
+        ips_to_process_for_primary_gc = list(self.ips_primary.keys())
+        deleted_primary_sessions_count = 0
+
+        for ip in ips_to_process_for_primary_gc:
+            sessions_for_ip = self.ips_primary[ip]  # These are individual primary session entries for the IP
+
+            # Aggregate primary session data for this IP by host
+            hosts_data = {}
+            # Flag to check if *any* primary session for this IP is still active enough to prevent overall inactivity deletion
+            is_ip_still_active_by_event_time = False
+
+            for session_id, s_data in list(sessions_for_ip.items()):
+                current_host = s_data['host']
+                if current_host not in hosts_data:
+                    hosts_data[current_host] = {
+                        'requests': [],
+                        'oldest_ts': datetime.max,
+                        'latest_ts': datetime.min,
+                        'first_session_data': s_data
+                    }
+
+                hosts_data[current_host]['requests'].extend(s_data['requests'])
+                if s_data['start'] < hosts_data[current_host]['oldest_ts']:
+                    hosts_data[current_host]['oldest_ts'] = s_data['start']
+                if s_data['end'] > hosts_data[current_host]['latest_ts']:
+                    hosts_data[current_host]['latest_ts'] = s_data['end']
+
+                # If any session for this IP is within the primary_session_expiration window, the IP is still active
+                if (current_event_ts_horizon - s_data['end']).total_seconds() <= self.primary_session_expiration * 60:
+                    is_ip_still_active_by_event_time = True
+
+            # Flag to decide if the *entire IP's primary sessions* should be cleared from memory
+            # This happens either if inactive, or if a segment was flushed by duration.
+            should_clear_entire_ip_primary_sessions = False
+
+            # Iterate through each host's aggregated primary session for this IP
+            for host, host_data in hosts_data.items():
+                all_requests_for_host_sorted = sorted(host_data['requests'], key=lambda x: x['ts'])
+
+                if not all_requests_for_host_sorted:
+                    continue
+
+                current_aggregated_duration = (host_data['latest_ts'] - host_data['oldest_ts']).total_seconds()
+
+                should_flush_this_host_segment = False
+                flush_reason = ""
+
+                # --- Condition A: Exceeded its maximum allowed lifetime (forced flush + reset) ---
+                # This catches active, long-running, low-volume segments.
+                if current_aggregated_duration > self.max_session_duration:
+                    should_flush_this_host_segment = True
+                    flush_reason = f"exceeded max session duration ({self.max_session_duration}s) (forced flush)"
+
+                # --- Condition B: Inactivity (final flush before deletion) ---
+                # This applies if the IP is overall inactive, covering all its primary sessions.
+                elif not is_ip_still_active_by_event_time:
+                    should_flush_this_host_segment = True
+                    flush_reason = "inactivity expiration (final flush before deletion)"
+
+                if should_flush_this_host_segment:
+                    should_clear_entire_ip_primary_sessions = True  # Mark for clearing the whole IP's primary data
+
+                    # Only flush if there are enough requests for the aggregated session
+                    if len(all_requests_for_host_sorted) >= self.min_number_of_requests:
+                        first_session_entry = host_data['first_session_data']
+                        summary_session_for_flush = {
+                            'ua': first_session_entry['ua'],
+                            'host': host,
+                            'country': first_session_entry['country'],
+                            'continent': first_session_entry['continent'],
+                            'datacenter_code': first_session_entry['datacenter_code'],
+                            'verified_bot': first_session_entry['verified_bot'],
+                            'ip': ip,
+                            'session_id': '-',
+                            'start': all_requests_for_host_sorted[0]['ts'],
+                            'end': all_requests_for_host_sorted[-1]['ts'],
+                            'cipher': first_session_entry['cipher'],
+                            'ciphers': first_session_entry['ciphers'],
+                            'duration': current_aggregated_duration,
+                            'requests': all_requests_for_host_sorted,
+                            'primary_session': True,
+                            'asn': first_session_entry['asn'],
+                            'num_languages': first_session_entry['num_languages'],
+                            'accept_language': first_session_entry['accept_language'],
+                            'timezone': first_session_entry['timezone']
+                        }
+                        self.logger.info(f"Flushing primary session IP: {ip}, Host: {host} due to {flush_reason} "
+                                         f"with {len(summary_session_for_flush['requests'])} requests.")
+                        self.send_session(summary_session_for_flush)
+                    else:
+                        self.logger.info(
+                            f"Skipping flush for primary session IP: {ip}, Host: {host} due to insufficient requests "
+                            f"({len(all_requests_for_host_sorted)} < {self.min_number_of_requests}) and {flush_reason}.")
+
+            # After processing all hosts for this IP, perform clearing if necessary.
+            if should_clear_entire_ip_primary_sessions:
+                deleted_primary_sessions_count += len(sessions_for_ip)
+                self.ips_primary[ip] = {}  # Clear all primary sessions for this IP
                 if ip in self.flush_size_primary:
                     del self.flush_size_primary[ip]
 
-        self.flush_size_primary = dict()
+                    # If the IP's primary sessions are now empty, remove the IP entry itself.
+                if ip in self.ips_primary and not self.ips_primary[ip]:
+                    del self.ips_primary[ip]
 
+        # Ensure all pending Kafka messages are sent
+        self.producer.flush()
+
+        # Final logging summary of GC operation
         self.logger.info(
-            f'Garbage collector. \nips: {total_ips - deleted_ips} - {deleted_ips} deleted, \n'
-            f'sessions: {total_sessions - deleted} -  {deleted} deleted, \n'
-            f'primary: {total_primary_sessions - deleted_primary} - {deleted_primary} deleted \n')
+            f'Garbage collector. \n'
+            f'Main IPs: {total_ips - deleted_main_ips_count} - {deleted_main_ips_count} deleted, \n'
+            f'Main Sessions: {total_sessions - deleted_main_sessions_count} -  {deleted_main_sessions_count} deleted, \n'
+            f'Primary Sessions: {total_primary_sessions_before_gc - deleted_primary_sessions_count} - {deleted_primary_sessions_count} deleted \n'
+        )
 
     def collect_primary_session(self, ip):
         primary_sessions = self.ips_primary[ip]
@@ -336,7 +462,9 @@ class BaskervillehallSession(object):
                     'requests': requests,
                     'primary_session': True,
                     'asn': sessions[0]['asn'],
-                    'num_languages': sessions[0]['num_languages']
+                    'num_languages': sessions[0]['num_languages'],
+                    'accept_language': sessions[0]['accept_language'],
+                    'timezone': sessions[0]['timezone']
                 }
 
                 if session['duration'] < self.max_session_duration and \
@@ -391,7 +519,8 @@ class BaskervillehallSession(object):
             self.logger.info(f'Starting Baskervillehall sessionizer on topic {self.topic_sessions}, '
                              f'partition {self.partition}')
 
-            ts_gc = datetime.now()
+            ts_gc_trigger_wall_clock = datetime.now()
+            latest_event_ts_seen = None  # To track the latest event timestamp for GC calculations
 
             consumer.assign([TopicPartition(self.topic_weblogs, self.partition)])
             if self.read_from_beginning:
@@ -401,6 +530,15 @@ class BaskervillehallSession(object):
             ts_lag_report = datetime.now()
             while True:
                 raw_messages = consumer.poll(timeout_ms=1000, max_records=200, update_offsets=False)
+                if not raw_messages:
+                    time_now = datetime.now()
+                    if (time_now - ts_gc_trigger_wall_clock).total_seconds() > self.garbage_collection_period * 60:
+                        ts_gc_trigger_wall_clock = time_now
+                        # If no messages have been processed yet, use current wall clock as a safe fallback
+                        gc_ts_to_use = latest_event_ts_seen if latest_event_ts_seen else time_now
+                        self.gc(gc_ts_to_use)
+                    continue  # No messages, so continue loop
+
                 for topic_partition, messages in raw_messages.items():
                     for message in messages:
                         if (datetime.now() - ts_lag_report).total_seconds() > 5:
@@ -410,9 +548,13 @@ class BaskervillehallSession(object):
                             ts_lag_report = datetime.now()
                         if not message.value:
                             continue
-                        ts, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
+                        ts_event, data = self.get_timestamp_and_data(json.loads(message.value.decode('utf-8')))
                         if data is None:
                             continue
+
+                        # Update latest_event_ts_seen
+                        if latest_event_ts_seen is None or ts_event > latest_event_ts_seen:
+                            latest_event_ts_seen = ts_event
 
                         ip = data['client_ip']
 
@@ -443,7 +585,7 @@ class BaskervillehallSession(object):
                                                   session_cookie=session_id,
                                                   asn_number=asn,
                                                   asn_name=asn_name,
-                                                  timestamp=ts)
+                                                  timestamp=ts_event)
 
                         if whitelist_ip.is_in_whitelist(host, ip):
                             if self.debugging:
@@ -467,6 +609,7 @@ class BaskervillehallSession(object):
 
                         geoip = data.get('geoip', {})
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
+                        timezone = geoip.get('timezone', 'America/Los_Angeles')
 
                         if len(session_id) < 5:
                             if data.get('loc_in', '') == 'static_file':
@@ -494,7 +637,7 @@ class BaskervillehallSession(object):
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         request = {
-                            'ts': ts,
+                            'ts': ts_event,
                             'url': url,
                             'ua': ua,
                             'query': data['querystring'],
@@ -511,27 +654,28 @@ class BaskervillehallSession(object):
 
                         cipher = data.get('ssl_cipher', '')
                         ciphers = data.get('ssl_ciphers', '').split(':')
+                        accept_language = data.get('accept_language', '')
                         num_languages = BaskervillehallIsolationForest.count_accepted_languages(
-                            data.get('accept_language', ''))
+                            accept_language)
 
                         if ip in self.ips and session_id in self.ips[ip]:
                             # existing session
                             if self.debugging:
                                 self.logger.info('session exists')
                             session = self.ips[ip][session_id]
-                            if self.is_session_expired(session, ts):
+                            if self.is_session_expired(session, ts_event):
                                 if self.debugging:
                                     self.logger.info('session is expired')
                                 session = self.create_session(ua, host, country, continent, datacenter_code,
                                                               ip, session_id,
-                                                              verified_bot, ts, cipher, ciphers, request,
-                                                              asn, num_languages)
+                                                              verified_bot, ts_event, cipher, ciphers, request,
+                                                              asn, num_languages, accept_language, timezone)
                                 self.ips[ip][session_id] = session
                             else:
                                 if self.debugging:
                                     self.logger.info('updating session')
                                 self.update_session(session, request)
-                            self.check_and_send_session(session, ts)
+                            self.check_and_send_session(session)
                             self.flush()
                         elif ip in self.ips_primary and session_id in self.ips_primary[ip]:
                             # maturing session from primary
@@ -543,23 +687,23 @@ class BaskervillehallSession(object):
                                 self.ips[ip] = {}
                             self.ips[ip][session_id] = session
                             del self.ips_primary[ip][session_id]
-                            self.check_and_send_session(session, ts)
+                            self.check_and_send_session(session)
                             self.flush()
                         else:
                             # primary session
                             session = self.create_session(ua, host, country, continent, datacenter_code,
                                                           ip, session_id,
-                                                          verified_bot, ts, cipher, ciphers, request,
-                                                          asn, num_languages)
+                                                          verified_bot, ts_event, cipher, ciphers, request,
+                                                          asn, num_languages, accept_language, timezone)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session
                             self.collect_primary_session(ip)
 
                         time_now = datetime.now()
-                        if (time_now - ts_gc).total_seconds() > self.garbage_collection_period * 60:
-                            ts_gc = time_now
-                            self.gc(ts)
+                        if (time_now - ts_gc_trigger_wall_clock).total_seconds() > self.garbage_collection_period * 60:
+                            ts_gc_trigger_wall_clock = time_now
+                            self.gc(latest_event_ts_seen)
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

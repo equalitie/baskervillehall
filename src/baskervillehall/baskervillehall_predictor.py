@@ -56,7 +56,8 @@ class BaskervillehallPredictor(object):
             maz_size_ip_sessions = 100000,
             ip_sessions_ttl_in_minutes=30,
             max_requests_in_command=20,
-            single_model=False
+            single_model=False,
+            bot_score_threshold=0.5
     ):
         super().__init__()
 
@@ -98,6 +99,7 @@ class BaskervillehallPredictor(object):
         self.ip_sessions_ttl_in_minutes = ip_sessions_ttl_in_minutes
         self.max_requests_in_command = max_requests_in_command
         self.single_model = single_model
+        self.bot_score_threshold = bot_score_threshold
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
@@ -141,6 +143,7 @@ class BaskervillehallPredictor(object):
         model_storage_generic.start()
 
         pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+        pending_interactive_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         host_ip_sessions = dict()
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
 
@@ -260,6 +263,7 @@ class BaskervillehallPredictor(object):
                             prediction = False
                         session = sessions[i]
                         meta = ''
+                        rule = None
                         if (self.bad_bot_challenge
                                 and session['bad_bot'] \
                                 and ip not in ip_with_sessions.keys()):
@@ -286,8 +290,44 @@ class BaskervillehallPredictor(object):
 
                         hits = len(session['requests'])
                         session['requests'] = session['requests'][0:self.max_requests_in_command]
+                        bot_score = session['bot_score']
 
-                        rule = None
+                        if session['passed_challenge'] and (bot_score > self.bot_score_threshold or bot_score == -1):
+                            if ip in pending_interactive_ip:
+                                continue
+                            pending_interactive_ip[ip] = True
+                            # High Bot Score. Send interactive challenge
+                            meta = 'high_bot_score'
+                            self.logger.info(f'High bot score {bot_score} for ip '
+                                             f'{ip}, host {host}. Interactive challenge.')
+                            message = json.dumps(
+                                {
+                                    'Name': 'challenge_ip_interactive',
+                                    'difficulty': 2,
+                                    'Value': f'{ip}',
+                                    'country': session.get('country', ''),
+                                    'continent': session.get('continent', ''),
+                                    'datacenter_code': session.get('datacenter_code', ''),
+                                    'session_id': session_id,
+                                    'host': host,
+                                    'source': meta,
+                                    'shapley': '',
+                                    'meta': meta,
+                                    'shapley_feature': '',
+                                    'start': session['start'],
+                                    'end': session['end'],
+                                    'duration': session['duration'],
+                                    'score': score,
+                                    'num_requests': hits,
+                                    'user_agent': session.get('ua'),
+                                    'human': session.get('human', ''),
+                                    'datacenter_asn': session.get('datacenter_asn', ''),
+                                    'session': session
+                                }
+                            ).encode('utf-8')
+                            producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                            continue
+
                         if session.get('malicious_asn', False):
                             rule = 'malicious_asn'
                         elif session.get('weak_cipher', False):
@@ -388,27 +428,27 @@ class BaskervillehallPredictor(object):
                                     continue
                                 pending_session[ip][session_id] = True
                             difficulty = 1
-                            if session['passed_challenge']:
-                                if ip not in offences:
-                                    offences[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
-                                offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
-
-                                if offences[ip][session_id] >= self.num_offences_for_difficult_challenge:
-                                    self.logger.info(f'Multiple offences(show difficult challenge)'
-                                                     f' ip = {ip}, session = {session_id} '
-                                                     f' offences = {offences[ip][session_id]} '
-                                                     f'host = {host}')
-                                    meta += f'Multiple offences {offences[ip][session_id]}'
-                                    difficulty = 2
-                                    # if primary_session:
-                                    #     # if is_static_session(session):
-                                    #     #     command = 'block_ip_table'
-                                    #     # else:
-                                    #     #     command = 'block_ip'
-                                    #     command = 'block_ip'
-                                    # else:
-                                    #     if not whitelist_url.is_host_whitelisted_block_session(host):
-                                    #         command = 'block_session'
+                            # if session['passed_challenge']:
+                            #     if ip not in offences:
+                            #         offences[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+                            #     offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
+                            #
+                            #     if offences[ip][session_id] >= self.num_offences_for_difficult_challenge:
+                            #         self.logger.info(f'Multiple offences(show difficult challenge)'
+                            #                          f' ip = {ip}, session = {session_id} '
+                            #                          f' offences = {offences[ip][session_id]} '
+                            #                          f'host = {host}')
+                            #         meta += f'Multiple offences {offences[ip][session_id]}'
+                            #         difficulty = 2
+                            #         # if primary_session:
+                            #         #     # if is_static_session(session):
+                            #         #     #     command = 'block_ip_table'
+                            #         #     # else:
+                            #         #     #     command = 'block_ip'
+                            #         #     command = 'block_ip'
+                            #         # else:
+                            #         #     if not whitelist_url.is_host_whitelisted_block_session(host):
+                            #         #         command = 'block_session'
 
                             if primary_session or too_many_sessions:
                                 command = 'challenge_ip'
