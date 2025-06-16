@@ -33,37 +33,39 @@ class StorageCommands(StorageBase):
 
     def get_sql(self, record):
         command = record
-        session = command['session']
-        requests = self.get_session_requests(session, self.num_requests)
-        host = session["host"]
+        s = command['session']
+        requests = self.get_session_requests(s, self.num_requests)
+        host = s["host"]
         host_id = self.get_host_id(host)
         if len(host_id) == 0:
             return None
-        hits = len(session['requests'])
-        duration = session['duration']
+        hits = len(s['requests'])
+        duration = s['duration']
         if duration < 1:
             duration = 1
-        num_ua = self.get_number_of_useragents(session)
+        num_ua = self.get_number_of_useragents(s)
         shapley_formatted = json.dumps(command['shapley'])
-        ua = session["ua"].replace("\'", "")
+        ua = s["ua"].replace("\'", "")
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip_address, session_cookie, ip_cookie, '\
             f'primary_session, human, passed_challenge, user_agent, country, continent, '\
-            f'datacenter, hits, score, shapley_feature, difficulty, shapley, request_count, command_type_name, source, \n'\
+            f'datacenter, hits, score, bot_score, bot_score_top_factor, shapley_feature, difficulty, shapley, request_count, command_type_name, source, \n'\
             f'meta, hit_rate, num_user_agent,'\
-            f'duration, session_start, session_end, requests,updated_by)\n'\
-            f'values (\'{host_id}\', \'{host}\', \'{session["ip"]}\', \'{session["session_id"]}\',\n'\
-            f'\'{session["ip"]}_{session["session_id"]}\',{int(session["primary_session"])},\n'\
-            f'{int(session["human"])},'\
-            f'{int(session["passed_challenge"])}, \'{ua}\', \n \'{session["country"]}\','\
-            f' \'{session["continent"]}\', '\
-            f'\'{session["datacenter_code"]}\',\n'\
-            f'{hits}, {command["score"]},\'{command.get("shapley_feature","")}\','\
+            f'duration, session_start, session_end, requests,updated_by,scraper_name)\n'\
+            f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{s["session_id"]}\',\n'\
+            f'\'{s["ip"]}_{s["session_id"]}\',{int(s["primary_session"])},\n'\
+            f'{int(s["human"])},'\
+            f'{int(s["passed_challenge"])}, \'{ua}\', \n \'{s["country"]}\','\
+            f' \'{s["continent"]}\', '\
+            f'\'{s["datacenter_code"]}\',\n'\
+            f'{hits}, {command["score"]},{command.get("bot_score", 0.0)},'\
+            f'\'{command.get("bot_score_top_factor", "")}\','\
+            f'\'{command.get("shapley_feature","")}\','\
             f'{command["difficulty"]},\'{shapley_formatted}\', '\
             f'{command["num_requests"]},\'{command["Name"]}\','\
             f'\'{command["source"]}\',' \
             f'\'{command["meta"]}\',' \
             f'{hits * 60.0 / duration:.1f}, {num_ua}, '\
-            f'{duration:.1f}, \'{session["start"]}\', \'{session["end"]}\',\n'\
-            f'\'{requests}\', \'pipeline\''\
+            f'{duration:.1f}, \'{s["start"]}\', \'{s["end"]}\',\n'\
+            f'\'{requests}\', \'pipeline\',\'{s["scraper_name"]}\''\
             f');'
