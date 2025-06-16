@@ -173,7 +173,8 @@ def main():
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
             'single_model': os.environ.get('SINGLE_MODEL') == 'True',
-            'bot_score_threshold': float(os.environ.get('BOT_SCORE_THRESHOLD'))
+            'bot_score_threshold': float(os.environ.get('BOT_SCORE_THRESHOLD')),
+            'challenge_scrapers': os.environ.get('CHALLENGE_SCRAPERS') == 'True'
         }
 
         predictor = BaskervillehallPredictor(

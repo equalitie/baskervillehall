@@ -59,7 +59,8 @@ class FeatureExtractor(object):
             'num_languages',
             'ua_score',
             'hour_bucket',
-            'odd_hour'
+            'odd_hour',
+            'fingerprints_score'
         ]
         self.pca_feature = pca_feature
         if features is None:
@@ -278,6 +279,7 @@ class FeatureExtractor(object):
         hour = self.get_hour(session)
         features['hour_bucket'] = self.hour_bucket(hour)
         features['odd_hour'] = self.is_odd_hour(hour)
+        features['fingerprints_score'] = float(session.get('fingerprints_score', 0.0))
         return features
 
     def get_categorical_vectors(self, sessions):

@@ -6,6 +6,7 @@ RUN pip install tensorflow
 
 RUN pip install tensorflow-text
 RUN pip install tensorflow-hub
+RUN pip install torch
 
 COPY ./src /usr/bin/baskervillehall/src
 COPY ./setup.py /usr/bin/baskervillehall/setup.py

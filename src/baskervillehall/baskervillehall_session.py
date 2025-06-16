@@ -1,7 +1,9 @@
 import copy
 import random
 import string
+import re
 
+from baskervillehall.frequency_analyzer import FrequencyAnalyzer
 from baskervillehall.session_fingerprints import SessionFingerprints
 from baskervillehall.vpn_detector import VpnDetector
 from baskervillehall.asn_database import ASNDatabase
@@ -86,6 +88,7 @@ class BaskervillehallSession(object):
             logger=self.logger,
             db_config=postgres_connection
         )
+        self.fingerprints_analyzer = FrequencyAnalyzer()
 
     def get_timestamp_and_data(self, data):
         try:
@@ -131,20 +134,22 @@ class BaskervillehallSession(object):
         requests_formatted = []
         passed_challenge = False
         bot_score = -1.0
+        bot_score_top_factor = ''
         deflect_password = False
         requests_sorted = sorted(requests, key=lambda x: x['ts'])
         duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds()
-
+        start_timestamp = requests_sorted[0]['ts']
         for r in requests_sorted:
             rf = copy.deepcopy(r)
             rf['ts'] = r['ts'].strftime(self.date_time_format)
             if r['passed_challenge']:
                 passed_challenge = True
                 bot_score = r['bot_score']
+                bot_score_top_factor = r['bot_score_top_factor']
             if r['deflect_password']:
                 deflect_password = True
             requests_formatted.append(rf)
-
+        scraper_name = BaskervillehallIsolationForest.detect_scraper(session['ua'])
         session_final = {
             'host': session['host'],
             'ua': session['ua'],
@@ -160,6 +165,7 @@ class BaskervillehallSession(object):
             'requests': requests_formatted,
             'passed_challenge': passed_challenge,
             'bot_score': bot_score,
+            'bot_score_top_factor': bot_score_top_factor,
             'deflect_password': deflect_password,
             'verified_bot': session['verified_bot'],
             'cipher': session.get('cipher', ''),
@@ -167,6 +173,7 @@ class BaskervillehallSession(object):
             'valid_browser_ciphers': BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']),
             'weak_cipher': BaskervillehallIsolationForest.is_weak_cipher(session.get('cipher', '')),
             'asn': session['asn'],
+            'asn_name': session['asn_name'],
             'bot_ua': BaskervillehallIsolationForest.is_bot_user_agent(session['ua']),
             'ai_bot_ua': BaskervillehallIsolationForest.is_ai_bot_user_agent(session['ua']),
             'num_languages': session['num_languages'],
@@ -175,9 +182,20 @@ class BaskervillehallSession(object):
             'asset_only': BaskervillehallIsolationForest.is_asset_only_session(session),
             'ua_score': BaskervillehallIsolationForest.ua_score(session['ua']),
             'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua']),
-            'fingerprints': SessionFingerprints.get_fingerprints(session),
-            'timezone': session['timezone']
+            'timezone': session['timezone'],
+            'scraper_name': scraper_name if scraper_name else '',
+            'is_scraper': scraper_name is not None
         }
+        fingerprints = SessionFingerprints.get_fingerprints(session)
+        session_final['fingerprints'] = fingerprints
+        self.fingerprints_analyzer.process(
+            host=session['host'],
+            key=fingerprints,
+            timestamp=start_timestamp)
+
+        session_final['fingerprints_score'] = self.fingerprints_analyzer.get_key_zscore(
+            host=session['host'],
+            key=fingerprints)
 
         asn = session['asn']
         vps_asn = self.asn_database2.is_vps_asn(asn)
@@ -203,6 +221,8 @@ class BaskervillehallSession(object):
             session_final['class'] = 'ai_bot'
         elif session_final['bad_bot']:
             session_final['class'] = 'bad_bot'
+        elif session_final['is_scraper']:
+            session_final['class'] = 'scraper'
         else:
             session_final['class'] = 'bot'
 
@@ -219,7 +239,7 @@ class BaskervillehallSession(object):
 
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request, asn, num_languages, accept_language, timezone):
+                       cipher, ciphers, request, asn, asn_name, num_languages, accept_language, timezone):
         return {
             'ua': ua,
             'host': host,
@@ -237,13 +257,24 @@ class BaskervillehallSession(object):
             'ciphers': ciphers,
             'requests': [request] if request else [],
             'asn': asn,
+            'asn_name': asn_name,
             'num_languages': num_languages,
             'accept_language': accept_language,
             'timezone': timezone
         }
 
-    @staticmethod
-    def update_session(session, request):
+    def update_session(self, session, request):
+        # ignore streaming video requests
+        video_regex = re.compile(
+            r'^[^ ]+\.(mp4|webm|mov|avi|mkv|flv|wmv|mpeg|mpg|m3u8|mpd)(\?.*)?$',
+            re.IGNORECASE
+        )
+        if (len(session['requests']) > 0 and
+                session['requests'][-1]['url'] == request['url'] and
+                video_regex.match(request['url']) and request['code'] == 206):
+            self.logger.info(f'Skipping video stream request {request["url"]}')
+            return
+
         session['end'] = request['ts']
         session['duration'] = (session['end'] - session['start']).total_seconds()
         session['requests'].append(request)
@@ -387,6 +418,7 @@ class BaskervillehallSession(object):
                             'requests': all_requests_for_host_sorted,
                             'primary_session': True,
                             'asn': first_session_entry['asn'],
+                            'asn_name': first_session_entry['asn_name'],
                             'num_languages': first_session_entry['num_languages'],
                             'accept_language': first_session_entry['accept_language'],
                             'timezone': first_session_entry['timezone']
@@ -462,6 +494,7 @@ class BaskervillehallSession(object):
                     'requests': requests,
                     'primary_session': True,
                     'asn': sessions[0]['asn'],
+                    'asn_name': sessions[0]['asn_name'],
                     'num_languages': sessions[0]['num_languages'],
                     'accept_language': sessions[0]['accept_language'],
                     'timezone': sessions[0]['timezone']
@@ -624,6 +657,7 @@ class BaskervillehallSession(object):
                         passed_challenge = False
                         deflect_password = False
                         bot_score = data.get('banjax_bot_score', -1.0)
+                        bot_score_top_factor = data.get('banjax_bot_score_top_factor', '')
 
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
@@ -649,6 +683,7 @@ class BaskervillehallSession(object):
                             'static': data.get('loc_in', '') == 'static_file',
                             'passed_challenge': passed_challenge,
                             'bot_score': bot_score,
+                            'bot_score_top_factor': bot_score_top_factor,
                             'deflect_password': deflect_password
                         }
 
@@ -669,7 +704,7 @@ class BaskervillehallSession(object):
                                 session = self.create_session(ua, host, country, continent, datacenter_code,
                                                               ip, session_id,
                                                               verified_bot, ts_event, cipher, ciphers, request,
-                                                              asn, num_languages, accept_language, timezone)
+                                                              asn, asn_name, num_languages, accept_language, timezone)
                                 self.ips[ip][session_id] = session
                             else:
                                 if self.debugging:
@@ -694,7 +729,7 @@ class BaskervillehallSession(object):
                             session = self.create_session(ua, host, country, continent, datacenter_code,
                                                           ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,
-                                                          asn, num_languages, accept_language, timezone)
+                                                          asn, asn_name, num_languages, accept_language, timezone)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session
