@@ -11,6 +11,11 @@ proxy:
   service:
     type: ClusterIP
 
+hub:
+  db:
+    pvc:
+      storageClassName: csi-cinder-high-speed-gen2
+
 singleuser:
   image:
     name: equalitie/baskervillehall
@@ -33,11 +38,3 @@ singleuser:
   # `cmd: null` allows the custom CMD of the Jupyter docker-stacks to be used
   # which performs further customization on startup.
   cmd: null
-
-scheduling:
-  userScheduler:
-    enabled: false
-
-
-
-

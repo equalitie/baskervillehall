@@ -27,8 +27,7 @@ spec:
               - key: kubernetes.io/hostname
                 operator: NotIn
                 values:
-                - workers-node-eac0c8
-                - workers-node-c83aa9
+                - workers-node-6a9f33
       containers:
       - name: "baskervillehall-trainer"
         image: "equalitie/baskervillehall:latest"

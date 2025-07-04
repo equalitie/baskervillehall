@@ -236,7 +236,7 @@ class BaskervillehallIsolationForest(object):
 
 
     def is_scraper(user_agent):
-        return BaskervillehallIsolationForest.detect_scraper(user_agent) == None
+        return BaskervillehallIsolationForest.detect_scraper(user_agent) is not None
 
     def detect_scraper(user_agent):
         """
@@ -264,9 +264,9 @@ class BaskervillehallIsolationForest(object):
         max_score = 7  # Total possible penalties
 
         # Very short UAs
-        if len(ua) < 20:
+        if len(ua) < 10:
             score += 3  # highly suspicious
-        elif len(ua) < 60:
+        elif len(ua) < 30:
             score += 1  # somewhat suspicious
 
         # Known bot/tool indicators
@@ -291,7 +291,7 @@ class BaskervillehallIsolationForest(object):
 
     @staticmethod
     def is_human(session):
-        if session['ua_score'] > 0.8:
+        if session['ua_score'] > 0.9:
             return False
         # if session['datacenter_asn'] and not session['vpn']:
         #     return False
@@ -307,14 +307,14 @@ class BaskervillehallIsolationForest(object):
             return False
         if session['bot_ua']:
             return False
-        if session['short_ua']:
-            return False
+        # if session['short_ua']:
+        #     return False
         if session['ai_bot_ua']:
             return False
-        if session['asset_only']:
-            return False
-        if not session['valid_browser_ciphers']:
-            return False
+        # if session['asset_only']:
+        #     return False
+        # if not session['valid_browser_ciphers']:
+        #     return False
         if session['weak_cipher']:
             return False
         return True

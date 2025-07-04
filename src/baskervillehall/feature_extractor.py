@@ -84,7 +84,8 @@ class FeatureExtractor(object):
             'verified_bot',
             'datacenter_asn',
             'short_ua',
-            'asset_only'
+            'asset_only',
+            'timezone'
         ]
         if categorical_features is None:
             categorical_features = supported_categorical_features

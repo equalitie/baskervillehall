@@ -345,7 +345,6 @@ class BaskervillehallSession(object):
         for ip in ips_to_process_for_primary_gc:
             sessions_for_ip = self.ips_primary[ip]
             hosts_data = {}
-            is_ip_still_active_by_event_time = False
 
             for session_id, s_data in list(sessions_for_ip.items()):
                 current_host = s_data['host']
@@ -361,11 +360,7 @@ class BaskervillehallSession(object):
                 hosts_data[current_host]['oldest_ts'] = min(hosts_data[current_host]['oldest_ts'], s_data['start'])
                 hosts_data[current_host]['latest_ts'] = max(hosts_data[current_host]['latest_ts'], s_data['end'])
 
-                if (current_event_ts_horizon - s_data['end']).total_seconds() <= self.primary_session_expiration * 60:
-                    is_ip_still_active_by_event_time = True
-
-            should_clear_entire_ip_primary_sessions = False
-
+            all_hosts_oldest_age = None
             for host, host_data in hosts_data.items():
                 all_requests_for_host_sorted = sorted(host_data['requests'], key=lambda x: x['ts'])
 
@@ -375,22 +370,17 @@ class BaskervillehallSession(object):
                 current_aggregated_duration = (host_data['latest_ts'] - host_data['oldest_ts']).total_seconds()
                 request_count = len(all_requests_for_host_sorted)
                 oldest_age = (current_event_ts_horizon - host_data['oldest_ts']).total_seconds()
-                flush_reason = ""
+                if all_hosts_oldest_age is None or oldest_age > all_hosts_oldest_age:
+                    all_hosts_oldest_age = oldest_age
 
                 should_flush_this_host_segment = False
 
                 if current_aggregated_duration > self.max_session_duration:
                     should_flush_this_host_segment = True
-                    flush_reason = f"exceeded max session duration ({self.max_session_duration}s)"
-                elif not is_ip_still_active_by_event_time:
+                elif oldest_age > self.primary_session_expiration * 60:
                     should_flush_this_host_segment = True
-                    flush_reason = "inactivity expiration"
-                elif oldest_age > 3600:
-                    should_flush_this_host_segment = True
-                    flush_reason = f"forced flush due to excessive age ({int(oldest_age)}s)"
 
                 if should_flush_this_host_segment:
-                    should_clear_entire_ip_primary_sessions = True
                     if request_count >= self.min_number_of_requests:
                         first_session_entry = host_data['first_session_data']
                         summary_session_for_flush = {
@@ -416,12 +406,8 @@ class BaskervillehallSession(object):
                             'timezone': first_session_entry['timezone']
                         }
                         self.send_session(summary_session_for_flush)
-                    # else:
-                    #     self.logger.info(
-                    #         f"Deleting primary session IP: {ip}, Host: {host} due to {flush_reason}, "
-                    #         f"insufficient requests ({request_count} < {self.min_number_of_requests})")
 
-            if should_clear_entire_ip_primary_sessions:
+            if all_hosts_oldest_age and all_hosts_oldest_age > self.primary_session_expiration * 60:
                 deleted_primary_sessions_count += len(sessions_for_ip)
                 self.ips_primary[ip] = {}
                 if ip in self.flush_size_primary:

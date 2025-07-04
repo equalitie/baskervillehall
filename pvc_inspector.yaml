@@ -3,6 +3,15 @@ kind: Pod
 metadata:
   name: pvc-inspector
 spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                  - workers-node-919014
   containers:
   - image: busybox
     name: pvc-inspector
@@ -14,4 +23,4 @@ spec:
   volumes:
   - name: pvc-mount
     persistentVolumeClaim:
-      claimName: claim-admin
+      claimName: claim-anton

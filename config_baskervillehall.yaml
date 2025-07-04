@@ -11,7 +11,7 @@ data:
     FLUSH_INCREMENT: "20"
     TOPIC_SESSIONS: "BASKERVILLEHALL_4"
     FEATURES: "request_rate,post_rate,request_interval_average,request_interval_std,response4xx_to_request_ratio,top_page_to_request_ratio,unique_path_rate,unique_path_to_request_ratio,unique_query_rate,unique_query_to_unique_path_ratio,image_to_html_ratio,js_to_html_ratio,css_to_html_ratio,path_depth_average,path_depth_std,payload_size_log_average,entropy,edge_count,static_ratio,ua_count,api_ratio,num_ciphers,num_languages,ua_score,odd_hour,hour_bucket,fingerprints_score"
-    CATEGORICAL_FEATURES: "country,primary_session,cipher,datacenter_asn"
+    CATEGORICAL_FEATURES: "country,primary_session,cipher,datacenter_asn,timezone"
     PCA_FEATURE: "False"
     MIN_CATEGORY_FREQUENCY: "10"
     MAX_CATEGORIES: "5"
