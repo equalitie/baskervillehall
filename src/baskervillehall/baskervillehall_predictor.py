@@ -57,7 +57,8 @@ class BaskervillehallPredictor(object):
             ip_sessions_ttl_in_minutes=30,
             max_requests_in_command=20,
             single_model=False,
-            bot_score_threshold=0.5
+            bot_score_threshold=0.5,
+            challenge_scrapers = True
     ):
         super().__init__()
 
@@ -100,6 +101,7 @@ class BaskervillehallPredictor(object):
         self.max_requests_in_command = max_requests_in_command
         self.single_model = single_model
         self.bot_score_threshold = bot_score_threshold
+        self.challenge_scrapers = challenge_scrapers
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(refresh_period_in_seconds=postgres_refresh_period_in_seconds,
@@ -142,8 +144,9 @@ class BaskervillehallPredictor(object):
             logger=self.logger)
         model_storage_generic.start()
 
-        pending_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+        pending_challenge_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         pending_interactive_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+        pending_block_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         host_ip_sessions = dict()
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
 
@@ -230,6 +233,7 @@ class BaskervillehallPredictor(object):
                         ip_with_sessions[session['ip']] = True
 
                     batch[(host, human)].append(session)
+                    session = None
                     predicting_total += 1
 
                 predicted = 0
@@ -252,7 +256,9 @@ class BaskervillehallPredictor(object):
                                          f'{scores.shape[0]} items')
 
                     for i in range(len(sessions)):
+                        session = sessions[i]
                         ip = session['ip']
+                        human = session.get('human', True)
                         if scores is not None:
                             score = scores[i]
                             sensitivity_shift = self.settings.get_sensitivity(host) * self.sensitivity_factor
@@ -261,7 +267,6 @@ class BaskervillehallPredictor(object):
                         else:
                             score = 0.0
                             prediction = False
-                        session = sessions[i]
                         meta = ''
                         rule = None
                         if (self.bad_bot_challenge
@@ -291,19 +296,35 @@ class BaskervillehallPredictor(object):
                         hits = len(session['requests'])
                         session['requests'] = session['requests'][0:self.max_requests_in_command]
                         bot_score = session['bot_score']
+                        bot_score_top_factor = session.get('bot_score_top_factor', '')
 
-                        if session['passed_challenge'] and (bot_score > self.bot_score_threshold or bot_score == -1):
-                            if ip in pending_interactive_ip:
+                        # if session.get('human', True):
+                        #     # human
+                        #     if session['passed_challenge'] and \
+                        #             bot_score > self.bot_score_threshold and \
+                        #             bot_score_top_factor != 'no_payload':
+                        #         # block a human anomaly with high bot score
+                        #         pass
+                        # else:
+                        #     # not human
+                        #     pass
+
+                        if (session['passed_challenge'] and \
+                                # not human and \
+                                bot_score > self.bot_score_threshold and \
+                                bot_score_top_factor != 'no_payload'):
+                            if ip in pending_block_ip:
                                 continue
-                            pending_interactive_ip[ip] = True
-                            # High Bot Score. Send interactive challenge
+                            pending_block_ip[ip] = True
+                            # High Bot Score. Block IP
                             meta = 'high_bot_score'
-                            self.logger.info(f'High bot score {bot_score} for ip '
-                                             f'{ip}, host {host}. Interactive challenge.')
+                            self.logger.info(f'High bot score = {bot_score}, human={human}, '
+                                             f'top_factor = {bot_score_top_factor} for ip '
+                                             f'{ip}, host {host}. Blocking.')
                             message = json.dumps(
                                 {
-                                    'Name': 'challenge_ip_interactive',
-                                    'difficulty': 2,
+                                    'Name': 'block_ip_testing',
+                                    'difficulty': 0,
                                     'Value': f'{ip}',
                                     'country': session.get('country', ''),
                                     'continent': session.get('continent', ''),
@@ -318,6 +339,8 @@ class BaskervillehallPredictor(object):
                                     'end': session['end'],
                                     'duration': session['duration'],
                                     'score': score,
+                                    'bot_score': bot_score,
+                                    'bot_score_top_factor': bot_score_top_factor,
                                     'num_requests': hits,
                                     'user_agent': session.get('ua'),
                                     'human': session.get('human', ''),
@@ -328,15 +351,56 @@ class BaskervillehallPredictor(object):
                             producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
                             continue
 
-                        if session.get('malicious_asn', False):
-                            rule = 'malicious_asn'
-                        elif session.get('weak_cipher', False):
+                        # if session['passed_challenge'] and (bot_score > self.bot_score_threshold or bot_score == -1):
+                        #     if ip in pending_interactive_ip:
+                        #         continue
+                        #     pending_interactive_ip[ip] = True
+                        #     # High Bot Score. Send interactive challenge
+                        #     meta = 'high_bot_score'
+                        #     self.logger.info(f'High bot score {bot_score} for ip '
+                        #                      f'{ip}, host {host}. Interactive challenge.')
+                        #     message = json.dumps(
+                        #         {
+                        #             'Name': 'challenge_ip_interactive',
+                        #             'difficulty': 2,
+                        #             'Value': f'{ip}',
+                        #             'country': session.get('country', ''),
+                        #             'continent': session.get('continent', ''),
+                        #             'datacenter_code': session.get('datacenter_code', ''),
+                        #             'session_id': session_id,
+                        #             'host': host,
+                        #             'source': meta,
+                        #             'shapley': '',
+                        #             'meta': meta,
+                        #             'shapley_feature': '',
+                        #             'start': session['start'],
+                        #             'end': session['end'],
+                        #             'duration': session['duration'],
+                        #             'score': score,
+                        #             'num_requests': hits,
+                        #             'user_agent': session.get('ua'),
+                        #             'human': session.get('human', ''),
+                        #             'datacenter_asn': session.get('datacenter_asn', ''),
+                        #             'session': session
+                        #         }
+                        #     ).encode('utf-8')
+                        #     producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                        #     continue
+
+                        scraper_name = (
+                            session.get('scraper_name', BaskervillehallIsolationForest.detect_scraper(session['ua'])))
+                        # if session.get('malicious_asn', False):
+                        #     rule = 'malicious_asn'
+                        # el
+                        if session.get('weak_cipher', False):
                             rule = 'weak_cipher'
+                        elif len(scraper_name) > 0 and self.challenge_scrapers:
+                            rule = 'scraper'
 
                         if rule:
-                            if ip in pending_ip:
+                            if ip in pending_challenge_ip:
                                 continue
-                            pending_ip[ip] = True
+                            pending_challenge_ip[ip] = True
 
                             meta = rule
                             self.logger.info(f'Rule {rule} for ip '
@@ -363,6 +427,7 @@ class BaskervillehallPredictor(object):
                                     'user_agent': session.get('ua'),
                                     'human': session.get('human', ''),
                                     'datacenter_asn': session.get('datacenter_asn', ''),
+                                    'scraper_name': scraper_name,
                                     'session': session
                                 }
                             ).encode('utf-8')
@@ -379,9 +444,9 @@ class BaskervillehallPredictor(object):
                                                                   ttl=self.ip_sessions_ttl_in_minutes*60)
                             host_ip_sessions[host][ip][session_id] = True
                             if len(host_ip_sessions[host][ip]) >= self.max_sessions_for_ip:
-                                if ip in pending_ip:
+                                if ip in pending_challenge_ip:
                                     continue
-                                pending_ip[ip] = True
+                                pending_challenge_ip[ip] = True
 
                                 too_many_sessions = True
                                 meta = 'Too many sessions.'
@@ -417,9 +482,9 @@ class BaskervillehallPredictor(object):
 
                         if prediction:
                             if primary_session:
-                                if ip in pending_ip:
+                                if ip in pending_challenge_ip:
                                     continue
-                                pending_ip[ip] = True
+                                pending_challenge_ip[ip] = True
                             else:
                                 if ip not in pending_session:
                                     pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)

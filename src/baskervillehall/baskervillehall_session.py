@@ -1,7 +1,10 @@
 import copy
 import random
 import string
+import re
+import psutil
 
+from baskervillehall.frequency_analyzer import FrequencyAnalyzer
 from baskervillehall.session_fingerprints import SessionFingerprints
 from baskervillehall.vpn_detector import VpnDetector
 from baskervillehall.asn_database import ASNDatabase
@@ -14,7 +17,8 @@ from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 import json
-from datetime import datetime
+from datetime import datetime, time
+import time as time_module
 
 
 class BaskervillehallSession(object):
@@ -86,6 +90,7 @@ class BaskervillehallSession(object):
             logger=self.logger,
             db_config=postgres_connection
         )
+        self.fingerprints_analyzer = FrequencyAnalyzer()
 
     def get_timestamp_and_data(self, data):
         try:
@@ -131,20 +136,22 @@ class BaskervillehallSession(object):
         requests_formatted = []
         passed_challenge = False
         bot_score = -1.0
+        bot_score_top_factor = ''
         deflect_password = False
         requests_sorted = sorted(requests, key=lambda x: x['ts'])
         duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds()
-
+        start_timestamp = requests_sorted[0]['ts']
         for r in requests_sorted:
             rf = copy.deepcopy(r)
             rf['ts'] = r['ts'].strftime(self.date_time_format)
             if r['passed_challenge']:
                 passed_challenge = True
                 bot_score = r['bot_score']
+                bot_score_top_factor = r['bot_score_top_factor']
             if r['deflect_password']:
                 deflect_password = True
             requests_formatted.append(rf)
-
+        scraper_name = BaskervillehallIsolationForest.detect_scraper(session['ua'])
         session_final = {
             'host': session['host'],
             'ua': session['ua'],
@@ -160,6 +167,7 @@ class BaskervillehallSession(object):
             'requests': requests_formatted,
             'passed_challenge': passed_challenge,
             'bot_score': bot_score,
+            'bot_score_top_factor': bot_score_top_factor,
             'deflect_password': deflect_password,
             'verified_bot': session['verified_bot'],
             'cipher': session.get('cipher', ''),
@@ -167,6 +175,7 @@ class BaskervillehallSession(object):
             'valid_browser_ciphers': BaskervillehallIsolationForest.is_valid_browser_ciphers(session['ciphers']),
             'weak_cipher': BaskervillehallIsolationForest.is_weak_cipher(session.get('cipher', '')),
             'asn': session['asn'],
+            'asn_name': session['asn_name'],
             'bot_ua': BaskervillehallIsolationForest.is_bot_user_agent(session['ua']),
             'ai_bot_ua': BaskervillehallIsolationForest.is_ai_bot_user_agent(session['ua']),
             'num_languages': session['num_languages'],
@@ -175,9 +184,20 @@ class BaskervillehallSession(object):
             'asset_only': BaskervillehallIsolationForest.is_asset_only_session(session),
             'ua_score': BaskervillehallIsolationForest.ua_score(session['ua']),
             'headless_ua': BaskervillehallIsolationForest.is_headless_ua(session['ua']),
-            'fingerprints': SessionFingerprints.get_fingerprints(session),
-            'timezone': session['timezone']
+            'timezone': session['timezone'],
+            'scraper_name': scraper_name if scraper_name else '',
+            'is_scraper': scraper_name is not None
         }
+        fingerprints = SessionFingerprints.get_fingerprints(session)
+        session_final['fingerprints'] = fingerprints
+        self.fingerprints_analyzer.process(
+            host=session['host'],
+            key=fingerprints,
+            timestamp=start_timestamp)
+
+        session_final['fingerprints_score'] = self.fingerprints_analyzer.get_key_zscore(
+            host=session['host'],
+            key=fingerprints)
 
         asn = session['asn']
         vps_asn = self.asn_database2.is_vps_asn(asn)
@@ -203,6 +223,8 @@ class BaskervillehallSession(object):
             session_final['class'] = 'ai_bot'
         elif session_final['bad_bot']:
             session_final['class'] = 'bad_bot'
+        elif session_final['is_scraper']:
+            session_final['class'] = 'scraper'
         else:
             session_final['class'] = 'bot'
 
@@ -219,7 +241,7 @@ class BaskervillehallSession(object):
 
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request, asn, num_languages, accept_language, timezone):
+                       cipher, ciphers, request, asn, asn_name, num_languages, accept_language, timezone):
         return {
             'ua': ua,
             'host': host,
@@ -237,13 +259,23 @@ class BaskervillehallSession(object):
             'ciphers': ciphers,
             'requests': [request] if request else [],
             'asn': asn,
+            'asn_name': asn_name,
             'num_languages': num_languages,
             'accept_language': accept_language,
             'timezone': timezone
         }
 
-    @staticmethod
-    def update_session(session, request):
+    def update_session(self, session, request):
+        # ignore streaming video requests
+        video_regex = re.compile(
+            r'^[^ ]+\.(mp4|webm|mov|avi|mkv|flv|wmv|mpeg|mpg|m3u8|mpd)(\?.*)?$',
+            re.IGNORECASE
+        )
+        if (len(session['requests']) > 0 and
+                session['requests'][-1]['url'] == request['url'] and
+                video_regex.match(request['url']) and request['code'] == 206):
+            return
+
         session['end'] = request['ts']
         session['duration'] = (session['end'] - session['start']).total_seconds()
         session['requests'].append(request)
@@ -308,13 +340,11 @@ class BaskervillehallSession(object):
         ips_to_process_for_primary_gc = list(self.ips_primary.keys())
         deleted_primary_sessions_count = 0
 
-        for ip in ips_to_process_for_primary_gc:
-            sessions_for_ip = self.ips_primary[ip]  # These are individual primary session entries for the IP
+        start_gc = time_module.time()
 
-            # Aggregate primary session data for this IP by host
+        for ip in ips_to_process_for_primary_gc:
+            sessions_for_ip = self.ips_primary[ip]
             hosts_data = {}
-            # Flag to check if *any* primary session for this IP is still active enough to prevent overall inactivity deletion
-            is_ip_still_active_by_event_time = False
 
             for session_id, s_data in list(sessions_for_ip.items()):
                 current_host = s_data['host']
@@ -327,20 +357,10 @@ class BaskervillehallSession(object):
                     }
 
                 hosts_data[current_host]['requests'].extend(s_data['requests'])
-                if s_data['start'] < hosts_data[current_host]['oldest_ts']:
-                    hosts_data[current_host]['oldest_ts'] = s_data['start']
-                if s_data['end'] > hosts_data[current_host]['latest_ts']:
-                    hosts_data[current_host]['latest_ts'] = s_data['end']
+                hosts_data[current_host]['oldest_ts'] = min(hosts_data[current_host]['oldest_ts'], s_data['start'])
+                hosts_data[current_host]['latest_ts'] = max(hosts_data[current_host]['latest_ts'], s_data['end'])
 
-                # If any session for this IP is within the primary_session_expiration window, the IP is still active
-                if (current_event_ts_horizon - s_data['end']).total_seconds() <= self.primary_session_expiration * 60:
-                    is_ip_still_active_by_event_time = True
-
-            # Flag to decide if the *entire IP's primary sessions* should be cleared from memory
-            # This happens either if inactive, or if a segment was flushed by duration.
-            should_clear_entire_ip_primary_sessions = False
-
-            # Iterate through each host's aggregated primary session for this IP
+            all_hosts_oldest_age = None
             for host, host_data in hosts_data.items():
                 all_requests_for_host_sorted = sorted(host_data['requests'], key=lambda x: x['ts'])
 
@@ -348,27 +368,20 @@ class BaskervillehallSession(object):
                     continue
 
                 current_aggregated_duration = (host_data['latest_ts'] - host_data['oldest_ts']).total_seconds()
+                request_count = len(all_requests_for_host_sorted)
+                oldest_age = (current_event_ts_horizon - host_data['oldest_ts']).total_seconds()
+                if all_hosts_oldest_age is None or oldest_age > all_hosts_oldest_age:
+                    all_hosts_oldest_age = oldest_age
 
                 should_flush_this_host_segment = False
-                flush_reason = ""
 
-                # --- Condition A: Exceeded its maximum allowed lifetime (forced flush + reset) ---
-                # This catches active, long-running, low-volume segments.
                 if current_aggregated_duration > self.max_session_duration:
                     should_flush_this_host_segment = True
-                    flush_reason = f"exceeded max session duration ({self.max_session_duration}s) (forced flush)"
-
-                # --- Condition B: Inactivity (final flush before deletion) ---
-                # This applies if the IP is overall inactive, covering all its primary sessions.
-                elif not is_ip_still_active_by_event_time:
+                elif oldest_age > self.primary_session_expiration * 60:
                     should_flush_this_host_segment = True
-                    flush_reason = "inactivity expiration (final flush before deletion)"
 
                 if should_flush_this_host_segment:
-                    should_clear_entire_ip_primary_sessions = True  # Mark for clearing the whole IP's primary data
-
-                    # Only flush if there are enough requests for the aggregated session
-                    if len(all_requests_for_host_sorted) >= self.min_number_of_requests:
+                    if request_count >= self.min_number_of_requests:
                         first_session_entry = host_data['first_session_data']
                         summary_session_for_flush = {
                             'ua': first_session_entry['ua'],
@@ -387,43 +400,36 @@ class BaskervillehallSession(object):
                             'requests': all_requests_for_host_sorted,
                             'primary_session': True,
                             'asn': first_session_entry['asn'],
+                            'asn_name': first_session_entry['asn_name'],
                             'num_languages': first_session_entry['num_languages'],
                             'accept_language': first_session_entry['accept_language'],
                             'timezone': first_session_entry['timezone']
                         }
-                        self.logger.info(f"Flushing primary session IP: {ip}, Host: {host} due to {flush_reason} "
-                                         f"with {len(summary_session_for_flush['requests'])} requests.")
                         self.send_session(summary_session_for_flush)
-                    else:
-                        self.logger.info(
-                            f"Skipping flush for primary session IP: {ip}, Host: {host} due to insufficient requests "
-                            f"({len(all_requests_for_host_sorted)} < {self.min_number_of_requests}) and {flush_reason}.")
 
-            # After processing all hosts for this IP, perform clearing if necessary.
-            if should_clear_entire_ip_primary_sessions:
+            if all_hosts_oldest_age and all_hosts_oldest_age > self.primary_session_expiration * 60:
                 deleted_primary_sessions_count += len(sessions_for_ip)
-                self.ips_primary[ip] = {}  # Clear all primary sessions for this IP
+                self.ips_primary[ip] = {}
                 if ip in self.flush_size_primary:
                     del self.flush_size_primary[ip]
-
-                    # If the IP's primary sessions are now empty, remove the IP entry itself.
                 if ip in self.ips_primary and not self.ips_primary[ip]:
                     del self.ips_primary[ip]
 
-        # Ensure all pending Kafka messages are sent
         self.producer.flush()
 
-        # Final logging summary of GC operation
+        mem = psutil.Process().memory_info().rss / 1024 / 1024  # resident set size in MB
         self.logger.info(
             f'Garbage collector. \n'
             f'Main IPs: {total_ips - deleted_main_ips_count} - {deleted_main_ips_count} deleted, \n'
             f'Main Sessions: {total_sessions - deleted_main_sessions_count} -  {deleted_main_sessions_count} deleted, \n'
             f'Primary Sessions: {total_primary_sessions_before_gc - deleted_primary_sessions_count} - {deleted_primary_sessions_count} deleted \n'
+            f'GC took {time_module.time() - start_gc:.2f} seconds | RAM usage: {mem:.2f} MB'
         )
 
     def collect_primary_session(self, ip):
         primary_sessions = self.ips_primary[ip]
         size = len(primary_sessions)
+
         if size > self.max_primary_sessions_per_ip:
             if ip in self.flush_size_primary:
                 increment = size - self.flush_size_primary[ip]
@@ -442,9 +448,21 @@ class BaskervillehallSession(object):
                     hosts[host] = []
                 hosts[host].append(s)
 
+            now = datetime.now()
+
             for host, sessions in hosts.items():
                 requests = [s['requests'][0] for s in sessions]
                 requests = sorted(requests, key=lambda x: x['ts'])
+
+                if not requests:
+                    continue
+
+                start_ts = requests[0]['ts']
+                end_ts = requests[-1]['ts']
+                duration = (end_ts - start_ts).total_seconds()
+                request_count = len(requests)
+                age = (now - start_ts).total_seconds()
+
                 session = {
                     'ua': sessions[0]['ua'],
                     'host': host,
@@ -454,30 +472,33 @@ class BaskervillehallSession(object):
                     'verified_bot': sessions[0]['verified_bot'],
                     'ip': ip,
                     'session_id': '-',
-                    'start': requests[0]['ts'],
-                    'end': requests[-1]['ts'],
+                    'start': start_ts,
+                    'end': end_ts,
                     'cipher': sessions[0]['cipher'],
                     'ciphers': sessions[0]['ciphers'],
-                    'duration': (requests[-1]['ts'] - requests[0]['ts']).total_seconds(),
+                    'duration': duration,
                     'requests': requests,
                     'primary_session': True,
                     'asn': sessions[0]['asn'],
+                    'asn_name': sessions[0]['asn_name'],
                     'num_languages': sessions[0]['num_languages'],
                     'accept_language': sessions[0]['accept_language'],
                     'timezone': sessions[0]['timezone']
                 }
 
-                if session['duration'] < self.max_session_duration and \
-                        len(session['requests']) > self.max_primary_sessions_per_ip:
-                    if self.debugging:
-                        self.logger.info('flushing primary session')
-                        self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
+                if duration > self.max_session_duration:
+                    self.logger.info(
+                        f'Deleting overlong primary session IP: {ip}, Host: {host} (duration {duration:.1f}s)')
+                    self.ips_primary[ip] = {}
+                    return
+
+                if request_count >= self.min_number_of_requests:
                     self.send_session(session)
                 else:
-                    if self.debugging:
-                        self.logger.info(f'primary session is too long {session["duration"]} >= '
-                                         f'{self.max_session_duration}')
-                        self.logger.info(f'ip={ip}, hits={len(session["requests"])} host={host}')
+                    # Age threshold to drop stale, inactive sessions
+                    if age > 1800:  # 30 minutes
+                        self.ips_primary[ip] = {}
+                        return
 
             self.flush()
 
@@ -529,6 +550,15 @@ class BaskervillehallSession(object):
                 consumer.seek_to_end()
             ts_lag_report = datetime.now()
             while True:
+                # Monitor memory and force GC if RAM is too high
+                if time_module.time() % 60 < 1:  # roughly once per minute
+                    mem = psutil.Process().memory_info().rss / 1024 / 1024
+                    self.logger.info(f'RAM usage: {mem:.2f} MB')
+                    if mem > 2048:
+                        self.logger.warning(f'High RAM usage ({mem:.2f} MB) — running emergency GC')
+                        gc_ts_to_use = latest_event_ts_seen if latest_event_ts_seen else datetime.now()
+                        self.gc(gc_ts_to_use)
+
                 raw_messages = consumer.poll(timeout_ms=1000, max_records=200, update_offsets=False)
                 if not raw_messages:
                     time_now = datetime.now()
@@ -624,6 +654,7 @@ class BaskervillehallSession(object):
                         passed_challenge = False
                         deflect_password = False
                         bot_score = data.get('banjax_bot_score', -1.0)
+                        bot_score_top_factor = data.get('banjax_bot_score_top_factor', '')
 
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
@@ -649,6 +680,7 @@ class BaskervillehallSession(object):
                             'static': data.get('loc_in', '') == 'static_file',
                             'passed_challenge': passed_challenge,
                             'bot_score': bot_score,
+                            'bot_score_top_factor': bot_score_top_factor,
                             'deflect_password': deflect_password
                         }
 
@@ -669,7 +701,7 @@ class BaskervillehallSession(object):
                                 session = self.create_session(ua, host, country, continent, datacenter_code,
                                                               ip, session_id,
                                                               verified_bot, ts_event, cipher, ciphers, request,
-                                                              asn, num_languages, accept_language, timezone)
+                                                              asn, asn_name, num_languages, accept_language, timezone)
                                 self.ips[ip][session_id] = session
                             else:
                                 if self.debugging:
@@ -694,7 +726,7 @@ class BaskervillehallSession(object):
                             session = self.create_session(ua, host, country, continent, datacenter_code,
                                                           ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,
-                                                          asn, num_languages, accept_language, timezone)
+                                                          asn, asn_name, num_languages, accept_language, timezone)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
                             self.ips_primary[ip][session_id] = session

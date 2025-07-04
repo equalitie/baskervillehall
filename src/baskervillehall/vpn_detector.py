@@ -112,7 +112,7 @@ class VpnDetector:
             self.logger.info(f"[cleanup_alerts] Removed {removed} old alerts.")
 
     def cleanup(self, current_time):
-        if self.last_cleanup_time is None or current_time - self.last_cleanup_time >= timedelta(hours=1):
+        if self.last_cleanup_time is None or current_time - self.last_cleanup_time >= timedelta(minutes=5):
             self.cleanup_sessions(current_time)
             self.cleanup_alerts(current_time)
             self.last_cleanup_time = current_time

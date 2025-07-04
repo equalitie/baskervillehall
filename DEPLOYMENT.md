@@ -3,7 +3,10 @@
 ```commandline
 kubectl apply -f config_baskervillehall.yaml
 ```
-
+## Retain Storage Class
+```commandline
+kubectl apply -f ./deployment/storage_class.yaml
+```
 ## ASN database
 * Download the updated bad-asn-list.csv from <https://github.com/brianhama/bad-asn-list/blob/master/bad-asn-list.csv>
 * unzip the file to deployment/bad_asn/bad-asn-list.csv
@@ -27,11 +30,12 @@ cd ../..
 
 ### Building
 ```
-docker build . -t equalitie/baskervillehall:base
+docker buildx build --platform linux/amd64 -t equalitie/baskervillehall:base .
+
 ```
 
 ```
-docker build -f ./Dockerfile_latest . -t equalitie/baskervillehall:latest
+docker buildx build --platform linux/amd64 -f ./Dockerfile_latest . -t equalitie/baskervillehall:latest
 docker push equalitie/baskervillehall:latest
 ```
 
@@ -60,7 +64,7 @@ helm repo update
 helm upgrade --cleanup-on-fail \
   --install jupyter jupyter/jupyterhub \
   --namespace default \
-  --version=3.2.1 \
+  --version=4.2.0 \
   --values ./jupyter/config.yaml
 ```
 
@@ -77,7 +81,7 @@ helm upgrade --cleanup-on-fail \
 ```commandline
 kubectl port-forward service/proxy-public 8080:http
 ```
-Please, use user `admin` with an empth password.
+Please, use user `admin` with an empty password.
 
 ### Postgres deployment
 kubectl apply -f deployment/postgres/postgres-baskervillehall-secret.yaml

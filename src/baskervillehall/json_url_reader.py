@@ -12,30 +12,44 @@ class JsonUrlReader(object):
         self.logger = logger
         self.data = None
 
+    import json
+    from urllib.request import urlopen
+    from urllib.error import URLError, HTTPError
+
     def read_json_from_url(self, url):
+        html = None
+
         try:
             html = urlopen(url, timeout=3).read()
         except TimeoutError as e:
             if self.logger:
-                self.logger.error(f'Timeout while parsing url {url}', e)
+                self.logger.error(f'Timeout while parsing url {url}', exc_info=e)
             return None
         except HTTPError as e:
             if self.logger:
-                self.logger.error(f'HTTP Error {e.code} while parsing url {url}')
+                self.logger.error(f'HTTP Error {e.code} while parsing url {url}', exc_info=e)
             return None
         except URLError as e:
             if self.logger:
-                self.logger.error(f'URL error {e.reason} while getting from {url}')
+                self.logger.error(f'URL error {e.reason} while getting from {url}', exc_info=e)
             return None
         except Exception as e:
             if self.logger:
-                self.logger.error(e)
+                self.logger.error(f'Unexpected error while accessing {url}', exc_info=e)
+            return None
+
+        if html is None:
+            return None
 
         try:
             data = json.loads(html)
         except json.JSONDecodeError as e:
             if self.logger:
-                self.logger.error(f'JSON error {e} while getting from {url}')
+                self.logger.error(f'JSON error {e} while getting from {url}', exc_info=e)
+            return None
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f'Unexpected error while decoding JSON from {url}', exc_info=e)
             return None
 
         return data

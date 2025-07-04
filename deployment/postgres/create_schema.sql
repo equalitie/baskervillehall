@@ -25,6 +25,17 @@ CREATE TABLE public.sessions (
 	ip_cookie text NOT NULL,
 	primary_session int4 DEFAULT 0 NULL,
 	human int4 DEFAULT 0 NULL,
+
+	ua_score float8 DEFAULT 0 NULL,
+	verified_bot int4 DEFAULT 0 NULL,
+	num_languages int4 DEFAULT 0 NULL,
+	valid_browser_ciphers int4 DEFAULT 0 NULL,
+	cipher text,
+	ciphers text,
+	asn text,
+	asn_name text,
+	is_scraper int4 DEFAULT 0 NULL,
+
 	vpn int4 DEFAULT 0 NULL,
 	class text,
 	passed_challenge int4 DEFAULT 0 NULL,
@@ -40,6 +51,10 @@ CREATE TABLE public.sessions (
 	session_start timestamp NOT NULL,
 	session_end timestamp NOT NULL,
 	requests text NULL,
+	bot_score float8 DEFAULT -1.0 NOT NULL,
+	bot_score_top_factor text NULL,
+
+	scraper_name text,
 	created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	CONSTRAINT sessions_key PRIMARY KEY (session_id)
 );
@@ -60,6 +75,7 @@ CREATE TABLE public.challenge_command_history (
 	human int4 DEFAULT 0 NULL,
 	passed_challenge int4 DEFAULT 0 NULL,
 	bot_score float8 DEFAULT -1.0 NOT NULL,
+	bot_score_top_factor text NULL,
 	user_agent text NULL,
 	country text NULL,
 	continent text NULL,
@@ -81,6 +97,7 @@ CREATE TABLE public.challenge_command_history (
 	duration float8 DEFAULT 0.0 NOT NULL,
 	score float8 DEFAULT 0.0 NOT NULL,
 	request_count int4 DEFAULT 0 NOT NULL,
+	scraper_name text,
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);
