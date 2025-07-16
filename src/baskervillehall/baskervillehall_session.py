@@ -321,9 +321,6 @@ class BaskervillehallSession(object):
 
                 # Check if main session has expired due to inactivity
                 if (current_event_ts_horizon - session['end']).total_seconds() > self.session_inactivity * 60:
-                    self.logger.info(
-                        f"Flushing and deleting expired main session for IP: {ip}, Session ID: {session_id} "
-                        f"due to inactivity.")
                     self.check_and_send_session(session)  # Flush expired main sessions
                     session_ids_to_delete_main.append(session_id)
 

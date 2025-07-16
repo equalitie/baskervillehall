@@ -13,7 +13,6 @@ from baskervillehall.pca_feature import PCAFeature
 class FeatureExtractor(object):
     def __init__(
             self,
-            warmup_period=5,
             features=None,
             pca_feature=False,
             categorical_features=None,
@@ -24,11 +23,9 @@ class FeatureExtractor(object):
             logger=None
     ):
         super().__init__()
-        self.warmup_period = 5
         self.max_categories = max_categories
         self.min_category_frequency = min_category_frequency
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
-        self.warmup_period = warmup_period
         self.datetime_format = datetime_format
         supported_features = [
             'request_rate',

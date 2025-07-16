@@ -9,6 +9,7 @@ COPY ./README.md /usr/bin/baskervillehall/README.md
 
 WORKDIR /usr/bin/baskervillehall
 RUN pip install tensorflow
+RUN pip install torch
 USER root
 RUN pip install -e .
 

@@ -111,7 +111,6 @@ def main():
 
     elif args.pipeline == 'train':
         params = {
-            'warmup_period': int(os.environ.get('WARMUP_PERIOD')),
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'features': os.environ.get('FEATURES').split(','),
             'categorical_features': os.environ.get('CATEGORICAL_FEATURES').split(','),
