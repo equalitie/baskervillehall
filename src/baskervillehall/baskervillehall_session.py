@@ -80,7 +80,7 @@ class BaskervillehallSession(object):
         self.ips_primary = dict()
         self.flush_size_primary = dict()
         self.debugging = False
-        self.bot_verificator = BotVerificator()
+        self.bot_verificator = BotVerificator(logger = self.logger)
         self.asn_database = ASNDatabase(asn_database_path)
         self.asn_database2 = ASNDatabase2(asn_database2_path)
         self.tor_exit_scnaner = TorExitScanner()

@@ -49,16 +49,15 @@ class BaskervillehallPredictor(object):
             bad_bot_challenge=True,
             debug_ip=None,
             use_shapley=True,
-            postgres_connection = None,
+            postgres_connection=None,
             postgres_refresh_period_in_seconds=180,
-            sensitivity_factor = 0.05,
-            max_sessions_for_ip = 10,
-            maz_size_ip_sessions = 100000,
+            sensitivity_factor=0.05,
+            max_sessions_for_ip=10,
+            maz_size_ip_sessions=100000,
             ip_sessions_ttl_in_minutes=30,
             max_requests_in_command=20,
-            single_model=False,
             bot_score_threshold=0.5,
-            challenge_scrapers = True
+            challenge_scrapers=True
     ):
         super().__init__()
 
@@ -99,7 +98,6 @@ class BaskervillehallPredictor(object):
         self.maxsize_ip_sessions = maz_size_ip_sessions
         self.ip_sessions_ttl_in_minutes = ip_sessions_ttl_in_minutes
         self.max_requests_in_command = max_requests_in_command
-        self.single_model = single_model
         self.bot_score_threshold = bot_score_threshold
         self.challenge_scrapers = challenge_scrapers
 
@@ -112,37 +110,118 @@ class BaskervillehallPredictor(object):
                                                refresh_period_in_seconds=60 * self.white_list_refresh_period)
         self.sensitivity_factor = sensitivity_factor
 
-    def _is_debug_enabled(self, value):
-        return (self.debug_ip and value['ip'] == self.debug_ip) or value['ua'] == 'Baskervillehall'
+    def get_shapley_report(self, shap_value, feature_names):
+        """
+        Generates a report of negative Shapley values per feature and returns the most impactful feature
+        along with a sorted list of feature contributions by descending importance.
+
+        :param shap_value: SHAP values object with attributes .values and .data
+        :param feature_names: list of feature names corresponding to shap_value.values
+        :return: tuple (top_feature, shapley_report_sorted)
+        """
+        # Initialize report list and track the most negative Shapley value
+        shapley_report = []
+        min_shapley = 0
+        shapley_feature = None
+
+        # Collect negative contributions
+        for k, feature in enumerate(feature_names):
+            value = shap_value.values[k]
+            data_val = shap_value.data[k]
+            if value < 0:
+                # Update most impactful (most negative) feature
+                if value < min_shapley:
+                    min_shapley = value
+                    shapley_feature = feature
+
+                # Append to report
+                shapley_report.append({
+                    'name': feature,
+                    'values': {
+                        'shapley': round(value, 2),
+                        'feature': round(data_val, 2)
+                    }
+                })
+
+        # Sort report by descending importance (absolute Shapley value)
+        shapley_report_sorted = sorted(
+            shapley_report,
+            key=lambda x: abs(x['values']['shapley']),
+            reverse=True
+        )
+
+        return shapley_feature, shapley_report_sorted
+
+    def create_command(self,
+                       command_name,
+                       session,
+                       meta,
+                       prediction_if,
+                       score_if,
+                       shapley_if,
+                       shapley_feature_if,
+                       prediction_ae,
+                       score_ae,
+                       shapley_ae,
+                       shapley_feature_ae,
+                       difficulty,
+                       scraper_name,
+                       threshold_ae
+                       ):
+        dict = {
+                'Name': command_name,
+                'difficulty': difficulty,
+                'Value': session["ip"],
+                'country': session.get('country', ''),
+                'continent': session.get('continent', ''),
+                'datacenter_code': session.get('datacenter_code', ''),
+                'session_id': session['session_id'],
+                'host': session['host'],
+                'source': meta,
+                'shapley': shapley_if,
+                'shapley_if': shapley_if,
+                'shapley_ae': shapley_ae,
+                'meta': meta,
+                'prediction_if': int(prediction_if),
+                'prediction_ae': int(prediction_ae),
+                'shapley_feature': shapley_feature_if,
+                'shapley_feature_if': shapley_feature_if,
+                'shapley_feature_ae': shapley_feature_ae,
+                'start': session['start'],
+                'end': session['end'],
+                'duration': session['duration'],
+                'score': float(score_if),
+                'score_if': float(score_if),
+                'score_ae': float(score_ae),
+                'bot_score': session['bot_score'],
+                'bot_score_top_factor': session.get('bot_score_top_factor', ''),
+                'num_requests': len(session['requests']),
+                'user_agent': session.get('ua'),
+                'human': session.get('human', ''),
+                'datacenter_asn': session.get('datacenter_asn', ''),
+                'session': session,
+                'scraper_name': scraper_name,
+                'threshold_ae': float(threshold_ae)
+            }
+        self.logger.info(dict)
+        return json.dumps(
+            dict
+        ).encode('utf-8')
 
     def run(self):
-        if self.single_model:
-            model_storage_human = None
-            model_storage_bot = None
-        else:
-            model_storage_human = ModelStorage(
-                self.s3_connection,
-                self.s3_path,
-                model_type=ModelType.HUMAN,
-                reload_in_minutes=self.model_reload_in_minutes,
-                logger=self.logger)
-            model_storage_human.start()
 
-            model_storage_bot = ModelStorage(
-                self.s3_connection,
-                self.s3_path,
-                model_type=ModelType.BOT,
-                reload_in_minutes=self.model_reload_in_minutes,
-                logger=self.logger)
-            model_storage_bot.start()
-
-        model_storage_generic = ModelStorage(
+        models_isolation_forest = ModelStorage(
             self.s3_connection,
             self.s3_path,
-            model_type=ModelType.GENERIC,
             reload_in_minutes=self.model_reload_in_minutes,
-            logger=self.logger)
-        model_storage_generic.start()
+            logger=self.logger
+        )
+        models_autoencoder = ModelStorage(
+            self.s3_connection,
+            f'{self.s3_path}_autoencoder3',
+            reload_in_minutes=self.model_reload_in_minutes,
+            logger=self.logger
+        )
 
         pending_challenge_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         pending_interactive_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
@@ -216,13 +295,7 @@ class BaskervillehallPredictor(object):
 
                     host = message.key.decode("utf-8")
 
-                    debug = self._is_debug_enabled(session)
-                    if debug:
-                        self.logger.info(ip)
-
                     if whitelist_ip.is_in_whitelist(host, session['ip']):
-                        if debug:
-                            self.logger.info(f'ip {ip} whitelisted')
                         ip_whitelisted += 1
                         continue
 
@@ -236,53 +309,34 @@ class BaskervillehallPredictor(object):
                     session = None
                     predicting_total += 1
 
-                predicted = 0
                 for (host, human), sessions in batch.items():
-                    model = None
-                    if self.single_model:
-                        model = model_storage_generic.get_model(host)
-                    else:
-                        model = model_storage_human.get_model(host) if human else\
-                            model_storage_bot.get_model(host)
-                        if model is None:
-                            model = model_storage_generic.get_model(host)
+                    model_if = models_isolation_forest.get_model(host,
+                                                                 ModelType.HUMAN if human else ModelType.BOT)
+                    model_ae = models_autoencoder.get_model(host,
+                                                            ModelType.HUMAN if human else ModelType.BOT)
 
                     ts = datetime.now()
-                    scores, shap_values = None, None
-                    if model:
-                        scores, shap_values = model.transform(sessions, use_shapley=self.use_shapley)
-                        predicted += scores.shape[0]
-                        self.logger.info(f'score() time = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
-                                         f'{scores.shape[0]} items')
+                    scores_if, shap_values_if = None, None
+                    if model_if:
+                        scores_if, shap_values_if = model_if.transform(sessions, use_shapley=self.use_shapley)
+                        self.logger.info(
+                            f'score() time isolation forest = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
+                            f'{scores_if.shape[0]} items')
+
+                    scores_ae, shap_values_ae = None, None
+                    if model_ae:
+                        scores_ae, shap_values_ae = model_ae.transform(sessions, use_shapley=self.use_shapley)
+                        self.logger.info(
+                            f'score() time isolation forest = {(datetime.now() - ts).total_seconds()} sec, host {host}, '
+                            f'{scores_ae.shape[0]} items')
 
                     for i in range(len(sessions)):
                         session = sessions[i]
                         ip = session['ip']
                         human = session.get('human', True)
-                        if scores is not None:
-                            score = scores[i]
-                            sensitivity_shift = self.settings.get_sensitivity(host) * self.sensitivity_factor
-                            score -= sensitivity_shift
-                            prediction = score < 0
-                        else:
-                            score = 0.0
-                            prediction = False
-                        meta = ''
-                        rule = None
-                        if (self.bad_bot_challenge
-                                and session['bad_bot'] \
-                                and ip not in ip_with_sessions.keys()):
-                            prediction = True
-                            meta += 'Bad bot rule'
-
-                        debug = self._is_debug_enabled(session)
-
-                        end = session['end']
-
-                        if debug:
-                            ua = session['ua']
-                            self.logger.info(f'777 ip={ip}, prediction = {prediction}, score = {score}, ua={ua}, '
-                                             f'end={end}')
+                        scraper_name = \
+                            session.get('scraper_name',
+                                        BaskervillehallIsolationForest.detect_scraper(session['ua']))
 
                         session_id = session['session_id']
                         primary_session = session['primary_session']
@@ -293,155 +347,126 @@ class BaskervillehallPredictor(object):
                         if session['asset_only']:
                             continue
 
-                        hits = len(session['requests'])
+                        if scores_if is not None:
+                            score_if = scores_if[i]
+                            sensitivity_shift = self.settings.get_sensitivity(host) * self.sensitivity_factor
+                            score_if -= sensitivity_shift
+                            prediction_if = score_if < 0
+                            shapley_feature_if, shapley_if = (
+                                self.get_shapley_report(shap_values_if[i], model_if.get_all_features()))
+                        else:
+                            score_if = 0.0
+                            prediction_if = False
+                            shapley_feature_if, shapley_if = '', ''
+
+                        if scores_ae is not None:
+                            threshold_ae = model_ae.threshold
+                            score_ae = scores_ae[i]
+                            prediction_ae = score_ae > threshold_ae
+                            shapley_feature_ae, shapley_ae = (
+                                self.get_shapley_report(shap_values_ae[i], model_ae.get_all_features()))
+                        else:
+                            score_ae = 0.0
+                            prediction_ae = False
+                            shapley_feature_ae, shapley_ae = '', ''
+                            threshold_ae = 0
+
                         session['requests'] = session['requests'][0:self.max_requests_in_command]
                         bot_score = session['bot_score']
                         bot_score_top_factor = session.get('bot_score_top_factor', '')
 
-                        # if session.get('human', True):
-                        #     # human
-                        #     if session['passed_challenge'] and \
-                        #             bot_score > self.bot_score_threshold and \
-                        #             bot_score_top_factor != 'no_payload':
-                        #         # block a human anomaly with high bot score
-                        #         pass
-                        # else:
-                        #     # not human
-                        #     pass
-
                         if (session['passed_challenge'] and \
-                                # not human and \
                                 bot_score > self.bot_score_threshold and \
                                 bot_score_top_factor != 'no_payload'):
                             if ip in pending_block_ip:
                                 continue
                             pending_block_ip[ip] = True
-                            # High Bot Score. Block IP
-                            meta = 'high_bot_score'
                             self.logger.info(f'High bot score = {bot_score}, human={human}, '
                                              f'top_factor = {bot_score_top_factor} for ip '
                                              f'{ip}, host {host}. Blocking.')
-                            message = json.dumps(
-                                {
-                                    'Name': 'block_ip_testing',
-                                    'difficulty': 0,
-                                    'Value': f'{ip}',
-                                    'country': session.get('country', ''),
-                                    'continent': session.get('continent', ''),
-                                    'datacenter_code': session.get('datacenter_code', ''),
-                                    'session_id': session_id,
-                                    'host': host,
-                                    'source': meta,
-                                    'shapley': '',
-                                    'meta': meta,
-                                    'shapley_feature': '',
-                                    'start': session['start'],
-                                    'end': session['end'],
-                                    'duration': session['duration'],
-                                    'score': score,
-                                    'bot_score': bot_score,
-                                    'bot_score_top_factor': bot_score_top_factor,
-                                    'num_requests': hits,
-                                    'user_agent': session.get('ua'),
-                                    'human': session.get('human', ''),
-                                    'datacenter_asn': session.get('datacenter_asn', ''),
-                                    'session': session
-                                }
-                            ).encode('utf-8')
-                            producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+
+                            producer.send(self.topic_commands,
+                                          self.create_command(
+                                              command_name='block_ip_testing',
+                                              session=session,
+                                              meta='high_bot_score',
+                                              prediction_if=prediction_if,
+                                              score_if=score_if,
+                                              shapley_if=shapley_if,
+                                              shapley_feature_if=shapley_feature_if,
+                                              prediction_ae=prediction_ae,
+                                              score_ae=score_ae,
+                                              shapley_ae=shapley_ae,
+                                              shapley_feature_ae=shapley_feature_ae,
+                                              difficulty=0,
+                                              scraper_name=scraper_name,
+                                              threshold_ae=threshold_ae,
+                                          ),
+                                          key=bytearray(host, encoding='utf8'))
                             continue
 
-                        # if session['passed_challenge'] and (bot_score > self.bot_score_threshold or bot_score == -1):
-                        #     if ip in pending_interactive_ip:
-                        #         continue
-                        #     pending_interactive_ip[ip] = True
-                        #     # High Bot Score. Send interactive challenge
-                        #     meta = 'high_bot_score'
-                        #     self.logger.info(f'High bot score {bot_score} for ip '
-                        #                      f'{ip}, host {host}. Interactive challenge.')
-                        #     message = json.dumps(
-                        #         {
-                        #             'Name': 'challenge_ip_interactive',
-                        #             'difficulty': 2,
-                        #             'Value': f'{ip}',
-                        #             'country': session.get('country', ''),
-                        #             'continent': session.get('continent', ''),
-                        #             'datacenter_code': session.get('datacenter_code', ''),
-                        #             'session_id': session_id,
-                        #             'host': host,
-                        #             'source': meta,
-                        #             'shapley': '',
-                        #             'meta': meta,
-                        #             'shapley_feature': '',
-                        #             'start': session['start'],
-                        #             'end': session['end'],
-                        #             'duration': session['duration'],
-                        #             'score': score,
-                        #             'num_requests': hits,
-                        #             'user_agent': session.get('ua'),
-                        #             'human': session.get('human', ''),
-                        #             'datacenter_asn': session.get('datacenter_asn', ''),
-                        #             'session': session
-                        #         }
-                        #     ).encode('utf-8')
-                        #     producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
-                        #     continue
+                        if self.bad_bot_challenge \
+                                and session['bad_bot'] \
+                                and ip not in ip_with_sessions.keys():
+                            producer.send(self.topic_commands,
+                                          self.create_command(
+                                              command_name='challenge_ip',
+                                              session=session,
+                                              meta='Bad bot rule',
+                                              prediction_if=prediction_if,
+                                              score_if=score_if,
+                                              shapley_if=shapley_if,
+                                              shapley_feature_if=shapley_feature_if,
+                                              prediction_ae=prediction_ae,
+                                              score_ae=score_ae,
+                                              shapley_ae=shapley_ae,
+                                              shapley_feature_ae=shapley_feature_ae,
+                                              difficulty=0,
+                                              scraper_name=scraper_name,
+                                              threshold_ae=threshold_ae,
+                                          ),
+                                          key=bytearray(host, encoding='utf8'))
+                            continue
 
-                        scraper_name = (
-                            session.get('scraper_name', BaskervillehallIsolationForest.detect_scraper(session['ua'])))
-                        # if session.get('malicious_asn', False):
-                        #     rule = 'malicious_asn'
-                        # el
+                        meta = None
                         if session.get('weak_cipher', False):
-                            rule = 'weak_cipher'
+                            meta = 'weak_cipher'
                         elif len(scraper_name) > 0 and self.challenge_scrapers:
-                            rule = 'scraper'
+                            meta = 'scraper'
 
-                        if rule:
+                        if meta:
                             if ip in pending_challenge_ip:
                                 continue
                             pending_challenge_ip[ip] = True
 
-                            meta = rule
-                            self.logger.info(f'Rule {rule} for ip '
-                                             f'{ip}, host {host}')
-                            message = json.dumps(
-                                {
-                                    'Name': 'challenge_ip',
-                                    'difficulty': 2,
-                                    'Value': f'{ip}',
-                                    'country': session.get('country', ''),
-                                    'continent': session.get('continent', ''),
-                                    'datacenter_code': session.get('datacenter_code', ''),
-                                    'session_id': session_id,
-                                    'host': host,
-                                    'source': meta,
-                                    'shapley': '',
-                                    'meta': meta,
-                                    'shapley_feature': '',
-                                    'start': session['start'],
-                                    'end': session['end'],
-                                    'duration': session['duration'],
-                                    'score': score,
-                                    'num_requests': hits,
-                                    'user_agent': session.get('ua'),
-                                    'human': session.get('human', ''),
-                                    'datacenter_asn': session.get('datacenter_asn', ''),
-                                    'scraper_name': scraper_name,
-                                    'session': session
-                                }
-                            ).encode('utf-8')
-                            producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                            producer.send(self.topic_commands,
+                                          self.create_command(
+                                              command_name='challenge_ip',
+                                              session=session,
+                                              meta=meta,
+                                              prediction_if=prediction_if,
+                                              score_if=score_if,
+                                              shapley_if=shapley_if,
+                                              shapley_feature_if=shapley_feature_if,
+                                              prediction_ae=prediction_ae,
+                                              score_ae=score_ae,
+                                              shapley_ae=shapley_ae,
+                                              shapley_feature_ae=shapley_feature_ae,
+                                              difficulty=0,
+                                              scraper_name=scraper_name,
+                                              threshold_ae=threshold_ae,
+                                          ),
+                                          key=bytearray(host, encoding='utf8'))
                             continue
 
                         if not primary_session:
                             too_many_sessions = False
                             if host not in host_ip_sessions:
                                 host_ip_sessions[host] = TTLCache(maxsize=self.maxsize_ip_sessions,
-                                                                  ttl=120*60)
+                                                                  ttl=120 * 60)
                             if ip not in host_ip_sessions[host]:
                                 host_ip_sessions[host][ip] = TTLCache(maxsize=self.maxsize_ip_sessions,
-                                                                  ttl=self.ip_sessions_ttl_in_minutes*60)
+                                                                      ttl=self.ip_sessions_ttl_in_minutes * 60)
                             host_ip_sessions[host][ip][session_id] = True
                             if len(host_ip_sessions[host][ip]) >= self.max_sessions_for_ip:
                                 if ip in pending_challenge_ip:
@@ -452,35 +477,27 @@ class BaskervillehallPredictor(object):
                                 meta = 'Too many sessions.'
                                 self.logger.info(f'Too many sessions ({len(host_ip_sessions[host][ip])}) for ip '
                                                  f'{ip}, host {host}')
-                                message = json.dumps(
-                                    {
-                                        'Name': 'challenge_ip',
-                                        'difficulty': 2,
-                                        'Value': f'{ip}',
-                                        'country': session.get('country', ''),
-                                        'continent': session.get('continent', ''),
-                                        'datacenter_code': session.get('datacenter_code', ''),
-                                        'session_id': session_id,
-                                        'host': host,
-                                        'source': meta,
-                                        'shapley': '',
-                                        'meta': meta,
-                                        'shapley_feature': '',
-                                        'start': session['start'],
-                                        'end': session['end'],
-                                        'duration': session['duration'],
-                                        'score': score,
-                                        'num_requests': hits,
-                                        'user_agent': session.get('ua'),
-                                        'human': session.get('human', ''),
-                                        'datacenter_asn': session.get('datacenter_asn', ''),
-                                        'session': session
-                                    }
-                                ).encode('utf-8')
-                                producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                                producer.send(self.topic_commands,
+                                              self.create_command(
+                                                  command_name='challenge_ip',
+                                                  session=session,
+                                                  meta=meta,
+                                                  prediction_if=prediction_if,
+                                                  score_if=score_if,
+                                                  shapley_if=shapley_if,
+                                                  shapley_feature_if=shapley_feature_if,
+                                                  prediction_ae=prediction_ae,
+                                                  score_ae=score_ae,
+                                                  shapley_ae=shapley_ae,
+                                                  shapley_feature_ae=shapley_feature_ae,
+                                                  difficulty=0,
+                                                  scraper_name=scraper_name,
+                                                  threshold_ae=threshold_ae,
+                                              ),
+                                              key=bytearray(host, encoding='utf8'))
                                 continue
 
-                        if prediction:
+                        if prediction_if or prediction_ae:
                             if primary_session:
                                 if ip in pending_challenge_ip:
                                     continue
@@ -492,90 +509,49 @@ class BaskervillehallPredictor(object):
                                 if session_id in pending_session[ip]:
                                     continue
                                 pending_session[ip][session_id] = True
-                            difficulty = 1
-                            # if session['passed_challenge']:
-                            #     if ip not in offences:
-                            #         offences[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
-                            #     offences[ip][session_id] = offences[ip].get(session_id, 0) + 1
-                            #
-                            #     if offences[ip][session_id] >= self.num_offences_for_difficult_challenge:
-                            #         self.logger.info(f'Multiple offences(show difficult challenge)'
-                            #                          f' ip = {ip}, session = {session_id} '
-                            #                          f' offences = {offences[ip][session_id]} '
-                            #                          f'host = {host}')
-                            #         meta += f'Multiple offences {offences[ip][session_id]}'
-                            #         difficulty = 2
-                            #         # if primary_session:
-                            #         #     # if is_static_session(session):
-                            #         #     #     command = 'block_ip_table'
-                            #         #     # else:
-                            #         #     #     command = 'block_ip'
-                            #         #     command = 'block_ip'
-                            #         # else:
-                            #         #     if not whitelist_url.is_host_whitelisted_block_session(host):
-                            #         #         command = 'block_session'
 
-                            if primary_session or too_many_sessions:
+                            if primary_session:
                                 command = 'challenge_ip'
                             else:
                                 command = 'challenge_session'
 
-                            shapley = []
-                            shapley_feature = ''
                             api_ratio = 0.0
-                            if shap_values:
-                                shap_value = shap_values[i]
-                                min_shapley = 0
+                            if shap_values_if:
+                                shap_value = shap_values_if[i]
                                 for k in range(len(shap_value.values)):
-                                    feature = model.get_all_features()[k]
+                                    feature = model_if.get_all_features()[k]
                                     if feature == 'api_ratio':
                                         api_ratio = round(shap_value.data[k], 2)
-                                    if shap_value.values[k] < 0:
-                                        if min_shapley > shap_value.values[k]:
-                                            min_shapley = shap_value.values[k]
-                                            shapley_feature = feature
-                                        shapley.append({
-                                            'name': feature,
-                                            'values': {
-                                                'shapley': round(shap_value.values[k], 2),
-                                                'feature': round(shap_value.data[k], 2)
-                                            }
-                                        })
 
                             if api_ratio == 1.0:
                                 self.logger.info(f'Skipping challenge for ip={ip}, host={host} since api_ratio is 1.0')
                                 continue
 
                             self.logger.info(f'Challenging for ip={ip}, '
-                                             f'session_id={session_id}, host={host}, end={end}, score={score}.'
-                                             f'meta = {meta}')
-                            message = json.dumps(
-                                {
-                                    'Name': command,
-                                    'difficulty': difficulty,
-                                    'Value': f'{ip}',
-                                    'country': session.get('country', ''),
-                                    'continent': session.get('continent', ''),
-                                    'datacenter_code': session.get('datacenter_code', ''),
-                                    'session_id': session_id,
-                                    'host': host,
-                                    'source': f'{shapley_feature},{meta}',
-                                    'shapley': shapley,
-                                    'meta': meta,
-                                    'shapley_feature': shapley_feature,
-                                    'start': session['start'],
-                                    'end': session['end'],
-                                    'duration': session['duration'],
-                                    'score': score,
-                                    'num_requests': hits,
-                                    'user_agent': session.get('ua'),
-                                    'human': session.get('human', ''),
-                                    'datacenter_asn': session.get('datacenter_asn', ''),
-                                    'session': session
-                                }
-                            ).encode('utf-8')
-                            producer.send(self.topic_commands, message, key=bytearray(host, encoding='utf8'))
+                                             f'session_id={session_id}, '
+                                             f'host={host}, end={session["end"]}, score_if={score_if}.'
+                                             f'score_ae={score_ae}.'
+                                             )
+                            producer.send(self.topic_commands,
+                                          self.create_command(
+                                              command_name=command,
+                                              session=session,
+                                              meta='',
+                                              prediction_if=prediction_if,
+                                              score_if=score_if,
+                                              shapley_if=shapley_if,
+                                              shapley_feature_if=shapley_feature_if,
+                                              prediction_ae=prediction_ae,
+                                              score_ae=score_ae,
+                                              shapley_ae=shapley_ae,
+                                              shapley_feature_ae=shapley_feature_ae,
+                                              difficulty=0,
+                                              scraper_name=scraper_name,
+                                              threshold_ae=threshold_ae,
+                                          ),
+                                          key=bytearray(host, encoding='utf8'))
+                            continue
 
                 self.logger.info(f'batch={len(messages)}, predicting_total = {predicting_total}, '
-                                 f'predicted = {predicted}, whitelisted = {ip_whitelisted}')
+                                 f'whitelisted = {ip_whitelisted}')
                 producer.flush()

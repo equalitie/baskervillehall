@@ -57,8 +57,6 @@ class BaskervillehallIsolationForest(object):
             features=None,
             categorical_features=None,
             pca_feature=False,
-            max_categories=3,
-            min_category_frequency=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
             max_features=1.0,
             bootstrap=False,
@@ -73,8 +71,6 @@ class BaskervillehallIsolationForest(object):
             features=features,
             categorical_features=categorical_features,
             pca_feature=pca_feature,
-            max_categories=max_categories,
-            min_category_frequency=min_category_frequency,
             datetime_format=datetime_format,
             logger=self.logger
         )

@@ -1,72 +1,49 @@
-import logging
-import threading
-import time
-from datetime import datetime
-
-from baskervillehall.model_io import ModelIO
+from baskervillehall.baskervillehall_isolation_forest import ModelType
+from baskervillehall.model_loader import ModelLoader
 
 
 class ModelStorage(object):
 
-    def __init__(
-            self,
+    def __init__(self,
+                 s3_connection,
+                 s3_path,
+                 reload_in_minutes=10,
+                 logger=None):
+        self.logger = logger
+
+        self.model_storage_human = ModelLoader(
             s3_connection,
             s3_path,
-            model_type,
-            reload_in_minutes=10,
-            logger=None
-    ):
-        super().__init__()
-        self.s3_path = s3_path
-        self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
-        self.models = {}
-        self.model_io = ModelIO(**s3_connection, logger=self.logger)
-        self.thread = None
-        self.reload_in_minutes = reload_in_minutes
-        self.lock = threading.Lock()
-        self.model_type = model_type
-        self.requests = set()
+            model_type=ModelType.HUMAN,
+            reload_in_minutes=reload_in_minutes,
+            logger=self.logger)
+        self.model_storage_human.start()
 
-    def _is_expired(self, ts):
-        return (datetime.now() - ts).total_seconds() > self.reload_in_minutes * 60
+        self.model_storage_bot = ModelLoader(
+            s3_connection,
+            s3_path,
+            model_type=ModelType.BOT,
+            reload_in_minutes=reload_in_minutes,
+            logger=self.logger)
+        self.model_storage_bot.start()
 
-    def get_model(self, host):
-        with self.lock:
-            model, ts = self.models.get(host, (None, None))
-            if model and ts:
-                if self._is_expired(ts):
-                    self.requests.add(host)
-                elif host in self.requests:
-                    self.requests.remove(host)
-                return model
+        self.model_storage_generic = ModelLoader(
+            s3_connection,
+            s3_path,
+            model_type=ModelType.GENERIC,
+            reload_in_minutes=reload_in_minutes,
+            logger=self.logger)
+        self.model_storage_generic.start()
 
-            self.requests.add(host)
-            return None
+    def get_model(self, host, model_type):
+        model = None
+        if model_type == ModelType.HUMAN:
+            model = self.model_storage_human.get_model(host)
+        elif model_type == ModelType.BOT:
+            model = self.model_storage_bot.get_model(host)
 
-    def _run(self):
-        self.logger.info(f'Starting ModelStorage thread ({self.model_type.value})...')
+        if model is None or model == ModelType.GENERIC:
+            model = self.model_storage_generic.get_model(host)
 
-        while True:
-            with self.lock:
-                host = self.requests.pop() if len(self.requests) else None
-            if host is None:
-                time.sleep(1)
-                continue
-
-            model = self.model_io.load(self.s3_path, host, self.model_type)
-            if model is None:
-                with self.lock:
-                    self.requests.add(host)
-                continue
-            with self.lock:
-                self.models[host] = (model, datetime.now())
-                self.logger.info(f'Loaded model for host {host} {self.model_type.value}. '
-                                 f'Total models = {len(self.models.keys())}')
-
-    def start(self):
-        if self.thread is not None:
-            return
-
-        self.thread = threading.Thread(target=self._run)
-        self.thread.start()
+        return model
 

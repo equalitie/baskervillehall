@@ -1,13 +1,13 @@
 import logging
 import math
 import copy
-from sklearn.preprocessing import OrdinalEncoder
 from datetime import datetime
-from collections import defaultdict
+from collections import defaultdict, Counter
 import numpy as np
 import pytz
 
 from baskervillehall.pca_feature import PCAFeature
+from sklearn.preprocessing import OneHotEncoder
 
 
 class FeatureExtractor(object):
@@ -16,100 +16,65 @@ class FeatureExtractor(object):
             features=None,
             pca_feature=False,
             categorical_features=None,
-            max_categories=3,
-            min_category_frequency=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
             normalize=False,
+            use_onehot_encoding=False,
             logger=None
     ):
         super().__init__()
-        self.max_categories = max_categories
-        self.min_category_frequency = min_category_frequency
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.datetime_format = datetime_format
         supported_features = [
-            'request_rate',
-            'post_rate',
-            'request_interval_average',
-            'request_interval_std',
-            'response4xx_to_request_ratio',
-            'response5xx_to_request_ratio',
-            'top_page_to_request_ratio',
-            'unique_path_rate',
-            'unique_path_to_request_ratio',
-            'unique_query_rate',
-            'unique_query_to_unique_path_ratio',
-            'image_to_html_ratio',
-            'js_to_html_ratio',
-            'css_to_html_ratio',
-            'path_depth_average',
-            'path_depth_std',
-            'payload_size_log_average',
-            'entropy',
-            'num_requests',
-            'duration',
-            'edge_count',
-            'static_ratio',
-            'ua_count',
-            'api_ratio',
-            'num_ciphers',
-            'num_languages',
-            'ua_score',
-            'hour_bucket',
-            'odd_hour',
-            'fingerprints_score'
+            'request_rate', 'post_rate', 'request_interval_average',
+            'request_interval_std', 'response4xx_to_request_ratio',
+            'response5xx_to_request_ratio', 'top_page_to_request_ratio',
+            'unique_path_rate', 'unique_path_to_request_ratio',
+            'unique_query_rate', 'unique_query_to_unique_path_ratio',
+            'image_to_html_ratio', 'js_to_html_ratio', 'css_to_html_ratio',
+            'path_depth_average', 'path_depth_std', 'payload_size_log_average',
+            'entropy', 'num_requests', 'duration', 'edge_count', 'static_ratio',
+            'ua_count', 'api_ratio', 'num_ciphers', 'num_languages',
+            'ua_score', 'hour_bucket', 'odd_hour', 'fingerprints_score',
+            'interval_cv','interval_consistency'
         ]
         self.pca_feature = pca_feature
         if features is None:
             features = supported_features
         self.features = features
-        not_supported_features = set(self.features) - set(supported_features)
-        if len(not_supported_features) > 0:
-            raise RuntimeError(f'Feature(s) {not_supported_features} not supported.')
+        not_supported = set(self.features) - set(supported_features)
+        if not_supported:
+            raise RuntimeError(f'Feature(s) {not_supported} not supported.')
 
-        supported_categorical_features = [
-            'country',
-            'primary_session',
-            'bad_bot',
-            'human',
-            'cipher',
-            'valid_browser_ciphers',
-            'weak_cipher',
-            'headless_ua',
-            'bot_ua',
-            'ai_bot_ua',
-            'verified_bot',
-            'datacenter_asn',
-            'short_ua',
-            'asset_only',
-            'timezone'
+        supported_cats = [
+            'country', 'primary_session', 'bad_bot', 'human', 'cipher',
+            'valid_browser_ciphers', 'weak_cipher', 'headless_ua', 'bot_ua',
+            'ai_bot_ua', 'verified_bot', 'datacenter_asn', 'short_ua',
+            'asset_only', 'timezone'
         ]
         if categorical_features is None:
-            categorical_features = supported_categorical_features
+            categorical_features = supported_cats
         self.categorical_features = categorical_features
-        not_supported_categorical_features = set(self.categorical_features) - \
-                                          set(supported_categorical_features)
-        if len(not_supported_categorical_features) > 0:
-            raise RuntimeError(f'Categorical feature(s) {not_supported_categorical_features} not supported.')
+        not_sup_cat = set(self.categorical_features) - set(supported_cats)
+        if not_sup_cat:
+            raise RuntimeError(f'Categorical feature(s) {not_sup_cat} not supported.')
 
-        if self.pca_feature:
-            self.pca = PCAFeature(logger=self.logger)
-        else:
-            self.pca = None
-
+        self.pca = PCAFeature(logger=self.logger) if self.pca_feature else None
         self.normalize = normalize
-        self.encoder = None
+        self.use_onehot = use_onehot_encoding
         self.mean = None
         self.std = None
+        # for freq encoding
+        self.freq_maps = {}
+        # for one-hot
+        self.onehot_encoder = None
 
     def clear_embeddings(self):
         if self.pca_feature:
             self.pca.clear_embeddings()
 
     def preprocess_requests(self, requests):
-        if len(requests) == 0:
+        if not requests:
             return requests
-
         parse_datetime = isinstance(requests[0]['ts'], str)
         result = []
         for r in requests:
@@ -117,67 +82,55 @@ class FeatureExtractor(object):
             if parse_datetime:
                 rf['ts'] = datetime.strptime(rf['ts'], self.datetime_format)
             result.append(rf)
-
         return sorted(result, key=lambda x: x['ts'])
 
     def calculate_entropy(self, counts):
         entropy = 0.0
-        for v, count in counts.items():
-            px = float(count) / len(counts.keys())
-            entropy += - px * math.log(px, 2)
+        for count in counts.values():
+            px = count / len(counts)
+            entropy += -px * math.log(px, 2)
         return entropy
 
     def is_api_request(self, request):
         ctype = request.get('type', 'text/html')
-        if ctype == 'application/json' or \
-           ctype == 'application/xml' or \
-           ctype == 'application/graphql' or \
-           ctype == 'application/ld+json' or \
-           ctype == 'multipart/form-data' or \
-           ctype == 'application/x-www-form-urlencoded':
+        api_ctypes = {
+            'application/json', 'application/xml', 'application/graphql',
+            'application/ld+json', 'multipart/form-data',
+            'application/x-www-form-urlencoded'
+        }
+        if ctype in api_ctypes:
             return True
-
         url = request.get('url', '/')
-        if '/api/' in url or '/v1/' in url or '/rest/' in url or \
-           '/graphql/' in url or '/gql/' in url or \
-           '/auth/' in url or '/oauth/' in url or '/token/' in url or \
-           '/webhook/' in url or '/callback/' in url or \
-           '/payment/' in url or '/checkout/' in url or '/orders/' in url or \
-           '/system/' in url or '/monitoring/' in url:
-            return True
+        api_paths = ['/api/', '/v1/', '/rest/', '/graphql/', '/gql/',
+                     '/auth/', '/oauth/', '/token/', '/webhook/',
+                     '/callback/', '/payment/', '/checkout/',
+                     '/orders/', '/system/', '/monitoring/']
+        return any(p in url for p in api_paths)
 
     @staticmethod
     def hour_bucket(hour):
         if 2 <= hour < 5:
-            return 0  # "odd"
-        elif 5 <= hour < 10:
-            return 1  # "morning"
-        elif 10 <= hour < 17:
-            return 2  # "work_hours"
-        elif 17 <= hour < 22:
-            return 3  # "evening"
-        else:
-            return 4  # "late_night"
+            return 0
+        if 5 <= hour < 10:
+            return 1
+        if 10 <= hour < 17:
+            return 2
+        if 17 <= hour < 22:
+            return 3
+        return 4
 
     def get_hour(self, session):
-        if isinstance(session['start'], str):
-            ts_utc = datetime.strptime(session['start'], self.datetime_format)
-        else:
-            ts_utc = session['start']
-
-        tz = session.get('timezone', '')
-        if len(tz) == 0:
-            return 0
-        user_tz = pytz.timezone(tz)
-        user_local_time = ts_utc.replace(tzinfo=pytz.utc).astimezone(user_tz)
-        return user_local_time.hour
+        ts = session['start']
+        if isinstance(ts, str):
+            ts = datetime.strptime(ts, self.datetime_format)
+        tz = session.get('timezone') or 'UTC'
+        user_local = ts.replace(tzinfo=pytz.utc).astimezone(pytz.timezone(tz))
+        return user_local.hour
 
     def is_odd_hour(self, hour):
-        return hour >= 2 and hour < 6
+        return 2 <= hour < 6
 
     def calculate_features_dict(self, session):
-        # assert (len(session['requests']) > 0)
-
         features = {}
         requests = self.preprocess_requests(session['requests'])
 
@@ -237,7 +190,10 @@ class FeatureExtractor(object):
             if self.is_api_request(r):
                 api_count += 1
 
-        intervals = np.array(intervals)
+        intervals = np.array(intervals[1:])
+        mean_iv = intervals.mean() if intervals.size else 0.0
+        std_iv = intervals.std() if intervals.size else 0.0
+
         unique_path = float(len(url_map.keys()))
         unique_query = float(len(query_map.keys()))
         session_duration = float(session['duration'])
@@ -248,22 +204,21 @@ class FeatureExtractor(object):
         features['duration'] = session_duration
         features['request_rate'] = hits / session_duration * 60
         features['post_rate'] = num_post / hits
-        mean_intervals = np.mean(intervals)
-        features['request_interval_average'] = mean_intervals
-        features['request_interval_std'] = np.std(intervals) if len(intervals) > 1 else 0  
+        features['request_interval_average'] = float(mean_iv)
+        features['request_interval_std'] = std_iv if len(intervals) > 1 else 0
         features['response4xx_to_request_ratio'] = num_4xx / hits
         features['response5xx_to_request_ratio'] = num_5xx / hits
         features['top_page_to_request_ratio'] = max(url_map.values()) / hits
         features['unique_path_rate'] = unique_path / session_duration * 60
         features['unique_path_to_request_ratio'] = unique_path / hits
         features['unique_query_rate'] = unique_query / session_duration * 60
-        features['unique_query_to_unique_path_ratio'] = unique_query / unique_path if unique_path > 0 else 0 
+        features['unique_query_to_unique_path_ratio'] = unique_query / unique_path if unique_path > 0 else 0
         features['image_to_html_ratio'] = float(num_image) / num_html if num_html > 0 else 10.0
         features['js_to_html_ratio'] = float(num_js) / num_html if num_html > 0 else 10.0
         features['css_to_html_ratio'] = float(num_css) / num_html if num_html > 0 else 10.0
         mean_depth = np.mean(slash_counts)
         features['path_depth_average'] = mean_depth
-        features['path_depth_std'] = np.std(slash_counts) if len(slash_counts) > 1 else 0  
+        features['path_depth_std'] = np.std(slash_counts) if len(slash_counts) > 1 else 0
         features['payload_size_log_average'] = np.mean(np.log(payloads))
         features['entropy'] = self.calculate_entropy(url_map)
         features['edge_count'] = len(edge_map.keys())
@@ -278,26 +233,28 @@ class FeatureExtractor(object):
         features['hour_bucket'] = self.hour_bucket(hour)
         features['odd_hour'] = self.is_odd_hour(hour)
         features['fingerprints_score'] = float(session.get('fingerprints_score', 0.0))
+        features['interval_cv'] = float(std_iv / mean_iv if mean_iv > 0 else 0.0)
+
+        # Interval consistency around the mode
+        #   - round intervals to nearest integer second
+        #   - find the most common rounded value (mode)
+        #   - count how many actual intervals fall within ±eps seconds of that mode
+        rounded = np.round(intervals).astype(int) if intervals.size else np.array([])
+        if rounded.size:
+            mode_val, mode_count = Counter(rounded).most_common(1)[0]
+            eps = 0.5  # half-second window around the mode
+            close_mask = np.abs(intervals - mode_val) <= eps
+            features['interval_consistency'] = float(close_mask.sum()) / len(intervals)
+        else:
+            features['interval_consistency'] = 0.0
         return features
 
-    def get_categorical_vectors(self, sessions):
-        data = []
-        for s in sessions:
-            data.append([s.get(f, False) for f in self.categorical_features])
-        return np.array(data)
 
     def get_vectors(self, sessions):
-        vectors = []
-        for s in sessions:
-            features_dict = self.calculate_features_dict(s)
-            vector = np.zeros(len(self.features))
-            for i in range(len(self.features)):
-                vector[i] = features_dict.get(self.features[i], 0.0)
-            vectors.append(vector)
-        return np.array(vectors)
-
-    def _normalize(self, X):
-        return (X - self.mean) / self.std
+        return np.vstack([
+            np.array([self.calculate_features_dict(s).get(f, 0.0) for f in self.features], dtype=float)
+            for s in sessions
+        ])
 
     def get_all_features(self):
         res = []
@@ -308,46 +265,51 @@ class FeatureExtractor(object):
         return res
 
     def fit_transform(self, sessions):
+        # Numeric features
         X = self.get_vectors(sessions)
-        self.mean = X.mean(axis=0)
-        self.std = X.std(axis=0)
-        self.std[self.std == 0] = 0.01
-
         if self.pca_feature:
-            X_pca = self.pca.fit_transform(sessions)
-            X_pca = np.reshape(X_pca, (X_pca.shape[0], 1))
-            X = np.concatenate((X, X_pca), axis=1)
-
+            X_p = self.pca.fit_transform(sessions).reshape(-1, 1)
+            X = np.concatenate([X, X_p], axis=1)
         if self.normalize:
-            X = self._normalize(X)
-
-        if len(self.categorical_features) > 0:
-            cat_vectors = self.get_categorical_vectors(sessions)
-
-            self.encoder = OrdinalEncoder(
-                handle_unknown='use_encoded_value',
-                unknown_value=10000
-            )
-            self.encoder.fit(cat_vectors)
-            X_cat = self.encoder.transform(cat_vectors)
-            X = np.concatenate((X, X_cat), axis=1)
-
-        return X
+            self.mean = X.mean(axis=0)
+            self.std = X.std(axis=0)
+            self.std[self.std == 0] = 1.0
+            X = (X - self.mean) / self.std
+        # Categorical
+        if self.use_onehot:
+            # One-hot encoding
+            cat_data = np.array([[s.get(f, None) for f in self.categorical_features]
+                                  for s in sessions])
+            self.onehot_encoder = OneHotEncoder(handle_unknown='ignore', sparse=False)
+            X_cat = self.onehot_encoder.fit_transform(cat_data)
+        else:
+            # Frequency encoding
+            N = len(sessions)
+            X_cat = np.zeros((N, len(self.categorical_features)))
+            for j, feat in enumerate(self.categorical_features):
+                vals = [s.get(feat, None) for s in sessions]
+                counts = Counter(vals)
+                freq_map = {k: v / N for k, v in counts.items()}
+                self.freq_maps[feat] = freq_map
+                X_cat[:, j] = [freq_map.get(v, 0.0) for v in vals]
+        return np.concatenate([X, X_cat], axis=1)
 
     def transform(self, sessions):
         X = self.get_vectors(sessions)
-
         if self.pca_feature:
-            assert self.pca
-            X_pca = self.pca.transform(sessions)
-            X_pca = np.reshape(X_pca, (X_pca.shape[0], 1))
-            X = np.concatenate((X, X_pca), axis=1)
-
+            X_p = self.pca.transform(sessions).reshape(-1, 1)
+            X = np.concatenate([X, X_p], axis=1)
         if self.normalize:
-            X = self._normalize(X)
-
-        if len(self.categorical_features) > 0:
-            X_cat = self.encoder.transform(self.get_categorical_vectors(sessions))
-            X = np.concatenate((X, X_cat), axis=1)
-
-        return X
+            X = (X - self.mean) / self.std
+        if self.use_onehot:
+            cat_data = np.array([[s.get(f, None) for f in self.categorical_features]
+                                  for s in sessions])
+            X_cat = self.onehot_encoder.transform(cat_data)
+        else:
+            N = len(sessions)
+            X_cat = np.zeros((N, len(self.categorical_features)))
+            for j, feat in enumerate(self.categorical_features):
+                fmap = self.freq_maps.get(feat, {})
+                vals = [s.get(feat, None) for s in sessions]
+                X_cat[:, j] = [fmap.get(v, 0.0) for v in vals]
+        return np.concatenate([X, X_cat], axis=1)

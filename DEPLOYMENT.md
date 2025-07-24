@@ -49,8 +49,12 @@ kubectl apply -f storage_deployment.yaml
 
 ### Build image
 ```commandline
-docker build -f ./Dockerfile_jupyter . -t equalitie/baskervillehall:jupyter
+docker buildx build --platform linux/amd64 -f ./Dockerfile_jupyter_base . -t equalitie/baskervillehall:jupyterbase
+docker push equalitie/baskervillehall:jupyterbase
+
+docker buildx build --platform linux/amd64 -f ./Dockerfile_jupyter . -t equalitie/baskervillehall:jupyter
 docker push equalitie/baskervillehall:jupyter
+
 ```
 
 ### Installation

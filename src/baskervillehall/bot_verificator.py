@@ -4,13 +4,14 @@ import requests
 
 class BotVerificator(object):
 
-    def __init__(self):
+    def __init__(self, logger):
         super().__init__()
         self.ts_refresh = None
         self.google_ranges = None
         self.bing_ranges = None
         self.duckduckgo_ips = None
         self.refresh()
+        self.logger = logger
 
     def refresh_google(self):
         r = requests.get('https://developers.google.com/static/search/apis/ipranges/googlebot.json')
@@ -52,9 +53,16 @@ class BotVerificator(object):
         if self.ts_refresh is not None and (datetime.now()-self.ts_refresh).total_seconds() < 60*60:
             return
 
-        self.refresh_google()
-        self.refresh_bing()
-        self.refresh_duckduckgo()
+        for name, func in (
+            ('Google', self.refresh_google),
+            ('Bing',   self.refresh_bing),
+            ('DuckDuckGo', self.refresh_duckduckgo),
+        ):
+            try:
+                func()
+            except Exception as e:
+                self.logger.exception(f"{name} refresh failed: {e!r}")
+
         self.ts_refresh = datetime.now()
 
 

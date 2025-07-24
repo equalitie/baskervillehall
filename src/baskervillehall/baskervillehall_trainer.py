@@ -133,8 +133,6 @@ class BaskervillehallTrainer(object):
             features=self.features,
             categorical_features=categorical_features,
             pca_feature=self.pca_feature,
-            max_categories=self.max_categories,
-            min_category_frequency=self.min_category_frequency,
             datetime_format=self.datetime_format,
             bootstrap=self.bootstrap,
             n_jobs=self.n_jobs,
@@ -171,11 +169,21 @@ class BaskervillehallTrainer(object):
         model_io.save(model, self.s3_path, host, model_type=model_type)
 
         self.logger.info(f'Training Autoencoder model for {host}, {model_type.value}')
-        model_auto_encoder = BaskervillehallAutoEncoder()
+        model_auto_encoder = BaskervillehallAutoEncoder(
+            latent_dim=4,
+            contamination=self.contamination,
+            num_epochs=50,
+            features=self.features,
+            categorical_features=categorical_features,
+            pca_feature=self.pca_feature,
+            datetime_format=self.datetime_format,
+            shap_num_background=30,
+            logger=self.logger,
+        )
         model_auto_encoder.fit(sessions)
         self.logger.info(f'Autoencoder model trained')
         self.logger.info(f'Saving Autoencoder model for {host}, {model_type.value}')
-        model_io.save(model_auto_encoder, f'{self.s3_path}_autoencoder', host, model_type=model_type)
+        model_io.save(model_auto_encoder, f'{self.s3_path}_autoencoder3', host, model_type=model_type)
         self.logger.info(f'Autoencoder model saved')
 
         return True
