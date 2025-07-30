@@ -184,7 +184,7 @@ class BaskervillehallPredictor(object):
                 'meta': meta,
                 'prediction_if': int(prediction_if),
                 'prediction_ae': int(prediction_ae),
-                'shapley_feature': shapley_feature_if,
+                'shapley_feature': shapley_feature_if if len(shapley_feature_if) > 0 else shapley_feature_ae,
                 'shapley_feature_if': shapley_feature_if,
                 'shapley_feature_ae': shapley_feature_ae,
                 'start': session['start'],
@@ -203,7 +203,6 @@ class BaskervillehallPredictor(object):
                 'scraper_name': scraper_name,
                 'threshold_ae': float(threshold_ae)
             }
-        self.logger.info(dict)
         return json.dumps(
             dict
         ).encode('utf-8')
