@@ -1,9 +1,11 @@
 import logging
 import time
 import json
+import os
 from collections import deque
 import numpy as np
 
+from baskervillehall.baskervillehall_auto_encoder import AutoEncoder, BaskervillehallAutoEncoder
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest, ModelType
 from baskervillehall.host_selector import HostSelector
 from baskervillehall.model_io import ModelIO
@@ -14,7 +16,6 @@ class BaskervillehallTrainer(object):
 
     def __init__(
             self,
-            warmup_period=5,
             features=None,
             categorical_features=None,
             pca_feature=False,
@@ -58,7 +59,6 @@ class BaskervillehallTrainer(object):
 
         self.max_categories = max_categories
         self.min_category_frequency = min_category_frequency
-        self.warmup_period = warmup_period
         self.features = features
         self.categorical_features = categorical_features
         self.pca_feature = pca_feature
@@ -130,12 +130,9 @@ class BaskervillehallTrainer(object):
             max_samples=self.max_samples,
             contamination=self.contamination,
             max_features=self.max_features,
-            warmup_period=self.warmup_period,
             features=self.features,
             categorical_features=categorical_features,
             pca_feature=self.pca_feature,
-            max_categories=self.max_categories,
-            min_category_frequency=self.min_category_frequency,
             datetime_format=self.datetime_format,
             bootstrap=self.bootstrap,
             n_jobs=self.n_jobs,
@@ -167,10 +164,28 @@ class BaskervillehallTrainer(object):
             model.set_contamination(new_contamination)
 
         model.fit(sessions)
-
         self.logger.info(f'@@@ Saving model for {host}, type={model_type.value}...')
         model.clear_embeddings()
         model_io.save(model, self.s3_path, host, model_type=model_type)
+
+        self.logger.info(f'Training Autoencoder model for {host}, {model_type.value}')
+        model_auto_encoder = BaskervillehallAutoEncoder(
+            latent_dim=4,
+            contamination=self.contamination,
+            num_epochs=50,
+            features=self.features,
+            categorical_features=categorical_features,
+            pca_feature=self.pca_feature,
+            datetime_format=self.datetime_format,
+            shap_num_background=30,
+            logger=self.logger,
+        )
+        model_auto_encoder.fit(sessions)
+        self.logger.info(f'Autoencoder model trained')
+        self.logger.info(f'Saving Autoencoder model for {host}, {model_type.value}')
+        model_io.save(model_auto_encoder, f'{self.s3_path}_autoencoder3', host, model_type=model_type)
+        self.logger.info(f'Autoencoder model saved')
+
         return True
 
     def run(self):

@@ -80,8 +80,10 @@ CREATE TABLE public.challenge_command_history (
 	country text NULL,
 	continent text NULL,
 	datacenter text NULL,
-	shapley text NULL,
-	shapley_feature text NULL,
+	shapley_if text NULL,
+	shapley_feature_if text NULL,
+	shapley_ae text NULL,
+	shapley_feature_ae text NULL,
 	difficulty int4 DEFAULT 0 NULL,
 	hits int4 DEFAULT 0 NOT NULL,
 	hit_rate int4 DEFAULT 0 NULL,
@@ -95,9 +97,13 @@ CREATE TABLE public.challenge_command_history (
 	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	updated_by text NOT NULL,
 	duration float8 DEFAULT 0.0 NOT NULL,
-	score float8 DEFAULT 0.0 NOT NULL,
+	score_if float8 DEFAULT 0.0 NOT NULL,
+	score_ae float8 DEFAULT 0.0 NOT NULL,
+	threshold_ae float8 DEFAULT 0.0 NOT NULL,
 	request_count int4 DEFAULT 0 NOT NULL,
 	scraper_name text,
+	prediction_if int4 DEFAULT 0 NULL,
+	prediction_ae int4 DEFAULT 0 NULL,
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);

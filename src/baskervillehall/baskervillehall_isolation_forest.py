@@ -54,12 +54,9 @@ class BaskervillehallIsolationForest(object):
             n_estimators=500,
             max_samples="auto",
             contamination="auto",
-            warmup_period=5,
             features=None,
             categorical_features=None,
             pca_feature=False,
-            max_categories=3,
-            min_category_frequency=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
             max_features=1.0,
             bootstrap=False,
@@ -71,12 +68,9 @@ class BaskervillehallIsolationForest(object):
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
 
         self.feature_extractor = FeatureExtractor(
-            warmup_period=warmup_period,
             features=features,
             categorical_features=categorical_features,
             pca_feature=pca_feature,
-            max_categories=max_categories,
-            min_category_frequency=min_category_frequency,
             datetime_format=datetime_format,
             logger=self.logger
         )
