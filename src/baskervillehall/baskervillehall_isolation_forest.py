@@ -60,7 +60,7 @@ class BaskervillehallIsolationForest(object):
             datetime_format='%Y-%m-%d %H:%M:%S',
             max_features=1.0,
             bootstrap=False,
-            n_jobs=None,
+            n_jobs=-1,
             random_state=None,
             logger=None
     ):
@@ -413,4 +413,5 @@ class BaskervillehallIsolationForest(object):
         scores = self.isolation_forest.decision_function(df)
 
         shap_values = self.get_shapley()(vectors, check_additivity=False) if use_shapley else None
+        # shap_values = None
         return scores, shap_values

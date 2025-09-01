@@ -109,7 +109,8 @@ CREATE TABLE public.challenge_command_history (
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);
 CREATE INDEX commands_index ON challenge_command_history (session_end, host_name);
 
-
+CREATE INDEX idx_challenge_ip_created
+    ON challenge_command_history (ip_address, created_at);
 
 -- public.challenge_command_history foreign keys
 

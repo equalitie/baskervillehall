@@ -32,7 +32,7 @@ class BaskervillehallTrainer(object):
             contamination="auto",
             max_features=1.0,
             bootstrap=True,
-            n_jobs=None,
+            n_jobs=-1,
             random_state=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
 

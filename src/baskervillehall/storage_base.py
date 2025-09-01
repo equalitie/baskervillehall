@@ -136,8 +136,7 @@ class StorageBase(object):
             **self.kafka_connection,
             max_poll_records=self.batch_size,
             fetch_max_bytes=52428800 * 5,
-            max_partition_fetch_bytes=1048576 * 10,
-            api_version=(0, 11, 5),
+            max_partition_fetch_bytes=1048576 * 10
         )
 
         self.logger.info(f'Starting session storage on topic '

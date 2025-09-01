@@ -16,6 +16,7 @@ from baskervillehall.tor_exit_scanner import TorExitScanner
 from baskervillehall.whitelist_ip import WhitelistIP
 from baskervillehall.whitelist_url import WhitelistURL
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+from kafka.errors import NoBrokersAvailable, KafkaError
 import json
 from datetime import datetime, time
 import time as time_module
@@ -47,7 +48,12 @@ class BaskervillehallSession(object):
             logger=None,
             asn_database_path='',
             asn_database2_path='',
-            postgres_connection=None
+            postgres_connection=None,
+            max_session_age_hours=24,
+            lag_high_threshold=10000,
+            lag_moderate_threshold=5000,
+            lag_emergency_threshold=20000,
+            lag_critical_threshold=15000
     ):
         super().__init__()
         self.topic_weblogs = topic_weblogs
@@ -75,6 +81,20 @@ class BaskervillehallSession(object):
         self.num_flushed_primary_sessions = 0  # for debugging only
         self.primary_session_expiration = primary_session_expiration
         self.min_number_of_requests = min_number_of_requests
+        self.max_session_age_hours = max_session_age_hours
+        
+        # Lag mitigation settings
+        self.current_lag = 0
+        self.base_max_records = 500
+        self.base_flush_increment = flush_increment
+        self.lag_high_threshold = lag_high_threshold
+        self.lag_moderate_threshold = lag_moderate_threshold
+        self.lag_emergency_threshold = lag_emergency_threshold
+        self.lag_critical_threshold = lag_critical_threshold
+        self.last_lag_check = datetime.now()
+        self.messages_dropped = 0  # Counter for dropped messages
+        self.last_emergency_cleanup = datetime.now()
+        self.emergency_cleanup_interval = 30  # seconds between emergency cleanups
         self.producer = None
         self.ips = dict()
         self.ips_primary = dict()
@@ -91,6 +111,112 @@ class BaskervillehallSession(object):
             db_config=postgres_connection
         )
         self.fingerprints_analyzer = FrequencyAnalyzer()
+
+    def create_kafka_connections(self, max_retries=10, initial_delay=5):
+        """Create Kafka consumer and producer with retry logic and exponential backoff"""
+        consumer = None
+        producer = None
+        
+        for attempt in range(max_retries):
+            try:
+                self.logger.info(f"Attempting to connect to Kafka (attempt {attempt + 1}/{max_retries})...")
+                
+                # Create consumer
+                consumer = KafkaConsumer(
+                    **self.kafka_connection,
+                    group_id=f'session{self.partition}'
+                )
+                
+                # Create producer
+                producer = KafkaProducer(**self.kafka_connection)
+                
+                self.logger.info("Successfully connected to Kafka brokers")
+                return consumer, producer
+                
+            except NoBrokersAvailable as e:
+                delay = initial_delay * (2 ** attempt)  # Exponential backoff
+                self.logger.warning(f"No Kafka brokers available (attempt {attempt + 1}/{max_retries}). "
+                                   f"Retrying in {delay} seconds... Error: {e}")
+                time_module.sleep(delay)
+                
+                # Clean up partial connections
+                if consumer:
+                    try:
+                        consumer.close()
+                    except:
+                        pass
+                if producer:
+                    try:
+                        producer.close()
+                    except:
+                        pass
+                        
+            except Exception as e:
+                delay = initial_delay * (2 ** attempt)
+                self.logger.error(f"Unexpected error connecting to Kafka (attempt {attempt + 1}/{max_retries}): {e}")
+                time_module.sleep(delay)
+                
+                # Clean up partial connections
+                if consumer:
+                    try:
+                        consumer.close()
+                    except:
+                        pass
+                if producer:
+                    try:
+                        producer.close()
+                    except:
+                        pass
+        
+        raise Exception(f"Failed to connect to Kafka after {max_retries} attempts")
+
+    def update_lag_metrics(self, lag):
+        """Update lag metrics and adjust system behavior based on current lag"""
+        self.current_lag = lag
+        self.last_lag_check = datetime.now()
+        
+        # Adjust flush increment based on lag
+        if lag > self.lag_emergency_threshold:
+            # Emergency lag - extremely aggressive flushing
+            self.flush_increment = max(3, self.base_flush_increment // 5)
+            self.logger.warning(f"EMERGENCY LAG DETECTED: {lag} messages. Activating emergency cleanup.")
+        elif lag > self.lag_high_threshold:
+            # High lag - flush more aggressively
+            self.flush_increment = max(5, self.base_flush_increment // 3)
+        elif lag > self.lag_moderate_threshold:
+            # Moderate lag - reduce flush threshold
+            self.flush_increment = max(10, self.base_flush_increment // 2)
+        else:
+            # Normal operation - restore original flush increment
+            self.flush_increment = self.base_flush_increment
+
+    def get_adaptive_max_records(self):
+        """Calculate adaptive max_records based on current lag"""
+        if self.current_lag > self.lag_high_threshold:
+            # High lag - process more aggressively
+            return min(1000, max(self.base_max_records, self.current_lag // 10))
+        elif self.current_lag > self.lag_moderate_threshold:
+            # Moderate lag - increase batch size
+            return int(self.base_max_records * 1.5)
+        else:
+            # Normal operation
+            return self.base_max_records
+            
+    def get_adaptive_gc_period(self):
+        """Calculate adaptive GC period based on current lag"""
+        base_period = self.garbage_collection_period * 60  # Convert to seconds
+        if self.current_lag > self.lag_emergency_threshold:
+            # Emergency lag - run GC 8x more frequently
+            return max(15, base_period // 8)
+        elif self.current_lag > self.lag_high_threshold:
+            # High lag - run GC 4x more frequently
+            return max(30, base_period // 4)
+        elif self.current_lag > self.lag_moderate_threshold:
+            # Moderate lag - run GC 2x more frequently
+            return max(60, base_period // 2)
+        else:
+            # Normal operation
+            return base_period
 
     def get_timestamp_and_data(self, data):
         try:
@@ -142,8 +268,22 @@ class BaskervillehallSession(object):
         duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds()
         start_timestamp = requests_sorted[0]['ts']
         for r in requests_sorted:
-            rf = copy.deepcopy(r)
-            rf['ts'] = r['ts'].strftime(self.date_time_format)
+            rf = {
+                'ts': r['ts'].strftime(self.date_time_format),
+                'url': r['url'],
+                'ua': r['ua'],
+                'query': r['query'],
+                'code': r['code'],
+                'type': r['type'],
+                'payload': r['payload'],
+                'method': r['method'],
+                'edge': r['edge'],
+                'static': r['static'],
+                'passed_challenge': r['passed_challenge'],
+                'bot_score': r['bot_score'],
+                'bot_score_top_factor': r['bot_score_top_factor'],
+                'deflect_password': r['deflect_password']
+            }
             if r['passed_challenge']:
                 passed_challenge = True
                 bot_score = r['bot_score']
@@ -319,8 +459,10 @@ class BaskervillehallSession(object):
             for session_id in list(sessions):  # Iterate over a copy of session_ids
                 session = sessions[session_id]
 
-                # Check if main session has expired due to inactivity
-                if (current_event_ts_horizon - session['end']).total_seconds() > self.session_inactivity * 60:
+                # Check if main session has expired due to inactivity or age
+                session_age_hours = (current_event_ts_horizon - session['start']).total_seconds() / 3600
+                if ((current_event_ts_horizon - session['end']).total_seconds() > self.session_inactivity * 60 or
+                    session_age_hours > self.max_session_age_hours):
                     self.check_and_send_session(session)  # Flush expired main sessions
                     session_ids_to_delete_main.append(session_id)
 
@@ -421,6 +563,124 @@ class BaskervillehallSession(object):
             f'Main Sessions: {total_sessions - deleted_main_sessions_count} -  {deleted_main_sessions_count} deleted, \n'
             f'Primary Sessions: {total_primary_sessions_before_gc - deleted_primary_sessions_count} - {deleted_primary_sessions_count} deleted \n'
             f'GC took {time_module.time() - start_gc:.2f} seconds | RAM usage: {mem:.2f} MB'
+        )
+
+    def emergency_session_cleanup(self, current_ts):
+        """Emergency aggressive cleanup when lag exceeds critical thresholds"""
+        cleanup_start = time_module.time()
+        
+        # Only run emergency cleanup if enough time has passed
+        if (datetime.now() - self.last_emergency_cleanup).total_seconds() < self.emergency_cleanup_interval:
+            return
+            
+        self.last_emergency_cleanup = datetime.now()
+        
+        initial_main_sessions = sum(len(sessions) for sessions in self.ips.values())
+        initial_primary_sessions = sum(len(sessions) for sessions in self.ips_primary.values())
+        initial_ips = len(self.ips) + len(self.ips_primary)
+        
+        # Emergency cleanup thresholds (more aggressive than normal GC)
+        emergency_session_age_hours = 1  # Much shorter than normal max_session_age_hours
+        emergency_inactivity_minutes = max(1, self.session_inactivity // 2)  # Half normal inactivity
+        
+        # Clear old main sessions aggressively
+        cleared_main_sessions = 0
+        cleared_main_ips = 0
+        
+        for ip in list(self.ips.keys()):
+            sessions = self.ips[ip]
+            sessions_to_delete = []
+            
+            for session_id, session in list(sessions.items()):
+                session_age_hours = (current_ts - session['start']).total_seconds() / 3600
+                inactivity_minutes = (current_ts - session['end']).total_seconds() / 60
+                
+                # More aggressive cleanup criteria
+                if (session_age_hours > emergency_session_age_hours or 
+                    inactivity_minutes > emergency_inactivity_minutes):
+                    
+                    # Send session if it meets minimum requirements
+                    if (session['duration'] > self.min_session_duration and 
+                        len(session['requests']) >= self.min_number_of_requests):
+                        self.send_session(session)
+                    
+                    sessions_to_delete.append(session_id)
+                    cleared_main_sessions += 1
+            
+            for session_id in sessions_to_delete:
+                del sessions[session_id]
+            
+            if len(sessions) == 0:
+                del self.ips[ip]
+                cleared_main_ips += 1
+        
+        # Clear old primary sessions aggressively
+        cleared_primary_sessions = 0
+        cleared_primary_ips = 0
+        
+        for ip in list(self.ips_primary.keys()):
+            sessions = self.ips_primary[ip]
+            
+            # Check if any session in this IP is too old
+            oldest_session_age = 0
+            for session_id, session in sessions.items():
+                session_age_hours = (current_ts - session['start']).total_seconds() / 3600
+                oldest_session_age = max(oldest_session_age, session_age_hours)
+            
+            # If oldest session exceeds emergency threshold, clear all sessions for this IP
+            if oldest_session_age > emergency_session_age_hours:
+                # Try to flush aggregated session if it has enough requests
+                total_requests = sum(len(session['requests']) for session in sessions.values())
+                if total_requests >= self.min_number_of_requests:
+                    # Get first session for metadata
+                    first_session = next(iter(sessions.values()))
+                    all_requests = []
+                    for session in sessions.values():
+                        all_requests.extend(session['requests'])
+                    
+                    all_requests.sort(key=lambda x: x['ts'])
+                    
+                    if all_requests:
+                        emergency_flush_session = {
+                            'ua': first_session['ua'],
+                            'host': first_session['host'],
+                            'country': first_session['country'],
+                            'continent': first_session['continent'],
+                            'datacenter_code': first_session['datacenter_code'],
+                            'verified_bot': first_session['verified_bot'],
+                            'ip': ip,
+                            'session_id': 'emergency_flush',
+                            'start': all_requests[0]['ts'],
+                            'end': all_requests[-1]['ts'],
+                            'cipher': first_session['cipher'],
+                            'ciphers': first_session['ciphers'],
+                            'duration': (all_requests[-1]['ts'] - all_requests[0]['ts']).total_seconds(),
+                            'requests': all_requests,
+                            'primary_session': True,
+                            'asn': first_session['asn'],
+                            'asn_name': first_session['asn_name'],
+                            'num_languages': first_session['num_languages'],
+                            'accept_language': first_session['accept_language'],
+                            'timezone': first_session['timezone']
+                        }
+                        self.send_session(emergency_flush_session)
+                
+                cleared_primary_sessions += len(sessions)
+                del self.ips_primary[ip]
+                if ip in self.flush_size_primary:
+                    del self.flush_size_primary[ip]
+                cleared_primary_ips += 1
+        
+        self.producer.flush()
+        
+        cleanup_duration = time_module.time() - cleanup_start
+        mem_after = psutil.Process().memory_info().rss / 1024 / 1024
+        
+        self.logger.warning(
+            f'EMERGENCY CLEANUP completed. Lag: {self.current_lag} | '
+            f'Cleared {cleared_main_sessions} main sessions, {cleared_main_ips} main IPs | '
+            f'Cleared {cleared_primary_sessions} primary sessions, {cleared_primary_ips} primary IPs | '
+            f'Emergency cleanup took {cleanup_duration:.2f}s | RAM: {mem_after:.2f}MB'
         )
 
     def collect_primary_session(self, ip):
@@ -529,11 +789,8 @@ class BaskervillehallSession(object):
                                    refresh_period_in_seconds=60 * self.white_list_refresh_period)
 
         try:
-            consumer = KafkaConsumer(
-                **self.kafka_connection
-            )
-
-            self.producer = KafkaProducer(**self.kafka_connection)
+            # Create Kafka connections with retry logic
+            consumer, self.producer = self.create_kafka_connections()
             self.logger.info(f'Starting Baskervillehall sessionizer on topic {self.topic_sessions}, '
                              f'partition {self.partition}')
 
@@ -548,15 +805,18 @@ class BaskervillehallSession(object):
             ts_lag_report = datetime.now()
             while True:
                 # Monitor memory and force GC if RAM is too high
-                if time_module.time() % 60 < 1:  # roughly once per minute
+                if time_module.time() % 30 < 1:  # every 30 seconds
                     mem = psutil.Process().memory_info().rss / 1024 / 1024
-                    self.logger.info(f'RAM usage: {mem:.2f} MB')
-                    if mem > 2048:
+                    if time_module.time() % 60 < 1:  # log every minute
+                        self.logger.info(f'RAM usage: {mem:.2f} MB')
+                    if mem > 1024:  # Lower threshold
                         self.logger.warning(f'High RAM usage ({mem:.2f} MB) — running emergency GC')
                         gc_ts_to_use = latest_event_ts_seen if latest_event_ts_seen else datetime.now()
                         self.gc(gc_ts_to_use)
 
-                raw_messages = consumer.poll(timeout_ms=1000, max_records=200, update_offsets=False)
+                # Adaptive batch processing based on current lag
+                max_records = self.get_adaptive_max_records()
+                raw_messages = consumer.poll(timeout_ms=500, max_records=max_records, update_offsets=False)
                 if not raw_messages:
                     time_now = datetime.now()
                     if (time_now - ts_gc_trigger_wall_clock).total_seconds() > self.garbage_collection_period * 60:
@@ -567,11 +827,28 @@ class BaskervillehallSession(object):
                     continue  # No messages, so continue loop
 
                 for topic_partition, messages in raw_messages.items():
+                    # Check for emergency lag and potentially drop messages
+                    if self.current_lag > self.lag_emergency_threshold:
+                        # Drop messages if we're severely lagging to prevent memory exhaustion
+                        drop_ratio = min(0.8, (self.current_lag - self.lag_emergency_threshold) / 10000)  # Up to 80% drop
+                        messages_to_process = []
+                        for i, message in enumerate(messages):
+                            if random.random() > drop_ratio:  # Keep message
+                                messages_to_process.append(message)
+                            else:
+                                self.messages_dropped += 1
+                        
+                        if len(messages_to_process) < len(messages):
+                            dropped_count = len(messages) - len(messages_to_process)
+                            self.logger.warning(f'DROPPING {dropped_count}/{len(messages)} messages due to emergency lag ({self.current_lag})')
+                        messages = messages_to_process
+                    
                     for message in messages:
                         if (datetime.now() - ts_lag_report).total_seconds() > 5:
                             highwater = consumer.highwater(topic_partition)
                             lag = (highwater - 1) - message.offset
-                            self.logger.info(f'Lag = {lag}')
+                            self.update_lag_metrics(lag)
+                            self.logger.info(f'Lag = {lag} (adaptive max_records: {max_records}, dropped: {self.messages_dropped})')
                             ts_lag_report = datetime.now()
                         if not message.value:
                             continue
@@ -582,6 +859,13 @@ class BaskervillehallSession(object):
                         # Update latest_event_ts_seen
                         if latest_event_ts_seen is None or ts_event > latest_event_ts_seen:
                             latest_event_ts_seen = ts_event
+
+                        # Skip expensive processing if heavily lagging
+                        skip_expensive_ops = self.current_lag > self.lag_critical_threshold
+                        
+                        # Run emergency cleanup if lag is critically high
+                        if self.current_lag > self.lag_emergency_threshold:
+                            self.emergency_session_cleanup(latest_event_ts_seen if latest_event_ts_seen else datetime.now())
 
                         ip = data['client_ip']
 
@@ -595,7 +879,11 @@ class BaskervillehallSession(object):
                             if data['banjax_decision'] == 'GlobalAccessGranted':
                                 verified_bot = True
                             else:
-                                verified_bot = self.bot_verificator.is_verified_bot(ip)
+                                # Skip bot verification if heavily lagging
+                                if skip_expensive_ops:
+                                    verified_bot = False
+                                else:
+                                    verified_bot = self.bot_verificator.is_verified_bot(ip)
                             continent = ''
                             datacenter_code = ''
 
@@ -606,7 +894,7 @@ class BaskervillehallSession(object):
                         asn_name = data.get('geoip_asn', {}).get('as', {}).get('organization', {}).get('name', '')
                         session_id = self.get_session_cookie(data)
 
-                        if len(session_id) > 5:
+                        if len(session_id) > 5 and not skip_expensive_ops:
                             self.vpn_detector.log(ip=ip,
                                                   host=host,
                                                   session_cookie=session_id,
@@ -730,9 +1018,15 @@ class BaskervillehallSession(object):
                             self.collect_primary_session(ip)
 
                         time_now = datetime.now()
-                        if (time_now - ts_gc_trigger_wall_clock).total_seconds() > self.garbage_collection_period * 60:
+                        gc_period = self.get_adaptive_gc_period()
+                        if (time_now - ts_gc_trigger_wall_clock).total_seconds() > gc_period:
                             ts_gc_trigger_wall_clock = time_now
                             self.gc(latest_event_ts_seen)
+                            
+                        # Commit offsets aggressively if lagging (only if group_id is configured)
+                        if (self.current_lag > self.lag_moderate_threshold and 
+                            hasattr(consumer, 'config') and consumer.config.get('group_id')):
+                            consumer.commit()
 
         except Exception as ex:
             self.logger.exception(f'Exception in consumer loop:{ex}')

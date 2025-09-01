@@ -96,7 +96,11 @@ def main():
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS')),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(','),
-            'postgres_connection': postgres_connection
+            'postgres_connection': postgres_connection,
+            'lag_high_threshold': int(os.environ.get('LAG_HIGH_THRESHOLD', 10000)),
+            'lag_moderate_threshold': int(os.environ.get('LAG_MODERATE_THRESHOLD', 5000)),
+            'lag_emergency_threshold': int(os.environ.get('LAG_EMERGENCY_THRESHOLD', 20000)),
+            'lag_critical_threshold': int(os.environ.get('LAG_CRITICAL_THRESHOLD', 15000))
         }
 
         sessionizer = BaskervillehallSession(
@@ -171,7 +175,14 @@ def main():
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
             'bot_score_threshold': float(os.environ.get('BOT_SCORE_THRESHOLD')),
-            'challenge_scrapers': os.environ.get('CHALLENGE_SCRAPERS') == 'True'
+            'challenge_scrapers': os.environ.get('CHALLENGE_SCRAPERS') == 'True',
+            'worker_chunk_size': int(os.environ.get('WORKER_CHUNK_SIZE', 1000)),
+            'kafka_poll_timeout_ms': int(os.environ.get('KAFKA_POLL_TIMEOUT_MS', 5000)),
+            'max_poll_interval_ms': int(os.environ.get('MAX_POLL_INTERVAL_MS', 600000)),
+            'fetch_max_wait_ms': int(os.environ.get('FETCH_MAX_WAIT_MS', 2000)),
+            'fetch_min_bytes': int(os.environ.get('FETCH_MIN_BYTES', 1048576)),
+            'lag_high_threshold': int(os.environ.get('LAG_HIGH_THRESHOLD', 10000)),
+            'lag_moderate_threshold': int(os.environ.get('LAG_MODERATE_THRESHOLD', 5000))
         }
 
         predictor = BaskervillehallPredictor(
