@@ -1,9 +1,15 @@
 import re
+import os
 
 class ASNLoader:
     def __init__(self, path):
         self.asn_dict = {}         # AS number (int) → name
         self.name_to_asn = {}      # Lowercase name → AS number(s)
+        
+        # Handle empty or missing path gracefully
+        if not path or not path.strip() or not os.path.isfile(path):
+            return
+            
         self._load(path)
 
     def _load(self, path):

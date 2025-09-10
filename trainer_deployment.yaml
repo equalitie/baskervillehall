@@ -7,7 +7,7 @@ metadata:
   labels:
     app: "baskervillehall-trainer"
 spec:
-  replicas: 3
+  replicas: 9
   serviceName: "baskervillehall-trainer"
   updateStrategy:
     type: RollingUpdate
@@ -23,19 +23,19 @@ spec:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
-            - matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: NotIn
-                values:
-                - workers-node-6a9f33
+              - matchExpressions:
+                  - key: nodepool
+                    operator: In
+                    values:
+                      - postgres
       containers:
       - name: "baskervillehall-trainer"
         image: "equalitie/baskervillehall:latest"
         imagePullPolicy: Always
         resources:
           requests:
-            memory: "5Gi"
-            cpu: "250m"
+            memory: "2Gi"
+            cpu: "10m"
           limits:
             memory: "20Gi"
             cpu: "2000m"

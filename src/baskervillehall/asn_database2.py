@@ -1,9 +1,17 @@
-from asn_loader import ASNLoader
+from baskervillehall.asn_loader import ASNLoader
 import os
 
 
 class ASNDatabase2:
     def __init__(self, path):
+        # Handle empty or missing ASN database path
+        if not path or not path.strip() or not os.path.isdir(path):
+            # Initialize with empty loaders when no path provided
+            self.malicious_asn_loader = ASNLoader('')
+            self.vpn_asn_loader = ASNLoader('')
+            self.vps_asn_loader = ASNLoader('')
+            return
+            
         malicious_asn_path = os.path.join(path, 'Malicious', 'ASN.txt')
         vpn_asn_path = os.path.join(path, 'VPN Providers', 'ASN.txt')
         vps_asn_path = os.path.join(path, 'VPS Providers', 'ASN.txt')

@@ -7,7 +7,7 @@ metadata:
   labels:
     app: "baskervillehall-storage"
 spec:
-  replicas: 3
+  replicas: 9
   serviceName: "baskervillehall-storage"
   updateStrategy:
     type: RollingUpdate
@@ -31,19 +31,19 @@ spec:
       restartPolicy: Always
       containers:
       - name: "baskervillehall-storage"
-        image: "equalitie/baskervillehall:latest"
+        image: "equalitie/baskervillehall:session"
         imagePullPolicy: Always
         resources:
           requests:
             memory: "1Gi"
-            cpu: "300m"
+            cpu: "10m"
           limits:
             memory: "2Gi"
             cpu: "500m"
         command:
           - python
         args:
-          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - /usr/bin/baskervillehall/src/baskervillehall/main_light.py
           - storage
         envFrom:
           - configMapRef:

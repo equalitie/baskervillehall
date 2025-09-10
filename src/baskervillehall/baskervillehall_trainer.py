@@ -4,6 +4,7 @@ import json
 import os
 from collections import deque
 import numpy as np
+import time as time_module
 
 from baskervillehall.baskervillehall_auto_encoder import AutoEncoder, BaskervillehallAutoEncoder
 from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsolationForest, ModelType
@@ -22,7 +23,7 @@ class BaskervillehallTrainer(object):
             max_categories=3,
             min_category_frequency=10,
             topic_sessions='BASKERVILLEHALL_SESSIONS',
-            partition=0,
+            group_id='train_pipeline',
             num_sessions=10000,
             min_session_duration=20,
             min_number_of_requests=2,
@@ -63,7 +64,7 @@ class BaskervillehallTrainer(object):
         self.categorical_features = categorical_features
         self.pca_feature = pca_feature
         self.topic_sessions = topic_sessions
-        self.partition = partition
+        self.group_id = group_id
         self.num_sessions = num_sessions
         self.min_session_duration = min_session_duration
         self.min_number_of_requests = min_number_of_requests
@@ -190,9 +191,34 @@ class BaskervillehallTrainer(object):
 
     def run(self):
         try:
-            consumer = KafkaConsumer(
-                **self.kafka_connection
-            )
+            consumer_opts = dict(self.kafka_connection)
+            consumer_opts.update({
+                # pull large chunks per fetch
+                'fetch_max_bytes': 64 * 1024 * 1024,  # 64MB across partitions
+                'max_partition_fetch_bytes': 32 * 1024 * 1024,  # 32MB per partition
+                'fetch_min_bytes': 4 * 1024 * 1024,  # coalesce small messages into 1MB+
+                'fetch_max_wait_ms': 500,  # wait a bit to batch
+                # socket buffers to avoid throttling
+                'receive_buffer_bytes': 8 * 1024 * 1024,
+                'send_buffer_bytes': 8 * 1024 * 1024,
+                # we assign partitions manually; commits don’t matter
+                'enable_auto_commit': True,
+                # longer timeouts under burst
+                'request_timeout_ms': 60000,
+                'session_timeout_ms': 20000,
+                'group_id': self.group_id,
+                'auto_offset_reset': 'earliest'
+            })
+            consumer = KafkaConsumer(**consumer_opts)
+            consumer.subscribe([self.topic_sessions])
+
+            # wait (up to ~30s) for a real assignment
+            start = time_module.time()
+            while not consumer.assignment():
+                consumer.poll(timeout_ms=1000)
+                if time_module.time() - start > 30:
+                    break
+            self.logger.info(f"Assigned: {consumer.assignment()}")
 
             host_selector = HostSelector(
                 ttl_in_minutes=self.model_ttl_in_minutes,
@@ -201,8 +227,6 @@ class BaskervillehallTrainer(object):
             self.logger.info(self.kafka_connection['bootstrap_servers'])
             self.logger.info(f'Starting training on topic {self.topic_sessions}')
 
-            consumer.assign([TopicPartition(self.topic_sessions, self.partition)])
-            consumer.seek_to_beginning()
             while True:
                 self.logger.info(f'Getting next hosts... batch={self.train_batch_size}')
                 time_now = int(time.time())

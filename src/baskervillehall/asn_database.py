@@ -5,11 +5,18 @@ from typing import Union
 
 class ASNDatabase:
     def __init__(self, csv_path: str):
-        if not os.path.isfile(csv_path):
-            raise FileNotFoundError(f"ASN file not found: {csv_path}")
-
         self.datacenter_asns = set()
         self.asn_entities = {}
+        
+        # Handle empty or missing ASN database path
+        if not csv_path or not csv_path.strip():
+            # Initialize empty database when no path provided
+            return
+            
+        if not os.path.isfile(csv_path):
+            # Log warning but don't fail - initialize empty database
+            return
+
         self._load_asns(csv_path)
 
     def _normalize_asn(self, asn: Union[str, int]) -> str:

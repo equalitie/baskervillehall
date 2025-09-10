@@ -5,7 +5,7 @@ class StorageSessions(StorageBase):
     def __init__(
             self,
             topic='SESSIONS',
-            partition=0,
+            group_id='storage_sessions',
             batch_size=100,
             kafka_connection=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
@@ -18,7 +18,7 @@ class StorageSessions(StorageBase):
     ):
         super().__init__(
             topic=topic,
-            partition=partition,
+            group_id=group_id,
             batch_size=batch_size,
             kafka_connection=kafka_connection,
             datetime_format=datetime_format,

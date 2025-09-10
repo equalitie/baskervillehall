@@ -9,13 +9,14 @@ from kafka import KafkaConsumer, TopicPartition
 
 import json
 from datetime import datetime, timedelta
+import time as time_module
 
 
 class StorageBase(object):
     def __init__(
             self,
             topic='',
-            partition=0,
+            group_id='',
             batch_size=100,
             kafka_connection=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
@@ -32,7 +33,7 @@ class StorageBase(object):
         if kafka_connection is None:
             kafka_connection = {'bootstrap_servers': 'localhost:9092'}
         self.topic = topic
-        self.partition = partition
+        self.group_id = group_id
         self.batch_size = batch_size
         self.kafka_connection = kafka_connection
         self.postgres_connection = postgres_connection
@@ -112,6 +113,8 @@ class StorageBase(object):
         return None
 
     def get_session_requests(self, session, num_requests):
+        if 'start' not in session:
+            return []
         start = datetime.strptime(session['start'], self.datetime_format)
         requests = []
         for r in session['requests'][0:num_requests]:
@@ -134,16 +137,25 @@ class StorageBase(object):
     def run(self):
         consumer = KafkaConsumer(
             **self.kafka_connection,
+            group_id=self.group_id,
             max_poll_records=self.batch_size,
             fetch_max_bytes=52428800 * 5,
-            max_partition_fetch_bytes=1048576 * 10
+            max_partition_fetch_bytes=1048576 * 10,
+            enable_auto_commit=True,
         )
 
-        self.logger.info(f'Starting session storage on topic '
-                         f'{self.topic}, partition {self.partition}, table {self.table}')
+        self.logger.info(f'Starting storage on topic '
+                         f'{self.topic}, table {self.table}')
 
-        consumer.assign([TopicPartition(self.topic, self.partition)])
-        consumer.seek_to_end()
+        consumer.subscribe([self.topic])
+        # wait (up to ~30s) for a real assignment
+        start = time_module.time()
+        while not consumer.assignment():
+            consumer.poll(timeout_ms=1000)
+            if time_module.time() - start > 30:
+                break
+        self.logger.info(f"Assigned: {consumer.assignment()}")
+
         ts_lag_report = datetime.now()
         while True:
             self.delete_old_records()
