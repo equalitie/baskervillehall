@@ -7,7 +7,7 @@ metadata:
   labels:
     app: "baskervillehall-session-ch"
 spec:
-  replicas: 3
+  replicas: 1
   serviceName: "baskervillehall-session-ch"
   updateStrategy:
     type: RollingUpdate
@@ -19,31 +19,14 @@ spec:
       labels:
         app: "baskervillehall-session-ch"
     spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: NotIn
-                    values:
-                      - workers-node-eac0c8
-                      - workers-node-c83aa9
       containers:
       - name: "baskervillehall-session-ch"
-        image: "equalitie/baskervillehall:latest"
+        image: "equalitie/baskervillehall:session"
         imagePullPolicy: Always
-        resources:
-          requests:
-            memory: "1Gi"
-            cpu: "250m"
-          limits:
-            memory: "2Gi"
-            cpu: "500m"
         command:
           - python
         args:
-          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - /usr/bin/baskervillehall/src/baskervillehall/main_light.py
           - session
         envFrom:
           - configMapRef:

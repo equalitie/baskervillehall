@@ -39,6 +39,20 @@ docker buildx build --platform linux/amd64 -f ./Dockerfile_latest . -t equalitie
 docker push equalitie/baskervillehall:latest
 ```
 
+### Building session image
+```commandline
+docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session
+docker push equalitie/baskervillehall:session
+
+```
+
+### Building predict image
+```commandline
+docker buildx build --platform linux/amd64 -f ./Dockerfile.predictor . -t equalitie/baskervillehall:predictor
+docker push equalitie/baskervillehall:predictor
+
+```
+
 ### Pipelines deployment
 kubectl apply -f session_deployment.yaml
 kubectl apply -f prediction_deployment.yaml
@@ -96,3 +110,21 @@ kubectl apply -f deployment/postgres/postgres-baskervillehall-service.yaml
 
 kubectl port-forward service/postgres-baskervillehall 5433:5432
 
+### Monitoring
+
+```commandline
+# Add repo
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+# Create monitoring namespace
+kubectl create namespace monitoring
+
+# Install
+helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring
+
+```
+
+```commandline
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+```

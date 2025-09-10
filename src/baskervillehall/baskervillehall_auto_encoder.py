@@ -214,12 +214,13 @@ class BaskervillehallAutoEncoder(object):
             reconstruction_errors = F.mse_loss(recon, X_t, reduction='none')
             anomaly_scores = reconstruction_errors.mean(dim=1).cpu().numpy()
 
-        if self.explainer is None:
-            if self.background_data is None:
-                raise RuntimeError("self.background_data is missing")
-            self.explainer = shap.Explainer(
-                self._score_fn, self.background_data, algorithm="permutation"
-            )
+        # if self.explainer is None:
+        #     if self.background_data is None:
+        #         raise RuntimeError("self.background_data is missing")
+        #     self.explainer = shap.Explainer(
+        #         self._score_fn, self.background_data, algorithm="permutation"
+        #     )
+        # shap_values = self.explainer(X_scaled, max_evals=300)
+        shap_values = None
 
-        shap_values = self.explainer(X_scaled, max_evals=300)
         return anomaly_scores, shap_values

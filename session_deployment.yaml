@@ -7,7 +7,7 @@ metadata:
   labels:
     app: "baskervillehall-session"
 spec:
-  replicas: 3
+  replicas: 9
   serviceName: "baskervillehall-session"
   updateStrategy:
     type: RollingUpdate
@@ -29,52 +29,60 @@ spec:
                     values:
                       - workers-node-6a9f33
       volumes:
-        - name: bad-asn-volume
-          emptyDir: {}
-        - name: vpn-asn-volume
-          emptyDir: { }
+        # Bad ASN volume disabled
+        # - name: bad-asn-volume
+        #   emptyDir: {}
+        # VPN ASN volume disabled
+        # - name: vpn-asn-volume
+        #   emptyDir: { }
       initContainers:
-        - name: load-bad-asn
-          image: equalitie/baskervillehall_bad_asn:latest
-          command: ["sh", "-c", "cp /data/bad-asn-list.csv /mnt/bad_asn/"]
-          volumeMounts:
-            - name: bad-asn-volume
-              mountPath: /mnt/bad_asn
-        - name: load-vpn-asn
-          image: equalitie/baskervillehall_vpn_asn:latest
-          command: ["sh", "-c", "cp -r /data/ASN-Lists /mnt/vpn_asn/"]
-          volumeMounts:
-            - name: vpn-asn-volume
-              mountPath: /mnt/vpn_asn
+        # Bad ASN database disabled to save disk space
+        # - name: load-bad-asn
+        #   image: equalitie/baskervillehall_bad_asn:latest
+        #   command: ["sh", "-c", "cp /data/bad-asn-list.csv /mnt/bad_asn/"]
+        #   volumeMounts:
+        #     - name: bad-asn-volume
+        #       mountPath: /mnt/bad_asn
+        # VPN ASN database disabled to save disk space
+        # - name: load-vpn-asn
+        #   image: equalitie/baskervillehall_vpn_asn:latest
+        #   command: ["sh", "-c", "cp -r /data/ASN-Lists /mnt/vpn_asn/"]
+        #   volumeMounts:
+        #     - name: vpn-asn-volume
+        #       mountPath: /mnt/vpn_asn
       containers:
       - name: "baskervillehall-session"
-        image: "equalitie/baskervillehall:latest"
+        image: "equalitie/baskervillehall:session"
         volumeMounts:
-            - name: bad-asn-volume
-              mountPath: /mnt/bad_asn
-            - name: vpn-asn-volume
-              mountPath: /mnt/vpn_asn
+            # Bad ASN volume mount disabled
+            # - name: bad-asn-volume
+            #   mountPath: /mnt/bad_asn
+            # VPN ASN volume mount disabled
+            # - name: vpn-asn-volume
+            #   mountPath: /mnt/vpn_asn
         imagePullPolicy: Always
         resources:
           requests:
-            memory: "5Gi"
-            cpu: "250m"
+            memory: "2Gi"
+            cpu: "50m"
           limits:
             memory: "20Gi"
             cpu: "2000m"
         command:
           - python
         args:
-          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - /usr/bin/baskervillehall/src/baskervillehall/main_light.py
           - session
         envFrom:
           - configMapRef:
               name: baskervillehall
         env:
-        - name: BAD_ASN_FILE
-          value: "/mnt/bad_asn/bad-asn-list.csv"
-        - name: VPN_ASN_PATH
-          value: "/mnt/vpn_asn/ASN-Lists"
+        # Bad ASN file disabled
+        # - name: BAD_ASN_FILE
+        #   value: "/mnt/bad_asn/bad-asn-list.csv"
+        # VPN ASN path disabled
+        # - name: VPN_ASN_PATH
+        #   value: "/mnt/vpn_asn/ASN-Lists"
         - name: MY_POD_NAME
           valueFrom:
             fieldRef:

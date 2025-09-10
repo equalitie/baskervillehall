@@ -61,15 +61,24 @@ CREATE TABLE public.sessions (
 ALTER TABLE public.sessions ADD CONSTRAINT sessions_hostname_id_fkey FOREIGN KEY (hostname_id) REFERENCES public.hostname(hostname_id) ON DELETE CASCADE;
 CREATE INDEX sessions_index ON sessions (session_end, host_name);
 
--- DROP TABLE public.challenge_command_history;
+DROP TABLE public.challenge_command_history;
 
 CREATE TABLE public.challenge_command_history (
 	challenge_command_id uuid DEFAULT uuid_generate_v4() NOT NULL,
 	hostname_id uuid NOT NULL,
-	host_name text NOT NULL,
 	command_type_name text DEFAULT ''::text NOT NULL,
 	ip_address inet NOT NULL,
 	session_cookie text DEFAULT ''::text NOT NULL,
+	"source" text DEFAULT ''::text NOT NULL,
+	created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	updated_by text NOT NULL,
+	duration float8 DEFAULT 0.0 NOT NULL,
+	request_count int4 DEFAULT 0 NOT NULL,
+
+
+
+	host_name text NOT NULL,
 	ip_cookie text NOT NULL,
 	primary_session int4 DEFAULT 0 NULL,
 	human int4 DEFAULT 0 NULL,
@@ -92,24 +101,20 @@ CREATE TABLE public.challenge_command_history (
 	session_end timestamp NOT NULL,
 	requests text NULL,
 	meta text DEFAULT ''::text NOT NULL,
-	"source" text DEFAULT ''::text NOT NULL,
-	created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
-	updated_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
-	updated_by text NOT NULL,
-	duration float8 DEFAULT 0.0 NOT NULL,
 	score_if float8 DEFAULT 0.0 NOT NULL,
 	score_ae float8 DEFAULT 0.0 NOT NULL,
 	threshold_ae float8 DEFAULT 0.0 NOT NULL,
-	request_count int4 DEFAULT 0 NOT NULL,
 	scraper_name text,
 	prediction_if int4 DEFAULT 0 NULL,
 	prediction_ae int4 DEFAULT 0 NULL,
+
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);
 CREATE INDEX commands_index ON challenge_command_history (session_end, host_name);
 
-
+CREATE INDEX idx_challenge_ip_created
+    ON challenge_command_history (ip_address, created_at);
 
 -- public.challenge_command_history foreign keys
 

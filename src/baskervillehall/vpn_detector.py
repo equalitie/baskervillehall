@@ -3,7 +3,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 from collections import defaultdict
 import psycopg2
+from psycopg2 import OperationalError, DatabaseError
 from sqlalchemy.testing.plugin.plugin_base import logging
+import time
 
 from baskervillehall.asn_database2 import ASNDatabase2
 from baskervillehall.tor_exit_scanner import TorExitScanner
@@ -56,20 +58,40 @@ class VpnDetector:
             self.init_db()
 
     def init_db(self):
-        with psycopg2.connect(**self.db_config) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS vpn (
-                        ip TEXT,
-                        host TEXT,
-                        timestamp TIMESTAMP,
-                        asn INTEGER,
-                        asn_name TEXT,
-                        type TEXT
-                    )
-                """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_vpn_ip_host ON vpn(ip, host)")
-                conn.commit()
+        """Initialize database tables with graceful error handling"""
+        try:
+            with psycopg2.connect(**self.db_config) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS vpn (
+                            ip TEXT,
+                            host TEXT,
+                            timestamp TIMESTAMP,
+                            asn INTEGER,
+                            asn_name TEXT,
+                            type TEXT
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_vpn_ip_host ON vpn(ip, host)")
+                    conn.commit()
+                    if self.logger:
+                        self.logger.info("VPN database tables initialized successfully")
+                        
+        except (OperationalError, DatabaseError) as e:
+            if self.logger:
+                self.logger.warning(f"Database initialization failed - VPN alerts will be stored in memory only: {e}")
+            else:
+                print(f"WARNING: Database unavailable - VPN alerts will be stored in memory only: {e}")
+            # Disable database functionality but continue running
+            self.db_config = None
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Unexpected error during database initialization: {e}")
+            else:
+                print(f"ERROR: Unexpected database error: {e}")
+            # Disable database functionality but continue running
+            self.db_config = None
 
     def get_prefix(self, ip):
         try:
@@ -166,15 +188,42 @@ class VpnDetector:
                 self.save_to_db(alert)
             self.last_inserted[key] = now
 
-    def save_to_db(self, alert):
-        with psycopg2.connect(**self.db_config) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO vpn (ip, host, timestamp, asn, asn_name, type)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (alert['ip'], alert['host'], alert['timestamp'],
-                      alert['asn'], alert['asn_name'], alert['type']))
-                conn.commit()
+    def save_to_db(self, alert, max_retries=3, initial_delay=1):
+        """Save alert to database with retry logic and graceful error handling"""
+        for attempt in range(max_retries):
+            try:
+                with psycopg2.connect(**self.db_config) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO vpn (ip, host, timestamp, asn, asn_name, type)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                        """, (alert['ip'], alert['host'], alert['timestamp'],
+                              alert['asn'], alert['asn_name'], alert['type']))
+                        conn.commit()
+                        return  # Success - exit retry loop
+                        
+            except (OperationalError, DatabaseError) as e:
+                delay = initial_delay * (2 ** attempt)  # Exponential backoff
+                if attempt < max_retries - 1:
+                    if self.logger:
+                        self.logger.warning(f"Database connection failed (attempt {attempt + 1}/{max_retries}), "
+                                          f"retrying in {delay}s: {e}")
+                    time.sleep(delay)
+                else:
+                    # Final attempt failed - log but don't crash the pipeline
+                    if self.logger:
+                        self.logger.error(f"Database connection failed after {max_retries} attempts. "
+                                        f"VPN alert not saved: {alert}. Error: {e}")
+                    else:
+                        print(f"WARNING: Database unavailable, VPN alert not saved: {alert}")
+                    
+            except Exception as e:
+                # Unexpected database error - log and continue
+                if self.logger:
+                    self.logger.error(f"Unexpected database error saving VPN alert: {e}")
+                else:
+                    print(f"ERROR: Unexpected database error: {e}")
+                break  # Don't retry on unexpected errors
 
     def get_alerts(self):
         return pd.DataFrame(self.alerts)

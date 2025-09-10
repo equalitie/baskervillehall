@@ -15,7 +15,7 @@ spec:
       volumes:
         - name: postgres-pv-storage
           persistentVolumeClaim:
-            claimName: postgres-baskervillehall-pvc
+            claimName: postgres-baskervillehall-pvc2
       containers:
         - name: postgres
           image: postgres:11
