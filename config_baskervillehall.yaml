@@ -88,4 +88,6 @@ data:
     ALERT_THRESHOLD_CHALLENGE_RATE: "50"
     BOT_SCORE_THRESHOLD : "0.5"
     CHALLENGE_SCRAPERS: "False"
+    GROUP_ID_TRAIN: "train_pipeline"
+    GROUP_ID_PREDICTOR: "predictor_pipeline5"
 
