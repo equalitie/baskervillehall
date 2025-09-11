@@ -146,7 +146,11 @@ def main():
             'fetch_max_wait_ms': int(os.environ.get('FETCH_MAX_WAIT_MS', 2000)),
             'fetch_min_bytes': int(os.environ.get('FETCH_MIN_BYTES', 1048576)),
             'lag_high_threshold': int(os.environ.get('LAG_HIGH_THRESHOLD', 10000)),
-            'lag_moderate_threshold': int(os.environ.get('LAG_MODERATE_THRESHOLD', 5000))
+            'lag_moderate_threshold': int(os.environ.get('LAG_MODERATE_THRESHOLD', 5000)),
+            'use_rate_limit': os.environ.get('USE_RATE_LIMIT', 'False') == 'True',
+            'rate_limit_hits': int(os.environ.get('RATE_LIMIT_HITS', 20)),
+            'rate_limit_interval': int(os.environ.get('RATE_LIMIT_INTERVAL', 60)),
+            'rate_limit_expiration': int(os.environ.get('RATE_LIMIT_EXPIRATION', 300))
         }
 
         predictor = BaskervillehallPredictor(

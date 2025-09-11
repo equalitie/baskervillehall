@@ -90,4 +90,8 @@ data:
     CHALLENGE_SCRAPERS: "False"
     GROUP_ID_TRAIN: "train_pipeline"
     GROUP_ID_PREDICTOR: "predictor_pipeline5"
+    USE_RATE_LIMIT: "False"
+    RATE_LIMIT_HITS: "20"
+    RATE_LIMIT_INTERVAL: "60"
+    RATE_LIMIT_EXPIRATION: "300"
 

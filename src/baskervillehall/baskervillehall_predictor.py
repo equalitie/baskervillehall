@@ -114,6 +114,10 @@ class BaskervillehallPredictor(object):
         max_requests_in_command=20,
         bot_score_threshold=0.5,
         challenge_scrapers=True,
+        rate_limit_hits=20,
+        rate_limit_interval=60,
+        rate_limit_expiration=300,
+        use_rate_limit=True,
     ):
         super().__init__()
 
@@ -165,6 +169,10 @@ class BaskervillehallPredictor(object):
         self.max_requests_in_command = max_requests_in_command
         self.bot_score_threshold = bot_score_threshold
         self.challenge_scrapers = challenge_scrapers
+        self.rate_limit_hits = rate_limit_hits,
+        self.rate_limit_interval = rate_limit_interval,
+        self.rate_limit_expiration = rate_limit_expiration
+        self.use_rate_limit = use_rate_limit
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(
@@ -230,6 +238,9 @@ class BaskervillehallPredictor(object):
         difficulty,
         scraper_name,
         threshold_ae,
+        rate_limit_hits=0,
+        rate_limit_interval=0,
+        rate_limit_expiration=0
     ):
         d = {
             "Name": command_name,
@@ -265,6 +276,9 @@ class BaskervillehallPredictor(object):
             "session": session,
             "scraper_name": scraper_name,
             "threshold_ae": float(threshold_ae),
+            "rate_limit_hits": rate_limit_hits,
+            "rate_limit_interval": rate_limit_interval,
+            "rate_limit_expiration": rate_limit_expiration,
         }
         return json.dumps(d).encode("utf-8")
 
@@ -451,18 +465,20 @@ class BaskervillehallPredictor(object):
         bot_score = session.get("bot_score", 0.0)
         bot_score_top_factor = session.get("bot_score_top_factor", "")
         if (
-            session.get("passed_challenge")
+            human
+            and session.get("passed_challenge")
             and bot_score > self.bot_score_threshold
             and bot_score_top_factor != "no_payload"
         ):
             if ip in pending_block_ip:
                 return
             pending_block_ip[ip] = True
+            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f"High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}. Blocking."
+                f"{command} High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}. Blocking."
             )
             payload = self.create_command(
-                command_name="block_ip_testing",
+                command_name=command,
                 session=session,
                 meta="high_bot_score",
                 prediction_if=prediction_if,
@@ -476,6 +492,9 @@ class BaskervillehallPredictor(object):
                 difficulty=0,
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration
             )
             producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
             return
@@ -484,11 +503,12 @@ class BaskervillehallPredictor(object):
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
+            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f'Challenging for ip={ip} (bad_bot_challenge), ua={session.get("ua")}, host={host}, end={session.get("end")}.'
+                f'{command} for ip={ip} (bad_bot_challenge), ua={session.get("ua")}, host={host}, end={session.get("end")}.'
             )
             payload = self.create_command(
-                command_name="challenge_ip",
+                command_name=command,
                 session=session,
                 meta="Bad bot rule",
                 prediction_if=prediction_if,
@@ -502,6 +522,9 @@ class BaskervillehallPredictor(object):
                 difficulty=0,
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration
             )
             producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
             return
@@ -516,11 +539,12 @@ class BaskervillehallPredictor(object):
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
+            command_name = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f'Challenging for ip={ip} meta={meta}, ua={session.get("ua")}, host={host}, end={session.get("end")}.'
+                f'{command_name} for ip={ip} meta={meta}, ua={session.get("ua")}, host={host}, end={session.get("end")}.'
             )
             payload = self.create_command(
-                command_name="challenge_ip",
+                command_name=command_name,
                 session=session,
                 meta=meta,
                 prediction_if=prediction_if,
@@ -585,17 +609,20 @@ class BaskervillehallPredictor(object):
                 if ip in pending_challenge_ip:
                     return
                 pending_challenge_ip[ip] = True
-                command = "challenge_ip"
+                command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             else:
                 if ip not in pending_session:
                     pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
                 if session_id in pending_session[ip]:
                     return
                 pending_session[ip][session_id] = True
-                command = "challenge_session"
+                if human:
+                    command = "challenge_session"
+                else:
+                    command = "rate_limit" if self.use_rate_limit else "challenge_ip"
 
             self.logger.info(
-                f"Challenging for ip={ip}, command={command}, session_id={session_id}, host={host}, score_if={score_if}, score_ae={score_ae}."
+                f"{command} for ip={ip}, command={command}, session_id={session_id}, host={host}, score_if={score_if}, score_ae={score_ae}."
             )
             payload = self.create_command(
                 command_name=command,
@@ -612,6 +639,9 @@ class BaskervillehallPredictor(object):
                 difficulty=0,
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration
             )
             producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
             return

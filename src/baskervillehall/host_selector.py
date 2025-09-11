@@ -26,7 +26,19 @@ class HostSelector(object):
     def get_next_hosts(self, consumer, number_of_hosts=5):
         time_start = int(time.time())
         host_batch = []
-        consumer.seek_to_beginning()
+        
+        # Wait for partition assignment before seeking
+        assignment = consumer.assignment()
+        if not assignment:
+            # Poll once to trigger assignment
+            consumer.poll(timeout_ms=1000)
+            assignment = consumer.assignment()
+        
+        if assignment:
+            consumer.seek_to_beginning()
+        else:
+            self.logger.warning("No partitions assigned, skipping seek_to_beginning")
+            return []
         while True:
             raw_messages = consumer.poll(timeout_ms=self.kafka_timeout_ms, max_records=self.kafka_max_size)
             for topic_partition, messages in raw_messages.items():
