@@ -24,10 +24,10 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: NotIn
+                  - key: nodepool
+                    operator: In
                     values:
-                      - workers-node-6a9f33
+                      - postgres
       volumes:
         # Bad ASN volume disabled
         # - name: bad-asn-volume
@@ -61,13 +61,6 @@ spec:
             # - name: vpn-asn-volume
             #   mountPath: /mnt/vpn_asn
         imagePullPolicy: Always
-        resources:
-          requests:
-            memory: "2Gi"
-            cpu: "50m"
-          limits:
-            memory: "20Gi"
-            cpu: "2000m"
         command:
           - python
         args:

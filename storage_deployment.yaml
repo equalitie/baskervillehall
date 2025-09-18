@@ -24,10 +24,10 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: NotIn
+                  - key: nodepool
+                    operator: In
                     values:
-                      - workers-node-6a9f33
+                      - postgres
       restartPolicy: Always
       containers:
       - name: "baskervillehall-storage"

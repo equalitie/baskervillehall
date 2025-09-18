@@ -2,6 +2,7 @@ import argparse
 import logging
 
 import os
+import json
 
 from baskervillehall.alert_challenge_rate import AlertChallengeRate
 from baskervillehall.storage_commands import StorageCommands
@@ -59,6 +60,10 @@ def main():
 
     kafka_connection = {
         'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS')
+    }
+
+    kafka_connection_output = {
+        'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT')
     }
 
     debug_ip = os.environ.get('DEBUG_IP')
@@ -119,6 +124,7 @@ def main():
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'group_id': os.environ.get('GROUP_ID_PREDICTOR', 'predict_pipeline'),
             'topic_commands': os.environ.get('TOPIC_COMMANDS'),
+            'topic_commands_output': os.environ.get('TOPIC_COMMANDS_OUTPUT'),
             'topic_reports': os.environ.get('TOPIC_REPORTS'),
             'model_reload_in_minutes': int(os.environ.get('PREDICTOR_MODEL_RELOAD_IN_MINUTES')),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
@@ -150,12 +156,14 @@ def main():
             'use_rate_limit': os.environ.get('USE_RATE_LIMIT', 'False') == 'True',
             'rate_limit_hits': int(os.environ.get('RATE_LIMIT_HITS', 20)),
             'rate_limit_interval': int(os.environ.get('RATE_LIMIT_INTERVAL', 60)),
-            'rate_limit_expiration': int(os.environ.get('RATE_LIMIT_EXPIRATION', 300))
+            'rate_limit_expiration': int(os.environ.get('RATE_LIMIT_EXPIRATION', 300)),
+            'dnet_partition_map': json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
         }
 
         predictor = BaskervillehallPredictor(
             **params,
             kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
             s3_connection=s3_connection,
             debug_ip=debug_ip,
             logger=logger

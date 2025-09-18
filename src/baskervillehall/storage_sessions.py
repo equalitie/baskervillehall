@@ -42,7 +42,7 @@ class StorageSessions(StorageBase):
         if duration < 1:
             duration = 1
         num_ua = self.get_number_of_useragents(s)
-        ua = s["ua"].replace("\'", "")
+        ua = s.get("ua", "").replace("\'", "")
         asn_name = s.get('asn_name', '').replace("\'", "")
         ciphers = ','.join(s["ciphers"])
 
