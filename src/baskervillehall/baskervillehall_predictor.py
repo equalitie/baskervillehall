@@ -450,7 +450,7 @@ class BaskervillehallPredictor(object):
         producer.send(topic=self.topic_commands,
                       value=json.dumps(payload).encode("utf-8"),
                       key=key)
-
+        return
         if producer_output is not None:
             # do not send heavy fields to the commands
             payload.pop('session')
@@ -702,7 +702,7 @@ class BaskervillehallPredictor(object):
         offences = TTLCache(maxsize=10000, ttl=60 * 60)
         ip_with_sessions = TTLCache(maxsize=100000, ttl=60 * 60)
 
-        self.logger.info("Starting single-threaded predictor (no multiprocessing)...")
+        self.logger.info("Starting predictor...")
 
         consumer = KafkaConsumer(
             **self.kafka_connection,

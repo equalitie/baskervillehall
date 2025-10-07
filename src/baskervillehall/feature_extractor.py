@@ -35,8 +35,10 @@ class FeatureExtractor(object):
             'entropy', 'num_requests', 'duration', 'edge_count', 'static_ratio',
             'ua_count', 'api_ratio', 'num_ciphers', 'num_languages',
             'ua_score', 'hour_bucket', 'odd_hour', 'fingerprints_score',
-            'interval_cv','interval_consistency'
+            'interval_cv', 'interval_consistency',
+            'rate_499'
         ]
+
         self.pca_feature = pca_feature
         if features is None:
             features = supported_features
@@ -84,12 +86,17 @@ class FeatureExtractor(object):
             result.append(rf)
         return sorted(result, key=lambda x: x['ts'])
 
-    def calculate_entropy(self, counts):
-        entropy = 0.0
-        for count in counts.values():
-            px = count / len(counts)
-            entropy += -px * math.log(px, 2)
-        return entropy
+    def calculate_entropy(self, counts: dict[str, int]) -> float:
+        total = sum(counts.values())
+        if total == 0:
+            return 0.0
+        H = 0.0
+        for c in counts.values():
+            if c == 0:
+                continue
+            p = c / total
+            H -= p * math.log(p, 2)
+        return H
 
     def is_api_request(self, request):
         ctype = request.get('type', 'text/html')
@@ -138,6 +145,7 @@ class FeatureExtractor(object):
         intervals = []
         num_4xx = 0
         num_5xx = 0
+        num_499 = 0
         url_map = defaultdict(int)
         edge_map = defaultdict(int)
         ua_map = defaultdict(int)
@@ -163,6 +171,8 @@ class FeatureExtractor(object):
                 num_4xx += 1
             if code // 100 == 5:
                 num_5xx += 1
+            if code == 499:
+                num_499 += 1
             url = r.get('url', '/')
             payloads.append(int(r.get('payload', 0)) + 1.0)
             slash_counts.append(len(url.split('/')) - 1)
@@ -208,6 +218,7 @@ class FeatureExtractor(object):
         features['request_interval_std'] = std_iv if len(intervals) > 1 else 0
         features['response4xx_to_request_ratio'] = num_4xx / hits
         features['response5xx_to_request_ratio'] = num_5xx / hits
+        features['rate_499'] = num_499 / hits
         features['top_page_to_request_ratio'] = max(url_map.values()) / hits
         features['unique_path_rate'] = unique_path / session_duration * 60
         features['unique_path_to_request_ratio'] = unique_path / hits

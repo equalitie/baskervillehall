@@ -1098,7 +1098,7 @@ class BaskervillehallSession(object):
                         t_build = self._t()
                         request = {
                             'ts': ts_event,
-                                'dnet': dnet,
+                            'dnet': dnet,
                             'url': url,
                             'ua': ua,
                             'query': data.get('querystring', ''),
@@ -1253,6 +1253,7 @@ class BaskervillehallSession(object):
                         emergency_flush_session = {
                             'ua': first_session['ua'],
                             'host': first_session['host'],
+                            'dnet': first_session['dnet'],
                             'country': first_session['country'],
                             'continent': first_session['continent'],
                             'datacenter_code': first_session['datacenter_code'],

@@ -140,6 +140,15 @@ def is_bot_user_agent(user_agent):
         r'spider',
         r'crawl',
         r'slurp',
+        r'googlebot', r'bingbot', r'baiduspider', r'yandexbot', r'duckduckbot',
+        r'sogou', r'exabot', r'seznambot', r'petalbot', r'applebot',
+        r'facebookexternalhit', r'facebookcatalog', r'twitterbot', r'linkedinbot',
+        r'pinterestbot', r'whatsapp', r'telegrambot', r'slackbot', r'discordbot',
+        r'ahrefsbot', r'semrushbot', r'mj12bot', r'dotbot', r'uptimerobot',
+        r'structured-data'
+        'curl', 'wget', 'python-requests', 'aiohttp', 'urllib', 'httpie',
+        'go-http-client', 'okhttp', 'java', 'libcurl', 'node-fetch',
+        'axios', 'postmanruntime', 'insomnia', 'restsharp', 'powershell',
 
         # Known legit crawlers
         r'googlebot',
@@ -209,9 +218,16 @@ def ua_score(user_agent: str) -> float:
 
     # Known bot/tool indicators
     bot_keywords = [
-        "curl", "wget", "python", "httpclient", "libwww", "perl", "okhttp",
-        "aiohttp", "http.rb", "scrapy", "go-http-client", "java", "fetchlib",
-        "phantomjs", "mechanize", "httprequest", "axios", "powershell"
+        'bot', 'spider', 'crawl', 'slurp',
+        'googlebot', 'bingbot', 'baiduspider', 'yandexbot', 'duckduckbot',
+        'sogou', 'exabot', 'seznambot', 'petalbot', 'applebot',
+        'facebookexternalhit', 'facebookcatalog', 'twitterbot', 'linkedinbot',
+        'pinterestbot', 'whatsapp', 'telegrambot', 'slackbot', 'discordbot',
+        'ahrefsbot', 'semrushbot', 'mj12bot', 'dotbot', 'uptimerobot',
+        'structured-data'
+        'curl', 'wget', 'python-requests', 'aiohttp', 'urllib', 'httpie',
+        'go-http-client', 'okhttp', 'java', 'libcurl', 'node-fetch',
+        'axios', 'postmanruntime', 'insomnia', 'restsharp', 'powershell',
     ]
     if any(kw in ua for kw in bot_keywords):
         score += 2
