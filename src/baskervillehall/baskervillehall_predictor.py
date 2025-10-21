@@ -121,6 +121,7 @@ class BaskervillehallPredictor(object):
         rate_limit_expiration=300,
         use_rate_limit=True,
         dnet_partition_map = None,
+        print_log_in_command = True,
     ):
         super().__init__()
 
@@ -182,6 +183,7 @@ class BaskervillehallPredictor(object):
         self.topic_commands_output = topic_commands_output
         self.topic_commands_output = topic_commands_output
         self.dnet_partition_map = dnet_partition_map
+        self.print_log_in_command = print_log_in_command
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(
@@ -450,10 +452,11 @@ class BaskervillehallPredictor(object):
         producer.send(topic=self.topic_commands,
                       value=json.dumps(payload).encode("utf-8"),
                       key=key)
-        return
+
         if producer_output is not None:
             # do not send heavy fields to the commands
             payload.pop('session')
+            payload['print_log'] = self.print_log_in_command
 
             payload_encoded = json.dumps(payload).encode("utf-8")
             partition = self.dnet_partition_map.get(dnet, -1)

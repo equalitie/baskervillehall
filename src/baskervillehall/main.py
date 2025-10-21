@@ -158,6 +158,7 @@ def main():
             'rate_limit_interval': int(os.environ.get('RATE_LIMIT_INTERVAL', 60)),
             'rate_limit_expiration': int(os.environ.get('RATE_LIMIT_EXPIRATION', 300)),
             'dnet_partition_map': json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
+            'print_log_in_command': os.environ.get('PRINT_LOG_IN_COMMAND') == 'True',
         }
 
         predictor = BaskervillehallPredictor(

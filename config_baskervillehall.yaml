@@ -93,8 +93,10 @@ data:
     GROUP_ID_SESSION: "session_pipeline2"
     GROUP_ID_TRAIN: "train_pipeline"
     GROUP_ID_PREDICTOR: "predictor_pipeline6"
+    GROUP_ID_STORAGE: "storage"
     USE_RATE_LIMIT: "False"
     RATE_LIMIT_HITS: "20"
     RATE_LIMIT_INTERVAL: "60"
     RATE_LIMIT_EXPIRATION: "300"
     DNET_PARTITION_MAP: '{"dnext1":0,"dnext2":1,"dnext3":2,"dnext4":3,"dnext6":4,"dnext10":5}'
+    PRINT_LOG_IN_COMMAND: "True"

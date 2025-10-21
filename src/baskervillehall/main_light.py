@@ -121,6 +121,7 @@ def main():
             kafka_connection=kafka_connection,
             num_requests=num_requests,
             table=os.environ.get('SQL_TABLE_SESSIONS'),
+            group_id=os.environ.get('GROUP_ID_STORAGE'),
             logger=logger
         )
         t1 = storage_sessions.start()
@@ -131,6 +132,7 @@ def main():
             kafka_connection=kafka_connection,
             num_requests=num_requests,
             table=os.environ.get('SQL_TABLE_COMMANDS'),
+            group_id=os.environ.get('GROUP_ID_STORAGE'),
             logger=logger
         )
         t2 = storage_commands.start()

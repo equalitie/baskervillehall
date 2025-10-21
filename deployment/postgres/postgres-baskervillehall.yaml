@@ -4,6 +4,8 @@ metadata:
   name: postgres-baskervillehall
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: postgres-baskervillehall
@@ -12,10 +14,21 @@ spec:
       labels:
         app: postgres-baskervillehall
     spec:
+      initContainers:
+        - name: prestart-clean-shm
+          image: busybox:1.36
+          command: ["sh","-c","rm -f /dev/shm/PostgreSQL.* || true"]
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: dshm
       volumes:
         - name: postgres-pv-storage
           persistentVolumeClaim:
             claimName: postgres-baskervillehall-pvc2
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
       containers:
         - name: postgres
           image: postgres:11
@@ -33,3 +46,14 @@ spec:
           volumeMounts:
             - mountPath: /var/lib/postgresql/data
               name: postgres-pv-storage
+            - mountPath: /dev/shm
+              name: dshm
+          readinessProbe:
+            exec: { command: ["pg_isready","-U","postgres"] }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready","-U","postgres"] }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
