@@ -76,7 +76,7 @@ def main():
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'session_inactivity': int(os.environ.get('SESSION_INACTIVITY')),
             'garbage_collection_period': int(os.environ.get('GARBAGE_COLLECTION_PERIOD')),
-            'group_id': 'session_pipeline',
+            'group_id': os.environ.get('GROUP_ID_SESSION','session_pipeline)'),
             'min_session_duration': int(os.environ.get('MIN_SESSION_DURATION')),
             'max_session_duration': int(os.environ.get('MAX_SESSION_DURATION')),
             'primary_session_expiration': int(os.environ.get('PRIMARY_SESSION_EXPIRATION', 10)),
@@ -121,6 +121,7 @@ def main():
             kafka_connection=kafka_connection,
             num_requests=num_requests,
             table=os.environ.get('SQL_TABLE_SESSIONS'),
+            group_id=os.environ.get('GROUP_ID_STORAGE'),
             logger=logger
         )
         t1 = storage_sessions.start()
@@ -131,6 +132,7 @@ def main():
             kafka_connection=kafka_connection,
             num_requests=num_requests,
             table=os.environ.get('SQL_TABLE_COMMANDS'),
+            group_id=os.environ.get('GROUP_ID_STORAGE'),
             logger=logger
         )
         t2 = storage_commands.start()

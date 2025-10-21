@@ -76,8 +76,10 @@ class BaskervillehallPredictor(object):
         topic_sessions="BASKERVILLEHALL_SESSIONS",
         group_id='predict_pipeline',
         topic_commands="banjax_command_topic",
+        topic_commands_output="banjax_command_topic",
         topic_reports="banjax_report_topic",
         kafka_connection=None,
+        kafka_connection_output=None,
         s3_connection=None,
         s3_path="/",
         datetime_format="%Y-%m-%d %H:%M:%S",
@@ -114,6 +116,12 @@ class BaskervillehallPredictor(object):
         max_requests_in_command=20,
         bot_score_threshold=0.5,
         challenge_scrapers=True,
+        rate_limit_hits=20,
+        rate_limit_interval=60,
+        rate_limit_expiration=300,
+        use_rate_limit=True,
+        dnet_partition_map = None,
+        print_log_in_command = True,
     ):
         super().__init__()
 
@@ -123,11 +131,14 @@ class BaskervillehallPredictor(object):
             postgres_connection = {}
         if kafka_connection is None:
             kafka_connection = {"bootstrap_servers": "localhost:9092"}
+        if kafka_connection_output is None:
+            kafka_connection_output = {"bootstrap_servers": "localhost:9092"}
 
         self.topic_sessions = topic_sessions
         self.group_id = group_id
         self.topic_commands = topic_commands
         self.kafka_connection = kafka_connection
+        self.kafka_connection_output = kafka_connection_output
         self.s3_connection = s3_connection
         self.postgres_connection = postgres_connection
         self.s3_path = s3_path
@@ -165,6 +176,14 @@ class BaskervillehallPredictor(object):
         self.max_requests_in_command = max_requests_in_command
         self.bot_score_threshold = bot_score_threshold
         self.challenge_scrapers = challenge_scrapers
+        self.rate_limit_hits = rate_limit_hits,
+        self.rate_limit_interval = rate_limit_interval,
+        self.rate_limit_expiration = rate_limit_expiration
+        self.use_rate_limit = use_rate_limit
+        self.topic_commands_output = topic_commands_output
+        self.topic_commands_output = topic_commands_output
+        self.dnet_partition_map = dnet_partition_map
+        self.print_log_in_command = print_log_in_command
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(
@@ -230,6 +249,9 @@ class BaskervillehallPredictor(object):
         difficulty,
         scraper_name,
         threshold_ae,
+        rate_limit_hits=0,
+        rate_limit_interval=0,
+        rate_limit_expiration=0
     ):
         d = {
             "Name": command_name,
@@ -247,7 +269,7 @@ class BaskervillehallPredictor(object):
             "meta": meta,
             "prediction_if": int(prediction_if),
             "prediction_ae": int(prediction_ae),
-            "shapley_feature": shapley_feature_if if len(shapley_feature_if) > 0 else shapley_feature_ae,
+            "shapley_feature": shapley_feature_if,
             "shapley_feature_if": shapley_feature_if,
             "shapley_feature_ae": shapley_feature_ae,
             "start": session["start"],
@@ -265,8 +287,11 @@ class BaskervillehallPredictor(object):
             "session": session,
             "scraper_name": scraper_name,
             "threshold_ae": float(threshold_ae),
+            "rate_limit_hits": rate_limit_hits,
+            "rate_limit_interval": rate_limit_interval,
+            "rate_limit_expiration": rate_limit_expiration,
         }
-        return json.dumps(d).encode("utf-8")
+        return d
 
     def _process_batch_single_thread(self, args_list):
         """Process batch in single thread - simple and reliable"""
@@ -348,6 +373,7 @@ class BaskervillehallPredictor(object):
                 "scraper_name",
                 detect_scraper(session.get("ua")),
             )
+            dnet = session.get("dnet", '-')
 
             api_ratio = 0.0
             if shap_values_if and model_if:
@@ -361,6 +387,7 @@ class BaskervillehallPredictor(object):
             results.append(
                 {
                     "host": host,
+                    "dnet": dnet,
                     "human": human,
                     "session": session_copy,
                     "scraper_name": scraper_name,
@@ -382,7 +409,8 @@ class BaskervillehallPredictor(object):
         self, 
         results_flat, 
         producer, 
-        pending_challenge_ip, 
+        producer_output,
+        pending_challenge_ip,
         pending_interactive_ip, 
         pending_block_ip, 
         host_ip_sessions, 
@@ -395,6 +423,7 @@ class BaskervillehallPredictor(object):
         for r in results_flat:
             self._apply_decision_and_send(
                 producer=producer,
+                producer_output=producer_output,
                 r=r,
                 pending_challenge_ip=pending_challenge_ip,
                 pending_interactive_ip=pending_interactive_ip,
@@ -409,12 +438,45 @@ class BaskervillehallPredictor(object):
         # # Flush Kafka producer periodically for large batches
         # if processed_count % 100 == 0 and self.current_lag > self.lag_moderate_threshold:
         producer.flush()
-        
+        producer_output.flush()
+
         self.logger.debug(f"Processed {processed_count} results")
+
+    def send(self,
+             producer,
+             producer_output,
+             payload,
+             key,
+             dnet):
+        key = bytearray(payload['host'], encoding="utf8")
+        producer.send(topic=self.topic_commands,
+                      value=json.dumps(payload).encode("utf-8"),
+                      key=key)
+
+        if producer_output is not None:
+            # do not send heavy fields to the commands
+            payload.pop('session')
+            payload['print_log'] = self.print_log_in_command
+
+            payload_encoded = json.dumps(payload).encode("utf-8")
+            partition = self.dnet_partition_map.get(dnet, -1)
+            if partition < 0:
+                self.logger.warning(f"Dnet  {dnet} is not found in "
+                                    f"the dnet map {self.dnet_partition_map}.")
+                producer_output.send(topic=self.topic_commands_output,
+                                     value=payload_encoded,
+                                     key=key)
+            else:
+                producer_output.send(topic=self.topic_commands_output,
+                                     value=payload_encoded,
+                                     partition=partition)
+
+
 
     def _apply_decision_and_send(
         self,
         producer: KafkaProducer,
+        producer_output: KafkaProducer,
         r: dict,
         pending_challenge_ip: TTLCache,
         pending_interactive_ip: TTLCache,
@@ -424,6 +486,7 @@ class BaskervillehallPredictor(object):
         pending_session: TTLCache,
     ):
         host = r["host"]
+        dnet = r["dnet"]
         human = r["human"]
         session = r["session"]
         scraper_name = r["scraper_name"]
@@ -451,18 +514,20 @@ class BaskervillehallPredictor(object):
         bot_score = session.get("bot_score", 0.0)
         bot_score_top_factor = session.get("bot_score_top_factor", "")
         if (
-            session.get("passed_challenge")
+            human
+            and session.get("passed_challenge")
             and bot_score > self.bot_score_threshold
             and bot_score_top_factor != "no_payload"
         ):
             if ip in pending_block_ip:
                 return
             pending_block_ip[ip] = True
+            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f"High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}. Blocking."
+                f"{command} High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}. Blocking."
             )
             payload = self.create_command(
-                command_name="block_ip_testing",
+                command_name=command,
                 session=session,
                 meta="high_bot_score",
                 prediction_if=prediction_if,
@@ -476,19 +541,23 @@ class BaskervillehallPredictor(object):
                 difficulty=0,
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration
             )
-            producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
         if self.bad_bot_challenge and session.get("bad_bot") and ip not in ip_with_sessions.keys():
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
+            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f'Challenging for ip={ip} (bad_bot_challenge), ua={session.get("ua")}, host={host}, end={session.get("end")}.'
+                f'{command} for ip={ip} (bad_bot_challenge), ua={session.get("ua")}, host={host}, end={session.get("end")}.'
             )
             payload = self.create_command(
-                command_name="challenge_ip",
+                command_name=command,
                 session=session,
                 meta="Bad bot rule",
                 prediction_if=prediction_if,
@@ -502,8 +571,11 @@ class BaskervillehallPredictor(object):
                 difficulty=0,
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration
             )
-            producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
         # weak_cipher / scraper meta rule
@@ -516,11 +588,12 @@ class BaskervillehallPredictor(object):
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
+            command_name = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f'Challenging for ip={ip} meta={meta}, ua={session.get("ua")}, host={host}, end={session.get("end")}.'
+                f'{command_name} for ip={ip} meta={meta}, ua={session.get("ua")}, host={host}, end={session.get("end")}.'
             )
             payload = self.create_command(
-                command_name="challenge_ip",
+                command_name=command_name,
                 session=session,
                 meta=meta,
                 prediction_if=prediction_if,
@@ -535,7 +608,7 @@ class BaskervillehallPredictor(object):
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
             )
-            producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
         session_id = session["session_id"]
@@ -573,7 +646,7 @@ class BaskervillehallPredictor(object):
                     scraper_name=scraper_name,
                     threshold_ae=threshold_ae,
                 )
-                producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
                 return
 
         if prediction_if or prediction_ae:
@@ -585,17 +658,20 @@ class BaskervillehallPredictor(object):
                 if ip in pending_challenge_ip:
                     return
                 pending_challenge_ip[ip] = True
-                command = "challenge_ip"
+                command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             else:
                 if ip not in pending_session:
                     pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
                 if session_id in pending_session[ip]:
                     return
                 pending_session[ip][session_id] = True
-                command = "challenge_session"
+                if human:
+                    command = "challenge_session"
+                else:
+                    command = "rate_limit" if self.use_rate_limit else "challenge_ip"
 
             self.logger.info(
-                f"Challenging for ip={ip}, command={command}, session_id={session_id}, host={host}, score_if={score_if}, score_ae={score_ae}."
+                f"{command} for ip={ip}, command={command}, session_id={session_id}, host={host}, score_if={score_if}, score_ae={score_ae}."
             )
             payload = self.create_command(
                 command_name=command,
@@ -612,8 +688,11 @@ class BaskervillehallPredictor(object):
                 difficulty=0,
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration
             )
-            producer.send(self.topic_commands, payload, key=bytearray(host, encoding="utf8"))
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
     def run(self):
@@ -626,7 +705,7 @@ class BaskervillehallPredictor(object):
         offences = TTLCache(maxsize=10000, ttl=60 * 60)
         ip_with_sessions = TTLCache(maxsize=100000, ttl=60 * 60)
 
-        self.logger.info("Starting single-threaded predictor (no multiprocessing)...")
+        self.logger.info("Starting predictor...")
 
         consumer = KafkaConsumer(
             **self.kafka_connection,
@@ -653,6 +732,10 @@ class BaskervillehallPredictor(object):
 
         producer = KafkaProducer(
             **self.kafka_connection
+        )
+
+        producer_output = KafkaProducer(
+            **self.kafka_connection_output
         )
 
         self.logger.info(
@@ -729,6 +812,7 @@ class BaskervillehallPredictor(object):
                 self._process_results(
                     results_flat=results_flat,
                     producer=producer,
+                    producer_output=producer_output,
                     pending_challenge_ip=pending_challenge_ip,
                     pending_interactive_ip=pending_interactive_ip,
                     pending_block_ip=pending_block_ip,
@@ -741,5 +825,6 @@ class BaskervillehallPredictor(object):
                     f"batch={len(messages)}, predicting_total = {predicting_total}, whitelisted = {ip_whitelisted}"
                 )
                 producer.flush()
+                producer_output.flush()
 
         self.logger.info("Predictor finished")

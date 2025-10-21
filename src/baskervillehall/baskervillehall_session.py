@@ -141,7 +141,8 @@ class BaskervillehallSession(object):
         lag_high_threshold=10000,
         lag_moderate_threshold=5000,
         lag_emergency_threshold=20000,
-        lag_critical_threshold=15000
+        lag_critical_threshold=15000,
+        enable_emergency_partition_seek=True
     ):
         super().__init__()
         if kafka_connection is None:
@@ -185,6 +186,9 @@ class BaskervillehallSession(object):
         self.messages_dropped = 0
         self.last_emergency_cleanup = datetime.utcnow()
         self.emergency_cleanup_interval = 30  # sec
+        self.last_partition_seek = None
+        self.partition_seek_interval = 60  # sec - minimum time between partition seeks
+        self.enable_emergency_partition_seek = enable_emergency_partition_seek
 
         # --- state ---
         self.producer = None
@@ -433,10 +437,12 @@ class BaskervillehallSession(object):
 
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request, asn, asn_name, num_languages, accept_language, timezone_str):
+                       cipher, ciphers, request, asn, asn_name, num_languages, accept_language, timezone_str,
+                       dnet):
         return {
             'ua': ua,
             'host': host,
+            'dnet': dnet,
             'verified_bot': verified_bot,
             'country': country,
             'continent': continent,
@@ -546,6 +552,7 @@ class BaskervillehallSession(object):
         scraper_name = baskerville_rules.detect_scraper(session['ua'])
         session_final = {
             'host': session['host'],
+            'dnet': session['dnet'],
             'ua': session['ua'],
             'country': session['country'],
             'continent': session['continent'],
@@ -707,6 +714,7 @@ class BaskervillehallSession(object):
                 session = {
                     'ua': meta['ua'],
                     'host': host,
+                    'dnet': reqs[0]['dnet'],
                     'country': meta['country'],
                     'continent': meta['continent'],
                     'datacenter_code': meta['datacenter_code'],
@@ -823,6 +831,7 @@ class BaskervillehallSession(object):
                         summary = {
                             'ua': meta['ua'],
                             'host': host,
+                            'dnet': reqs_sorted[0]['dnet'],
                             'country': meta['country'],
                             'continent': meta['continent'],
                             'datacenter_code': meta['datacenter_code'],
@@ -993,6 +1002,8 @@ class BaskervillehallSession(object):
                         self.skip_expensive_ops = self.current_lag > self.lag_critical_threshold
                         if self.current_lag > self.lag_emergency_threshold:
                             self.emergency_session_cleanup(latest_event_ts_seen if latest_event_ts_seen else datetime.utcnow())
+                            if self.enable_emergency_partition_seek:
+                                self.emergency_partition_seek(consumer)
 
                         t_ext = self._t()
                         ip = data['client_ip']
@@ -1060,6 +1071,7 @@ class BaskervillehallSession(object):
                         ua = data.get('client_ua', data.get('client_user_agent', ''))
                         geoip = data.get('geoip', {})
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
+                        dnet = data.get('dnet', '-')
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
 
                         if len(session_id) < 5:
@@ -1086,6 +1098,7 @@ class BaskervillehallSession(object):
                         t_build = self._t()
                         request = {
                             'ts': ts_event,
+                            'dnet': dnet,
                             'url': url,
                             'ua': ua,
                             'query': data.get('querystring', ''),
@@ -1128,7 +1141,8 @@ class BaskervillehallSession(object):
                                 t_cr = self._t()
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                               verified_bot, ts_event, cipher, ciphers, request,
-                                                              asn, asn_name, num_languages, accept_language, timezone_str)
+                                                              asn, asn_name, num_languages, accept_language, timezone_str,
+                                                              dnet)
                                 self._acc('session_creation', t_cr)
                                 self.ips[ip][session_id] = session
                             else:
@@ -1170,7 +1184,8 @@ class BaskervillehallSession(object):
                             t_cr = self._t()
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,
-                                                          asn, asn_name, num_languages, accept_language, timezone_str)
+                                                          asn, asn_name, num_languages, accept_language, timezone_str,
+                                                          dnet)
                             self._acc('session_creation', t_cr)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
@@ -1238,6 +1253,7 @@ class BaskervillehallSession(object):
                         emergency_flush_session = {
                             'ua': first_session['ua'],
                             'host': first_session['host'],
+                            'dnet': first_session['dnet'],
                             'country': first_session['country'],
                             'continent': first_session['continent'],
                             'datacenter_code': first_session['datacenter_code'],
@@ -1274,3 +1290,64 @@ class BaskervillehallSession(object):
             f'Cleared {cleared_primary_sessions} primary sessions, {cleared_primary_ips} primary IPs | '
             f'Emergency cleanup took {cleanup_duration:.2f}s | RAM: {mem_after:.2f}MB'
         )
+
+    def emergency_partition_seek(self, consumer):
+        if (not self.last_partition_seek or
+                (datetime.utcnow() - self.last_partition_seek).total_seconds() < self.partition_seek_interval):
+            return
+        self.last_partition_seek = datetime.utcnow()
+
+        try:
+            assignment = consumer.assignment()
+            if not assignment:
+                self.logger.warning("EMERGENCY PARTITION SEEK: No assigned partitions")
+                return
+
+            seek_start = time_module.time()
+            partitions_seeked = 0
+            total_messages_skipped = 0
+
+            for partition in assignment:
+                try:
+                    current_position = consumer.position(partition)
+                    end_offset = consumer.end_offsets([partition]).get(partition)
+
+                    if end_offset is None or current_position is None:
+                        continue
+
+                    messages_to_skip = max(0, end_offset - current_position)
+
+                    if messages_to_skip > self.lag_emergency_threshold:
+                        consumer.seek_to_end(partition)
+                        partitions_seeked += 1
+                        total_messages_skipped += messages_to_skip
+                        self.messages_dropped += messages_to_skip
+
+                        self.logger.error(
+                            f"EMERGENCY PARTITION SEEK: Jumped to end of {partition.topic}[{partition.partition}] | "
+                            f"Skipped {messages_to_skip:,} messages | Position: {current_position} -> {end_offset}"
+                        )
+                except Exception as e:
+                    self.logger.error(f"EMERGENCY PARTITION SEEK: Failed to seek partition {partition}: {e}")
+                    continue
+
+            seek_duration = time_module.time() - seek_start
+
+            if partitions_seeked > 0:
+                self.logger.critical(
+                    f"EMERGENCY PARTITION SEEK COMPLETED | "
+                    f"Partitions seeked: {partitions_seeked} | "
+                    f"Total messages skipped: {total_messages_skipped:,} | "
+                    f"Seek operation took: {seek_duration:.2f}s | "
+                    f"Current lag after seek: {self.current_lag}"
+                )
+
+                self.current_lag = 0
+                self.last_lag_check = datetime.utcnow()
+            else:
+                self.logger.info("EMERGENCY PARTITION SEEK: No partitions required seeking")
+
+        except Exception as e:
+            self.logger.error(f"EMERGENCY PARTITION SEEK: Unexpected error: {e}")
+            import traceback
+            self.logger.error(f"EMERGENCY PARTITION SEEK: Traceback: {traceback.format_exc()}")
