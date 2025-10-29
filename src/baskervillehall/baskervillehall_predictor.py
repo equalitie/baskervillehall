@@ -322,7 +322,7 @@ class BaskervillehallPredictor(object):
 
         scores_if = shap_values_if = None
         if model_if:
-            scores_if, shap_values_if = model_if.transform(
+            scores_if, shap_values_if, vectors_if = model_if.transform(
                 sessions, use_shapley=use_shapley
             )
 
@@ -332,7 +332,7 @@ class BaskervillehallPredictor(object):
         if not skip_ae:
             model_ae = self.models_ae.get_model(host, ModelType.HUMAN if human else ModelType.BOT)
             if model_ae:
-                scores_ae, shap_values_ae = model_ae.transform(
+                scores_ae, shap_values_ae, venctors_ae = model_ae.transform(
                     sessions, use_shapley=use_shapley
                 )
                 threshold_ae = float(model_ae.threshold)
@@ -384,6 +384,10 @@ class BaskervillehallPredictor(object):
                         api_ratio = round(sv.data[k], 2)
                         break
 
+            entropy = 1.0
+            if model_if:
+                if 'entropy' in model_if.get_all_features():
+                    entropy = float(vectors_if.iloc[i]['entropy'])
             results.append(
                 {
                     "host": host,
@@ -401,6 +405,7 @@ class BaskervillehallPredictor(object):
                     "shapley_feature_ae": shapley_feature_ae,
                     "threshold_ae": threshold_ae,
                     "api_ratio": api_ratio,
+                    "entropy": entropy,
                 }
             )
         return results
@@ -500,6 +505,7 @@ class BaskervillehallPredictor(object):
         shapley_feature_ae = r["shapley_feature_ae"]
         threshold_ae = r["threshold_ae"]
         api_ratio = r["api_ratio"]
+        entropy = r["entropy"]
 
         ip = session["ip"]
         primary_session = session.get("primary_session", False)
@@ -522,9 +528,9 @@ class BaskervillehallPredictor(object):
             if ip in pending_block_ip:
                 return
             pending_block_ip[ip] = True
-            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+            command = "block_ip_testing"
             self.logger.info(
-                f"{command} High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}. Blocking."
+                f"{command} High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}."
             )
             payload = self.create_command(
                 command_name=command,
@@ -552,9 +558,13 @@ class BaskervillehallPredictor(object):
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
-            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+            if entropy == 0:
+                command = "block_ip"
+            else:
+                command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+
             self.logger.info(
-                f'{command} for ip={ip} (bad_bot_challenge), ua={session.get("ua")}, host={host}, end={session.get("end")}.'
+                f'{command} for ip={ip} (bad_bot), ua={session.get("ua")}, host={host}, end={session.get("end")}.'
             )
             payload = self.create_command(
                 command_name=command,

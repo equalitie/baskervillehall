@@ -204,7 +204,7 @@ class BaskervillehallAutoEncoder(object):
     def transform(self, sessions, use_shapley=True):
         self.model.eval().to('cpu')
         f_vectors = np.array(self.feature_extractor.transform(sessions))
-        df_features = pd.DataFrame(f_vectors)
+        df_features = pd.DataFrame(f_vectors, columns=self.get_all_features())
         X_scaled = self.scaler.transform(df_features.values)
 
         with torch.no_grad():
@@ -223,4 +223,4 @@ class BaskervillehallAutoEncoder(object):
         # shap_values = self.explainer(X_scaled, max_evals=300)
         shap_values = None
 
-        return anomaly_scores, shap_values
+        return anomaly_scores, shap_values, df_features

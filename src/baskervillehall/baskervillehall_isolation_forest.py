@@ -210,9 +210,8 @@ class BaskervillehallIsolationForest(object):
 
     def transform(self, sessions, use_shapley=True):
         vectors = self.feature_extractor.transform(sessions)
-        df = pd.DataFrame(data=vectors, columns=self.get_all_features())
-        scores = self.isolation_forest.decision_function(df)
+        df_features = pd.DataFrame(data=vectors, columns=self.get_all_features())
+        scores = self.isolation_forest.decision_function(df_features)
 
         shap_values = self.get_shapley()(vectors, check_additivity=False) if use_shapley else None
-        # shap_values = None
-        return scores, shap_values
+        return scores, shap_values, df_features
