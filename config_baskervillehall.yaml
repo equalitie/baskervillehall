@@ -90,7 +90,7 @@ data:
     ALERT_THRESHOLD_CHALLENGE_RATE: "50"
     BOT_SCORE_THRESHOLD : "0.5"
     CHALLENGE_SCRAPERS: "False"
-    GROUP_ID_SESSION: "session_pipeline2"
+    GROUP_ID_SESSION: "session_pipeline3"
     GROUP_ID_TRAIN: "train_pipeline"
     GROUP_ID_PREDICTOR: "predictor_pipeline6"
     GROUP_ID_STORAGE: "storage"

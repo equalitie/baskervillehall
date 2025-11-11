@@ -31,6 +31,10 @@ class StorageCommands(StorageBase):
         )
         self.num_requests = num_requests
 
+    def get_delete_query(self, ts):
+        return (f"delete from {self.table} where created_at < \'{ts.strftime(self.datetime_format)}\'"
+                f"and not (human = 1) ;")
+
     def get_sql(self, record):
         command = record
         s = command['session']
