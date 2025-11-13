@@ -138,6 +138,7 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
+            'deflect_config_auth': os.environ.get('DEFLECT_CONFIG_AUTH'),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
             'postgres_connection': None, #postgres_connection,

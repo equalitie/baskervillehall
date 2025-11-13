@@ -103,6 +103,7 @@ class BaskervillehallPredictor(object):
         logger=None,
         whitelist_ip=None,
         deflect_config_url=None,
+        deflect_config_auth=None,
         white_list_refresh_period=5,
         bad_bot_challenge=True,
         debug_ip=None,
@@ -167,6 +168,7 @@ class BaskervillehallPredictor(object):
         self.n_jobs_predict = n_jobs_predict
         self.num_offences_for_difficult_challenge = num_offences_for_difficult_challenge
         self.deflect_config_url = deflect_config_url
+        self.deflect_config_auth = deflect_config_auth
         self.white_list_refresh_period = white_list_refresh_period
         self.bad_bot_challenge = bad_bot_challenge
         self.use_shapley = use_shapley
@@ -193,6 +195,7 @@ class BaskervillehallPredictor(object):
         else:
             self.settings = SettingsDeflectAPI(
                 url=self.deflect_config_url,
+                auth=self.deflect_config_auth,
                 logger=self.logger,
                 refresh_period_in_seconds=60 * self.white_list_refresh_period,
             )

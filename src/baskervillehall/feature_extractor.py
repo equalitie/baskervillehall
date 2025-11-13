@@ -56,6 +56,7 @@ class FeatureExtractor(object):
         if categorical_features is None:
             categorical_features = supported_cats
         self.categorical_features = categorical_features
+        self._tz_cache = {}
         not_sup_cat = set(self.categorical_features) - set(supported_cats)
         if not_sup_cat:
             raise RuntimeError(f'Categorical feature(s) {not_sup_cat} not supported.')
@@ -76,15 +77,27 @@ class FeatureExtractor(object):
 
     def preprocess_requests(self, requests):
         if not requests:
-            return requests
+            return []
         parse_datetime = isinstance(requests[0]['ts'], str)
-        result = []
+        processed = []
         for r in requests:
-            rf = copy.deepcopy(r)
+            ts = r['ts']
             if parse_datetime:
-                rf['ts'] = datetime.strptime(rf['ts'], self.datetime_format)
-            result.append(rf)
-        return sorted(result, key=lambda x: x['ts'])
+                ts = datetime.strptime(ts, self.datetime_format)
+            # только то, что нужно
+            processed.append({
+                'ts': ts,
+                'code': r.get('code', 200),
+                'url': r.get('url', '/'),
+                'payload': r.get('payload', 0),
+                'edge': r.get('edge', ''),
+                'ua': r.get('ua', ''),
+                'query': r.get('query', ''),
+                'type': r.get('type', 'text/html'),
+                'method': r.get('method', 'GET'),
+                'static': r.get('static', False),
+            })
+        return sorted(processed, key=lambda x: x['ts'])
 
     def calculate_entropy(self, counts: dict[str, int]) -> float:
         total = sum(counts.values())
@@ -130,8 +143,11 @@ class FeatureExtractor(object):
         ts = session['start']
         if isinstance(ts, str):
             ts = datetime.strptime(ts, self.datetime_format)
-        tz = session.get('timezone') or 'UTC'
-        user_local = ts.replace(tzinfo=pytz.utc).astimezone(pytz.timezone(tz))
+        tz_name = session.get('timezone') or 'UTC'
+        if tz_name not in self._tz_cache:
+            self._tz_cache[tz_name] = pytz.timezone(tz_name)
+        tz = self._tz_cache[tz_name]
+        user_local = ts.replace(tzinfo=pytz.utc).astimezone(tz)
         return user_local.hour
 
     def is_odd_hour(self, hour):
@@ -260,12 +276,18 @@ class FeatureExtractor(object):
             features['interval_consistency'] = 0.0
         return features
 
-
     def get_vectors(self, sessions):
-        return np.vstack([
-            np.array([self.calculate_features_dict(s).get(f, 0.0) for f in self.features], dtype=float)
-            for s in sessions
-        ])
+        n_sessions = len(sessions)
+        n_features = len(self.features)
+        X = np.zeros((n_sessions, n_features), dtype=float)
+
+        for i, s in enumerate(sessions):
+            feat_dict = self.calculate_features_dict(s)
+            row = X[i]
+            for j, fname in enumerate(self.features):
+                row[j] = feat_dict.get(fname, 0.0)
+
+        return X
 
     def get_all_features(self):
         res = []

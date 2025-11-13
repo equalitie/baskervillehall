@@ -8,11 +8,14 @@ class SettingsDeflectAPI(object):
     def __init__(
             self,
             url,
+            auth,
             whitelist_default=[],
             whitelist_default_block_session=[],
             logger=None,
             refresh_period_in_seconds=300):
-        self.reader = JsonUrlReader(url=url, logger=logger, refresh_period_in_seconds=refresh_period_in_seconds)
+        self.reader = JsonUrlReader(url=url,
+                                    headers={'Authorization': f'Bearer {auth}'},
+                                    logger=logger, refresh_period_in_seconds=refresh_period_in_seconds)
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.domains = []
         self.prefixes = []
