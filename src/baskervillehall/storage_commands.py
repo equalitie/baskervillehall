@@ -57,7 +57,7 @@ class StorageCommands(StorageBase):
             f'datacenter, hits, score_if, score_ae, threshold_ae, bot_score, bot_score_top_factor,' \
             f'shapley_feature_if, shapley_feature_ae,difficulty, shapley_if, shapley_ae,request_count, command_type_name, source, \n'\
             f'meta, hit_rate, num_user_agent,'\
-            f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae)\n'\
+            f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae,baskerville_score)\n'\
             f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{command["session_id"]}\',\n'\
             f'\'{s["ip"]}_{command["session_id"]}\',{int(s["primary_session"])},\n'\
             f'{int(s["human"])},'\
@@ -76,5 +76,6 @@ class StorageCommands(StorageBase):
             f'{hits * 60.0 / duration:.1f}, {num_ua}, '\
             f'{duration:.1f}, \'{command["start"]}\', \'{command["end"]}\',\n'\
             f'\'{requests}\', \'pipeline\',\'{s["scraper_name"]}\','\
-            f'{command["prediction_if"]},{command["prediction_ae"]}'\
+            f'{command["prediction_if"]},{command["prediction_ae"]},'\
+            f'{command["baskerville_score"]}'\
             f');'

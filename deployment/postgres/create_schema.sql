@@ -107,6 +107,7 @@ CREATE TABLE public.challenge_command_history (
 	scraper_name text,
 	prediction_if int4 DEFAULT 0 NULL,
 	prediction_ae int4 DEFAULT 0 NULL,
+	baskerville_score int4 DEFAULT 0 NULL,
 
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );

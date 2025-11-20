@@ -7,6 +7,7 @@ import time as time_module
 from collections import OrderedDict
 from datetime import datetime, time, timezone
 
+from baskervillehall.baskerville_rules import is_human
 from baskervillehall.frequency_analyzer import FrequencyAnalyzer
 from baskervillehall.session_fingerprints import SessionFingerprints
 from baskervillehall.vpn_detector import VpnDetector
@@ -124,6 +125,7 @@ class BaskervillehallSession(object):
         session_inactivity=1,
         garbage_collection_period=2,
         deflect_config_url=None,
+        deflect_config_auth=None,
         whitelist_url_default=None,
         whitelist_ip=None,
         white_list_refresh_period=5,
@@ -162,6 +164,7 @@ class BaskervillehallSession(object):
         self.whitelist_url_default = whitelist_url_default
         self.whitelist_ip = whitelist_ip
         self.deflect_config_url = deflect_config_url
+        self.deflect_config_auth = deflect_config_auth
         self.reset_duration = reset_duration
         self.white_list_refresh_period = white_list_refresh_period
         self.max_primary_sessions_per_ip = max_primary_sessions_per_ip
@@ -438,7 +441,7 @@ class BaskervillehallSession(object):
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
                        cipher, ciphers, request, asn, asn_name, num_languages, accept_language, timezone_str,
-                       dnet):
+                       dnet, cloudflare_score):
         return {
             'ua': ua,
             'host': host,
@@ -463,6 +466,7 @@ class BaskervillehallSession(object):
             'timezone': timezone_str,
             'is_monotonic': True,
             'last_ts': ts,
+            'cloudflare_score': cloudflare_score
         }
 
     def update_session(self, session, request):
@@ -585,7 +589,8 @@ class BaskervillehallSession(object):
             'headless_ua': baskerville_rules.is_headless_ua(session['ua']),
             'timezone': session['timezone'],
             'scraper_name': scraper_name if scraper_name else '',
-            'is_scraper': scraper_name is not None
+            'is_scraper': scraper_name is not None,
+            'cloudflare_score': session['cloudflare_score'],
         }
 
         if self.current_lag > self.lag_critical_threshold:
@@ -610,6 +615,8 @@ class BaskervillehallSession(object):
         session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
         session_final['human'] = baskerville_rules.is_human(session_final)
+        self.logger.info(f"Human check ip={session['ip']}, session_id={session['session_id']}")
+        is_human(session_final, verbose=True, logger=self.logger)
         session_final['bad_bot'] = baskerville_rules.is_bad_bot(session_final)
 
         if session_final['human']:
@@ -895,6 +902,7 @@ class BaskervillehallSession(object):
     def run(self):
         settings = SettingsDeflectAPI(
             url=self.deflect_config_url,
+            auth=self.deflect_config_auth,
             whitelist_default=self.whitelist_url_default,
             logger=self.logger,
             refresh_period_in_seconds=60 * self.white_list_refresh_period
@@ -1085,7 +1093,7 @@ class BaskervillehallSession(object):
                         deflect_password = False
                         bot_score = data.get('banjax_bot_score', -1.0)
                         bot_score_top_factor = data.get('banjax_bot_score_top_factor', '')
-
+                        cloudflare_score = ''
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
                             if banjax_decision == 'ShaChallengePassed':
@@ -1093,6 +1101,8 @@ class BaskervillehallSession(object):
                             if banjax_decision in ['PasswordChallengePassed', 'PasswordProtectedPriorityPass', 'PasswordChallengeRoamingPassed']:
                                 deflect_password = True
                         elif 'cloudflareProperties' in data:
+                            self.logger.info(data)
+                            cloudflare_score = data['cloudflareProperties']['botManagement']['score']
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         t_build = self._t()
@@ -1117,6 +1127,8 @@ class BaskervillehallSession(object):
                         ciphers = data.get('ssl_ciphers', '')
                         ciphers = ciphers.split(':') if ciphers else []
                         accept_language = data.get('accept_language', '')
+                        if len(accept_language) == 0:
+                            accept_language = data.get('language', 'en-US')
                         num_languages = baskerville_rules.count_accepted_languages(accept_language)
                         self._acc('msg_build_request', t_build)
 
@@ -1142,7 +1154,7 @@ class BaskervillehallSession(object):
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                               verified_bot, ts_event, cipher, ciphers, request,
                                                               asn, asn_name, num_languages, accept_language, timezone_str,
-                                                              dnet)
+                                                              dnet, cloudflare_score)
                                 self._acc('session_creation', t_cr)
                                 self.ips[ip][session_id] = session
                             else:
@@ -1185,7 +1197,7 @@ class BaskervillehallSession(object):
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,
                                                           asn, asn_name, num_languages, accept_language, timezone_str,
-                                                          dnet)
+                                                          dnet, cloudflare_score)
                             self._acc('session_creation', t_cr)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}

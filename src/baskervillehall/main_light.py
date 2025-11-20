@@ -84,6 +84,7 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT', "%Y-%m-%d %H:%M:%S"),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS', 5)),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
+            'deflect_config_auth': os.environ.get('DEFLECT_CONFIG_AUTH'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(','),
             'postgres_connection': postgres_connection,
             'lag_high_threshold': int(os.environ.get('LAG_HIGH_THRESHOLD', 3000)),

@@ -244,35 +244,138 @@ def ua_score(user_agent: str) -> float:
     return min(score / max_score, 1.0)
 
 
-def is_human(session):
+def is_human(session, verbose: bool = False, logger=None):
+    """
+    Rule-based human detection with optional debugging.
+
+    Parameters:
+        session (dict): Parsed session object.
+        verbose (bool): If True, logs detailed rule evaluation.
+        logger: Optional logger. If None, messages are printed.
+
+    Returns:
+        bool: True if the session is considered human, False otherwise.
+    """
+
+    def dbg(message: str):
+        """Emit debug output if verbose mode is enabled."""
+        if verbose:
+            if logger:
+                logger.info(message)
+            else:
+                print(message)
+
+    # ----------------------------------------------------------------------
+    # 1. Language detection (critical rule)
+    # ----------------------------------------------------------------------
+    # Start with existing field if available.
+    num_languages = session.get("num_languages", 0)
+
+    # If num_languages is zero, attempt to recover Accept-Language
+    # from multiple possible locations inside the session object.
+    if num_languages == 0:
+        raw_accept_lang = (
+            session.get("accept_language") or
+            session.get("Accept-Language")
+        )
+
+        if not raw_accept_lang:
+            headers = session.get("headers", {})
+            headers_lower = {k.lower(): v for k, v in headers.items()}
+            raw_accept_lang = headers_lower.get("accept-language")
+
+        if not raw_accept_lang and session.get("requests"):
+            req0 = session["requests"][0]
+
+            raw_accept_lang = (
+                req0.get("accept_language") or
+                req0.get("Accept-Language")
+            )
+
+            if not raw_accept_lang:
+                h = req0.get("headers", {})
+                h_lower = {k.lower(): v for k, v in h.items()}
+                raw_accept_lang = h_lower.get("accept-language")
+
+        # If we found Accept-Language, compute num_languages
+        if raw_accept_lang:
+            num_languages = count_accepted_languages(raw_accept_lang)
+            dbg(f"[is_human] Recomputed num_languages={num_languages} from Accept-Language={raw_accept_lang!r}")
+        else:
+            dbg("[is_human] No Accept-Language found; num_languages remains 0")
+
+    if num_languages == 0:
+        dbg("[HUMAN FALSE] num_languages=0")
+        return False
+
+    # ----------------------------------------------------------------------
+    # 2. UA score
+    # ----------------------------------------------------------------------
     if session['ua_score'] > 0.6:
+        dbg(f"[HUMAN FALSE] ua_score={session['ua_score']} > 0.6")
         return False
-    # if session['datacenter_asn'] and not session['vpn']:
-    #     return False
+
+    # ----------------------------------------------------------------------
+    # 3. Verified bot
+    # ----------------------------------------------------------------------
     if session['verified_bot']:
+        dbg("[HUMAN FALSE] verified_bot=True")
         return False
+
+    # ----------------------------------------------------------------------
+    # 4. Primary session (bot behavior)
+    # ----------------------------------------------------------------------
     if session['primary_session']:
+        dbg("[HUMAN FALSE] primary_session=True")
         return False
+
+    # ----------------------------------------------------------------------
+    # 5. Scraper detection
+    # ----------------------------------------------------------------------
     if session.get('is_scraper', is_scraper(session['ua'])):
+        dbg("[HUMAN FALSE] scraper detected")
         return False
-    if session['num_languages'] == 0:
-        return False
+
+    # ----------------------------------------------------------------------
+    # 6. Headless browser
+    # ----------------------------------------------------------------------
     if session.get('headless_ua', False):
+        dbg("[HUMAN FALSE] headless_ua=True")
         return False
+
+    # ----------------------------------------------------------------------
+    # 7. User-Agent based rules
+    # ----------------------------------------------------------------------
     if session['bot_ua']:
+        dbg("[HUMAN FALSE] bot_ua=True")
         return False
+
     if session['short_ua']:
+        dbg("[HUMAN FALSE] short_ua=True")
         return False
+
     if session['ai_bot_ua']:
+        dbg("[HUMAN FALSE] ai_bot_ua=True")
         return False
-    # if session['asset_only']:
-    #     return False
-    # if not session['valid_browser_ciphers']:
-    #     return False
+
+    # ----------------------------------------------------------------------
+    # 8. Weak TLS cipher
+    # ----------------------------------------------------------------------
     if session['weak_cipher']:
+        dbg("[HUMAN FALSE] weak_cipher=True")
         return False
+
+    # ----------------------------------------------------------------------
+    # 9. AI crawler UA patterns
+    # ----------------------------------------------------------------------
     if is_ai_bot_user_agent(session['ua']):
+        dbg("[HUMAN FALSE] AI crawler UA pattern detected")
         return False
+
+    # ----------------------------------------------------------------------
+    # Passed all rules
+    # ----------------------------------------------------------------------
+    dbg(f"[HUMAN TRUE] Passed all checks (num_languages={num_languages})")
     return True
 
 

@@ -63,7 +63,7 @@ def main():
     }
 
     kafka_connection_output = {
-        'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT')
+        'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT', '')
     }
 
     debug_ip = os.environ.get('DEBUG_IP')
@@ -160,6 +160,8 @@ def main():
             'rate_limit_expiration': int(os.environ.get('RATE_LIMIT_EXPIRATION', 300)),
             'dnet_partition_map': json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
             'print_log_in_command': os.environ.get('PRINT_LOG_IN_COMMAND') == 'True',
+            'use_baskerville_score': os.environ.get('USE_BASKERVILLE_SCORE', 'False') == 'True',
+            'verbose_classifier': os.environ.get('VERBOSE_CLASSIFIER', 'False') == 'True',
         }
 
         predictor = BaskervillehallPredictor(

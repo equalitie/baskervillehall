@@ -22,7 +22,7 @@ from baskervillehall.baskervillehall_isolation_forest import (
     BaskervillehallIsolationForest,
     ModelType,
 )
-from baskervillehall.baskerville_rules import detect_scraper
+from baskervillehall.baskerville_rules import detect_scraper, is_human
 from baskervillehall.model_storage import ModelStorage
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.settings_postgres import SettingsPostgres
@@ -123,6 +123,8 @@ class BaskervillehallPredictor(object):
         use_rate_limit=True,
         dnet_partition_map = None,
         print_log_in_command = True,
+        use_baskerville_score=True,
+        verbose_classifier=False,
     ):
         super().__init__()
 
@@ -186,6 +188,8 @@ class BaskervillehallPredictor(object):
         self.topic_commands_output = topic_commands_output
         self.dnet_partition_map = dnet_partition_map
         self.print_log_in_command = print_log_in_command
+        self.use_baskerville_score = use_baskerville_score
+        self.verbose_classifier = verbose_classifier
 
         if deflect_config_url is None or len(deflect_config_url) == 0:
             self.settings = SettingsPostgres(
@@ -210,6 +214,11 @@ class BaskervillehallPredictor(object):
         self.models_ae = ModelStorage(
             s3_connection,
             f"{s3_path}_autoencoder3",
+            reload_in_minutes=model_reload_in_minutes,
+        )
+        self.models_classifier = ModelStorage(
+            s3_connection,
+            f"{s3_path}_classifier",
             reload_in_minutes=model_reload_in_minutes,
         )
 
@@ -254,7 +263,8 @@ class BaskervillehallPredictor(object):
         threshold_ae,
         rate_limit_hits=0,
         rate_limit_interval=0,
-        rate_limit_expiration=0
+        rate_limit_expiration=0,
+        baskerville_score=0
     ):
         d = {
             "Name": command_name,
@@ -293,6 +303,7 @@ class BaskervillehallPredictor(object):
             "rate_limit_hits": rate_limit_hits,
             "rate_limit_interval": rate_limit_interval,
             "rate_limit_expiration": rate_limit_expiration,
+            "baskerville_score": int(baskerville_score),
         }
         return d
 
@@ -310,13 +321,19 @@ class BaskervillehallPredictor(object):
             try:
                 batch_results = self._process_sessions_batch(host, human, sessions, skip_ae)
                 results_flat.extend(batch_results)
-            except Exception as e:
-                self.logger.error(f"Failed to process batch for {host}, human={human}: {e}")
+            except Exception:
+                self.logger.exception(f"[{host}] Failed to process batch, human={human}")
                 continue
-        
+
         return results_flat
     
     def _process_sessions_batch(self, host: str, human: bool, sessions: List[Dict], skip_ae: bool):
+        for s in sessions:
+            if "host" not in s or not s["host"]:
+                self.logger.info(f"sesison wihouth host {s['host']} not found in session {s['session_id']}")
+                self.logger.info(s)
+                s["host"] = host
+
         """Process a batch of sessions for a specific host/human combination"""
         model_if = self.models_if.get_model(host, ModelType.HUMAN if human else ModelType.BOT)
         
@@ -335,10 +352,36 @@ class BaskervillehallPredictor(object):
         if not skip_ae:
             model_ae = self.models_ae.get_model(host, ModelType.HUMAN if human else ModelType.BOT)
             if model_ae:
-                scores_ae, shap_values_ae, venctors_ae = model_ae.transform(
+                scores_ae, shap_values_ae, _ = model_ae.transform(
                     sessions, use_shapley=use_shapley
                 )
                 threshold_ae = float(model_ae.threshold)
+
+        scores_classifier = shap_values_classifier = None
+
+        if human and self.use_baskerville_score:
+            model_classifier = self.models_classifier.get_model(
+                'global', ModelType.GENERIC)
+            if model_classifier:
+                self.logger.info(f"Running Baskerville classifer for {host}, human={human}")
+                predictions_classifier, scores_classifier, shap_values_classifier, _ = (
+                    model_classifier.transform(
+                        sessions, use_shapley=True
+                    ))
+
+                if self.verbose_classifier:
+                    for i in range(len(scores_classifier)):
+                        shapley_feature_classfier, shapley_classifier = _safe_shapley_report(
+                            shap_values_classifier[i] if shap_values_classifier is not None else None,
+                            model_classifier.get_all_features()
+                        )
+                        self.logger.info(shap_values_classifier[i] )
+                        self.logger.info(f"Baskerville score {scores_classifier[i]}, "
+                                         f"Cloudflare score {sessions[i].get('cloudflare_score', 0)}, "
+                                         f"ip = {sessions[i]['ip']} "
+                                         f"bot = {predictions_classifier[i]}")
+                        self.logger.info(f"Shapley feature {shapley_feature_classfier}, ")
+                        self.logger.info(shapley_classifier)
 
         results = []
         for i, session in enumerate(sessions):
@@ -391,6 +434,14 @@ class BaskervillehallPredictor(object):
             if model_if:
                 if 'entropy' in model_if.get_all_features():
                     entropy = float(vectors_if.iloc[i]['entropy'])
+
+            if human:
+                if scores_classifier is not None:
+                    baskerville_score = scores_classifier[i]
+                else:
+                    baskerville_score = 99
+            else:
+                baskerville_score = 1
             results.append(
                 {
                     "host": host,
@@ -409,6 +460,7 @@ class BaskervillehallPredictor(object):
                     "threshold_ae": threshold_ae,
                     "api_ratio": api_ratio,
                     "entropy": entropy,
+                    "baskerville_score": baskerville_score,
                 }
             )
         return results
@@ -464,6 +516,7 @@ class BaskervillehallPredictor(object):
         if producer_output is not None:
             # do not send heavy fields to the commands
             payload.pop('session')
+            payload.pop('baskerville_score')
             payload['print_log'] = self.print_log_in_command
 
             payload_encoded = json.dumps(payload).encode("utf-8")
@@ -509,6 +562,8 @@ class BaskervillehallPredictor(object):
         threshold_ae = r["threshold_ae"]
         api_ratio = r["api_ratio"]
         entropy = r["entropy"]
+        baskerville_score = r["baskerville_score"]
+        session_id = session["session_id"]
 
         ip = session["ip"]
         primary_session = session.get("primary_session", False)
@@ -518,6 +573,43 @@ class BaskervillehallPredictor(object):
 
         if not session.get("primary_session", False):
             ip_with_sessions[session["ip"]] = True
+
+        # High baskerville_score
+        if human and baskerville_score < 30 and baskerville_score > 0:
+            if ip not in pending_session:
+                pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+            if session_id in pending_session[ip]:
+                return
+            pending_session[ip][session_id] = True
+            command = "challenge_session"
+
+            self.logger.info(
+                f"Classifier {command} for ip={ip}, human={human}, command={command}, session_id={session_id}, host={host}, "
+                f"baskerville_score={baskerville_score}."
+            )
+            payload = self.create_command(
+                command_name=command,
+                session=session,
+                meta="",
+                prediction_if=prediction_if,
+                score_if=score_if,
+                shapley_if=shapley_if,
+                shapley_feature_if=shapley_feature_if,
+                prediction_ae=prediction_ae,
+                score_ae=score_ae,
+                shapley_ae=shapley_ae,
+                shapley_feature_ae=shapley_feature_ae,
+                difficulty=0,
+                scraper_name=scraper_name,
+                threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration,
+                baskerville_score=baskerville_score,
+            )
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
 
         # High bot score -> block
         bot_score = session.get("bot_score", 0.0)
@@ -531,7 +623,7 @@ class BaskervillehallPredictor(object):
             if ip in pending_block_ip:
                 return
             pending_block_ip[ip] = True
-            command = "block_ip_testing"
+            command = "block_ip"
             self.logger.info(
                 f"{command} High bot score = {bot_score}, human={human}, top_factor = {bot_score_top_factor} for ip {ip}, host {host}."
             )
@@ -603,7 +695,7 @@ class BaskervillehallPredictor(object):
             pending_challenge_ip[ip] = True
             command_name = "rate_limit" if self.use_rate_limit else "challenge_ip"
             self.logger.info(
-                f'{command_name} for ip={ip} meta={meta}, ua={session.get("ua")}, host={host}, end={session.get("end")}.'
+                f'{command_name} for ip={ip} human={human}, meta={meta}, ua={session.get("ua")}, host={host}, end={session.get("end")}.'
             )
             payload = self.create_command(
                 command_name=command_name,
@@ -624,7 +716,6 @@ class BaskervillehallPredictor(object):
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
-        session_id = session["session_id"]
         if not primary_session:
             if host not in host_ip_sessions:
                 host_ip_sessions[host] = TTLCache(
@@ -641,7 +732,7 @@ class BaskervillehallPredictor(object):
                     return
                 pending_challenge_ip[ip] = True
                 self.logger.info(
-                    f"Too many sessions ({len(host_ip_sessions[host][ip])}) for ip {ip}, host {host} -> challenge"
+                    f"Too many sessions ({len(host_ip_sessions[host][ip])}) for ip {ip}, human={human}, host {host} -> challenge"
                 )
                 payload = self.create_command(
                     command_name="challenge_ip",
@@ -684,7 +775,7 @@ class BaskervillehallPredictor(object):
                     command = "rate_limit" if self.use_rate_limit else "challenge_ip"
 
             self.logger.info(
-                f"{command} for ip={ip}, command={command}, session_id={session_id}, host={host}, score_if={score_if}, score_ae={score_ae}."
+                f"{command} for ip={ip}, human={human}, command={command}, session_id={session_id}, host={host}, score_if={score_if}, score_ae={score_ae}."
             )
             payload = self.create_command(
                 command_name=command,
