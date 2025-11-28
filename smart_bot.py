@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+"""
+WARNING: This script uses Python requests library which is EASILY DETECTED by Cloudflare
+as a bot (bot score = 1) because:
+  - No JavaScript execution
+  - Wrong TLS fingerprint (JA3 hash)
+  - HTTP/1.1 instead of HTTP/2
+  - Missing Sec-CH-* headers
+  - No WebGL/Canvas fingerprints
+
+For bypassing Cloudflare bot detection, use:
+  - smart_bot_selenium.py (recommended for beginners)
+  - smart_bot_playwright.py (recommended for advanced usage)
+
+See SMART_BOT_README.md for details.
+"""
 import argparse
 import time
 from pprint import pprint

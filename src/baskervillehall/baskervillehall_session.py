@@ -466,7 +466,8 @@ class BaskervillehallSession(object):
             'timezone': timezone_str,
             'is_monotonic': True,
             'last_ts': ts,
-            'cloudflare_score': cloudflare_score
+            'cloudflare_score': cloudflare_score,
+            'http_protocol': request.get('http_protocol', '') if request else ''
         }
 
     def update_session(self, session, request):
@@ -591,6 +592,7 @@ class BaskervillehallSession(object):
             'scraper_name': scraper_name if scraper_name else '',
             'is_scraper': scraper_name is not None,
             'cloudflare_score': session['cloudflare_score'],
+            'http_protocol': session.get('http_protocol', ''),
         }
 
         if self.current_lag > self.lag_critical_threshold:
@@ -741,6 +743,8 @@ class BaskervillehallSession(object):
                     'accept_language': meta['accept_language'],
                     'timezone': meta['timezone'],
                     'is_monotonic': True,
+                    'cloudflare_score': meta.get('cloudflare_score', ''),
+                    'http_protocol': meta.get('http_protocol', ''),
                 }
                 t_send = self._t()
                 self.send_session(session)
@@ -858,6 +862,8 @@ class BaskervillehallSession(object):
                             'accept_language': meta['accept_language'],
                             'timezone': meta['timezone'],
                             'is_monotonic': True,
+                            'cloudflare_score': meta.get('cloudflare_score', ''),
+                            'http_protocol': meta.get('http_protocol', ''),
                         }
                         self.send_session(summary)
 
@@ -1121,7 +1127,8 @@ class BaskervillehallSession(object):
                             'passed_challenge': passed_challenge,
                             'bot_score': bot_score,
                             'bot_score_top_factor': bot_score_top_factor,
-                            'deflect_password': deflect_password
+                            'deflect_password': deflect_password,
+                            'http_protocol': data.get('http_request_version', '')
                         }
                         cipher = data.get('ssl_cipher', '')
                         ciphers = data.get('ssl_ciphers', '')
@@ -1285,6 +1292,8 @@ class BaskervillehallSession(object):
                             'accept_language': first_session['accept_language'],
                             'timezone': first_session['timezone'],
                             'is_monotonic': True,
+                            'cloudflare_score': first_session.get('cloudflare_score', ''),
+                            'http_protocol': first_session.get('http_protocol', ''),
                         }
                         self.send_session(emergency_flush_session)
                 cleared_primary_sessions += len(sessions)

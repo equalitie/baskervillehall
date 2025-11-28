@@ -115,8 +115,7 @@ class FeatureExtractor(object):
         ctype = request.get('type', 'text/html')
         api_ctypes = {
             'application/json', 'application/xml', 'application/graphql',
-            'application/ld+json', 'multipart/form-data',
-            'application/x-www-form-urlencoded'
+            'application/ld+json'
         }
         if ctype in api_ctypes:
             return True

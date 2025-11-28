@@ -1,0 +1,27 @@
+# Ultra-simple approach - just copy the code without setup.py
+FROM python:3.11-slim
+
+# Install only system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /usr/bin/baskervillehall
+
+# Copy requirements and install packages
+COPY requirements.session-minimal.txt ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.session-minimal.txt
+
+# Copy only the source code (skip setup.py completely)
+COPY ./src ./src
+
+# Add src to Python path
+ENV PYTHONPATH="/usr/bin/baskervillehall/src"
+
+# Set user
+USER 1000
+
+CMD ["python", "/usr/bin/baskervillehall/src/baskervillehall/main_session.py", "session"]

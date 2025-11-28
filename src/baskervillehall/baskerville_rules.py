@@ -309,42 +309,69 @@ def is_human(session, verbose: bool = False, logger=None):
         return False
 
     # ----------------------------------------------------------------------
-    # 2. UA score
+    # 2. HTTP Protocol version check (NEW!)
+    # ----------------------------------------------------------------------
+    http_protocol = session.get('http_protocol', '')
+    if http_protocol:
+        # HTTP/1.0 is very suspicious - almost certainly a bot
+        if http_protocol == 'HTTP/1.0':
+            dbg(f"[HUMAN FALSE] http_protocol=HTTP/1.0 (very suspicious)")
+            return False
+        # HTTP/1.1 with other bot indicators is suspicious
+        # Modern browsers use HTTP/2 or HTTP/3
+        elif http_protocol == 'HTTP/1.1':
+            # Combine with UA score - if UA is also suspicious, likely a bot
+            ua_score_val = session.get('ua_score', 0)
+            if ua_score_val > 0.3:
+                dbg(f"[HUMAN FALSE] http_protocol=HTTP/1.1 + ua_score={ua_score_val:.2f} (bot pattern)")
+                return False
+            # Also check for known scrapers
+            if session.get('is_scraper', False):
+                dbg(f"[HUMAN FALSE] http_protocol=HTTP/1.1 + is_scraper=True")
+                return False
+            # Log as warning but don't block yet (some legitimate old clients exist)
+            dbg(f"[WARNING] http_protocol=HTTP/1.1 (suspicious for modern browser)")
+    else:
+        # No http_protocol data - log but don't block (backwards compatibility)
+        dbg("[INFO] http_protocol not available in session data")
+
+    # ----------------------------------------------------------------------
+    # 3. UA score
     # ----------------------------------------------------------------------
     if session['ua_score'] > 0.6:
         dbg(f"[HUMAN FALSE] ua_score={session['ua_score']} > 0.6")
         return False
 
     # ----------------------------------------------------------------------
-    # 3. Verified bot
+    # 4. Verified bot
     # ----------------------------------------------------------------------
     if session['verified_bot']:
         dbg("[HUMAN FALSE] verified_bot=True")
         return False
 
     # ----------------------------------------------------------------------
-    # 4. Primary session (bot behavior)
+    # 5. Primary session (bot behavior)
     # ----------------------------------------------------------------------
     if session['primary_session']:
         dbg("[HUMAN FALSE] primary_session=True")
         return False
 
     # ----------------------------------------------------------------------
-    # 5. Scraper detection
+    # 6. Scraper detection
     # ----------------------------------------------------------------------
     if session.get('is_scraper', is_scraper(session['ua'])):
         dbg("[HUMAN FALSE] scraper detected")
         return False
 
     # ----------------------------------------------------------------------
-    # 6. Headless browser
+    # 7. Headless browser
     # ----------------------------------------------------------------------
     if session.get('headless_ua', False):
         dbg("[HUMAN FALSE] headless_ua=True")
         return False
 
     # ----------------------------------------------------------------------
-    # 7. User-Agent based rules
+    # 8. User-Agent based rules
     # ----------------------------------------------------------------------
     if session['bot_ua']:
         dbg("[HUMAN FALSE] bot_ua=True")
@@ -359,14 +386,14 @@ def is_human(session, verbose: bool = False, logger=None):
         return False
 
     # ----------------------------------------------------------------------
-    # 8. Weak TLS cipher
+    # 9. Weak TLS cipher
     # ----------------------------------------------------------------------
     if session['weak_cipher']:
         dbg("[HUMAN FALSE] weak_cipher=True")
         return False
 
     # ----------------------------------------------------------------------
-    # 9. AI crawler UA patterns
+    # 10. AI crawler UA patterns
     # ----------------------------------------------------------------------
     if is_ai_bot_user_agent(session['ua']):
         dbg("[HUMAN FALSE] AI crawler UA pattern detected")
