@@ -78,29 +78,94 @@ def is_weak_cipher(cipher):
     return False
 
 
+def normalize_cipher(cipher):
+    """
+    Normalize cipher to cipher family for better generalization.
+
+    Groups specific ciphers into families to avoid frequency encoding issues
+    with rare but valid ciphers (e.g., HTTP/3 QUIC ciphers).
+
+    Strategy: Group by encryption strength and algorithm, not by TLS version.
+    This allows HTTP/3 AEAD ciphers to be grouped with TLS 1.3 equivalents.
+
+    Args:
+        cipher (str): Cipher suite name
+
+    Returns:
+        str: Normalized cipher family name
+    """
+    if not cipher:
+        return 'none'
+
+    cipher = str(cipher).upper()
+
+    # GREASE values from Chrome (random hex values for extensibility)
+    if cipher.startswith('0X'):
+        return 'grease'
+
+    # Weak/deprecated ciphers (check first!)
+    if any(weak in cipher for weak in ['3DES', 'RC4', 'MD5', 'DES']):
+        return 'weak'
+
+    # Modern AES128-GCM (TLS 1.3 + HTTP/3 QUIC)
+    # Group AEAD-AES128-GCM-* with TLS_AES_128_GCM_* and ECDHE-*-AES128-GCM-*
+    if ('AES128' in cipher or 'AES_128' in cipher or 'AES-128' in cipher) and 'GCM' in cipher:
+        return 'modern_aes128_gcm'
+
+    # Modern AES256-GCM (TLS 1.3 + HTTP/3 QUIC)
+    if ('AES256' in cipher or 'AES_256' in cipher or 'AES-256' in cipher) and 'GCM' in cipher:
+        return 'modern_aes256_gcm'
+
+    # ChaCha20 (TLS 1.3 + HTTP/3 QUIC + ECDHE)
+    if 'CHACHA20' in cipher:
+        return 'modern_chacha20'
+
+    # Legacy ECDHE with CBC (older but still valid)
+    if 'ECDHE' in cipher and 'CBC' in cipher:
+        return 'ecdhe_cbc'
+
+    # Legacy RSA (no PFS, weaker)
+    if 'RSA' in cipher and 'ECDHE' not in cipher:
+        return 'rsa_legacy'
+    if 'AES' in cipher and 'ECDHE' not in cipher and not cipher.startswith('TLS_') and not cipher.startswith('AEAD-'):
+        return 'rsa_legacy'
+
+    return 'other'
+
+
 def is_valid_browser_ciphers(ciphers):
     """
     Check whether the provided cipher list resembles that of a real browser.
     This function uses modern TLS 1.3 ciphers and widely used TLS 1.2 ciphers
     observed in Chrome, Firefox, and Safari.
 
+    Note: Cloudflare may provide either a full cipher list from Client Hello,
+    or just the negotiated cipher. We handle both cases.
+
     Args:
-        ciphers (list of str): List of cipher suite names.
+        ciphers (list of str or str): List of cipher suite names, or a single cipher string.
 
     Returns:
-        bool: True if the cipher list looks like it comes from a browser.
+        bool: True if the cipher(s) look like they come from a browser.
     """
+    if not ciphers:
+        return False
+
+    # Handle single cipher string (from Cloudflare tlsCipher field)
+    if isinstance(ciphers, str):
+        ciphers = [ciphers]
+
     if not isinstance(ciphers, (list, tuple)):
         return False
 
-    if len(ciphers) < 5:
-        return False  # Too few ciphers is a strong bot indicator
-
-    # Common modern TLS 1.3 ciphers
+    # Common modern TLS 1.3 ciphers (including Cloudflare format)
     tls13_ciphers = {
         'TLS_AES_128_GCM_SHA256',
         'TLS_AES_256_GCM_SHA384',
-        'TLS_CHACHA20_POLY1305_SHA256'
+        'TLS_CHACHA20_POLY1305_SHA256',
+        'AEAD-AES128-GCM-SHA256',      # Cloudflare format for TLS 1.3
+        'AEAD-AES256-GCM-SHA384',      # Cloudflare format for TLS 1.3
+        'AEAD-CHACHA20-POLY1305-SHA256' # Cloudflare format for TLS 1.3
     }
 
     # Popular TLS 1.2 ciphers used by browsers
@@ -111,17 +176,55 @@ def is_valid_browser_ciphers(ciphers):
         'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384',
         'TLS_DHE_RSA_WITH_AES_128_GCM_SHA256',
         'TLS_DHE_RSA_WITH_AES_256_GCM_SHA384',
+        'ECDHE-RSA-AES128-GCM-SHA256',  # Cloudflare format
+        'ECDHE-RSA-AES256-GCM-SHA384',  # Cloudflare format
+        'ECDHE-ECDSA-AES128-GCM-SHA256', # Cloudflare format
+        'ECDHE-ECDSA-AES256-GCM-SHA384', # Cloudflare format
     }
 
-    # Must have at least one strong TLS 1.3 or TLS 1.2 browser cipher
-    if not any(c in tls13_ciphers or c in popular_browser_ciphers for c in ciphers):
+    # Weak/old ciphers that should NOT be used by modern browsers
+    weak_ciphers = {
+        'RC4', 'MD5', 'DES', '3DES', 'NULL', 'EXPORT', 'anon'
+    }
+
+    # If we have a full cipher list (5+), check it thoroughly
+    if len(ciphers) >= 5:
+        # Must have at least one strong cipher
+        if not any(c in tls13_ciphers or c in popular_browser_ciphers for c in ciphers):
+            return False
+
+        # Forward secrecy indicator: must have ECDHE or DHE
+        if not any('ECDHE' in c or 'DHE' in c for c in ciphers):
+            return False
+
+        # Should not contain weak ciphers
+        if any(any(weak in c for weak in weak_ciphers) for c in ciphers):
+            return False
+
+        return True
+
+    # If we have a single negotiated cipher (Cloudflare case)
+    # Just check if it's a modern, secure cipher
+    cipher = ciphers[0]
+
+    # Check if it's a known good cipher
+    if cipher in tls13_ciphers or cipher in popular_browser_ciphers:
+        return True
+
+    # Check for weak cipher patterns
+    if any(weak in cipher for weak in weak_ciphers):
         return False
 
-    # Forward secrecy indicator: must have ECDHE or DHE
-    if not any('ECDHE' in c or 'DHE' in c for c in ciphers):
-        return False
+    # For TLS 1.3 AEAD ciphers with GCM or CHACHA20
+    if 'AEAD' in cipher and ('GCM' in cipher or 'CHACHA20' in cipher):
+        return True
 
-    return True
+    # For ECDHE ciphers with modern encryption
+    if 'ECDHE' in cipher and ('AES' in cipher or 'CHACHA20' in cipher):
+        return True
+
+    # Unknown single cipher - be conservative
+    return False
 
 
 def is_short_user_agent(user_agent):
@@ -254,7 +357,9 @@ def is_human(session, verbose: bool = False, logger=None):
         logger: Optional logger. If None, messages are printed.
 
     Returns:
-        bool: True if the session is considered human, False otherwise.
+        tuple: (bool, int) where:
+            - bool: True if the session is considered human (score > 30), False otherwise
+            - int: human_score from 1 to 99 (1 = automated, 99 = human, similar to Cloudflare bot score)
     """
 
     def dbg(message: str):
@@ -264,6 +369,9 @@ def is_human(session, verbose: bool = False, logger=None):
                 logger.info(message)
             else:
                 print(message)
+
+    # Start with maximum human score (99 = definitely human, 1 = definitely bot)
+    human_score = 99
 
     # ----------------------------------------------------------------------
     # 1. Language detection (critical rule)
@@ -305,105 +413,127 @@ def is_human(session, verbose: bool = False, logger=None):
             dbg("[is_human] No Accept-Language found; num_languages remains 0")
 
     if num_languages == 0:
-        dbg("[HUMAN FALSE] num_languages=0")
-        return False
+        # Critical indicator - almost certainly a bot
+        human_score = 1
+        dbg(f"[SCORE] num_languages=0 → human_score={human_score}")
 
     # ----------------------------------------------------------------------
-    # 2. HTTP Protocol version check (NEW!)
+    # 2. HTTP Protocol version check
     # ----------------------------------------------------------------------
     http_protocol = session.get('http_protocol', '')
     if http_protocol:
         # HTTP/1.0 is very suspicious - almost certainly a bot
         if http_protocol == 'HTTP/1.0':
-            dbg(f"[HUMAN FALSE] http_protocol=HTTP/1.0 (very suspicious)")
-            return False
+            human_score = min(human_score, 5)
+            dbg(f"[SCORE] http_protocol=HTTP/1.0 (very suspicious) → human_score={human_score}")
         # HTTP/1.1 with other bot indicators is suspicious
         # Modern browsers use HTTP/2 or HTTP/3
         elif http_protocol == 'HTTP/1.1':
             # Combine with UA score - if UA is also suspicious, likely a bot
             ua_score_val = session.get('ua_score', 0)
             if ua_score_val > 0.3:
-                dbg(f"[HUMAN FALSE] http_protocol=HTTP/1.1 + ua_score={ua_score_val:.2f} (bot pattern)")
-                return False
+                human_score = min(human_score, 10)
+                dbg(f"[SCORE] http_protocol=HTTP/1.1 + ua_score={ua_score_val:.2f} (bot pattern) → human_score={human_score}")
             # Also check for known scrapers
-            if session.get('is_scraper', False):
-                dbg(f"[HUMAN FALSE] http_protocol=HTTP/1.1 + is_scraper=True")
-                return False
-            # Log as warning but don't block yet (some legitimate old clients exist)
-            dbg(f"[WARNING] http_protocol=HTTP/1.1 (suspicious for modern browser)")
+            elif session.get('is_scraper', False):
+                human_score = min(human_score, 10)
+                dbg(f"[SCORE] http_protocol=HTTP/1.1 + is_scraper=True → human_score={human_score}")
+            else:
+                # Slight penalty for HTTP/1.1 even if no other indicators
+                human_score -= 5
+                dbg(f"[SCORE] http_protocol=HTTP/1.1 (suspicious) → human_score={human_score}")
     else:
-        # No http_protocol data - log but don't block (backwards compatibility)
+        # No http_protocol data - log but don't penalize (backwards compatibility)
         dbg("[INFO] http_protocol not available in session data")
 
     # ----------------------------------------------------------------------
-    # 3. UA score
+    # 3. UA score (0-1 range, higher = more suspicious)
     # ----------------------------------------------------------------------
-    if session['ua_score'] > 0.6:
-        dbg(f"[HUMAN FALSE] ua_score={session['ua_score']} > 0.6")
-        return False
+    ua_score_val = session.get('ua_score', 0)
+    if ua_score_val > 0.6:
+        # Very high UA score - strong bot indicator
+        human_score = min(human_score, 15)
+        dbg(f"[SCORE] ua_score={ua_score_val} > 0.6 (strong bot indicator) → human_score={human_score}")
+    elif ua_score_val > 0.3:
+        # Moderate penalty
+        penalty = int(ua_score_val * 40)
+        human_score -= penalty
+        dbg(f"[SCORE] ua_score={ua_score_val} → penalty={penalty} → human_score={human_score}")
 
     # ----------------------------------------------------------------------
-    # 4. Verified bot
+    # 4. Verified bot (legitimate crawlers like Googlebot, Bingbot)
     # ----------------------------------------------------------------------
-    if session['verified_bot']:
-        dbg("[HUMAN FALSE] verified_bot=True")
-        return False
+    if session.get('verified_bot', False):
+        # Legitimate bot, but still automated
+        human_score = min(human_score, 15)
+        dbg(f"[SCORE] verified_bot=True (legitimate crawler) → human_score={human_score}")
 
     # ----------------------------------------------------------------------
-    # 5. Primary session (bot behavior)
+    # 5. Primary session (bot behavior - no session cookies)
     # ----------------------------------------------------------------------
-    if session['primary_session']:
-        dbg("[HUMAN FALSE] primary_session=True")
-        return False
+    if session.get('primary_session', False):
+        human_score = min(human_score, 20)
+        dbg(f"[SCORE] primary_session=True (no cookies, bot-like) → human_score={human_score}")
 
     # ----------------------------------------------------------------------
     # 6. Scraper detection
     # ----------------------------------------------------------------------
-    if session.get('is_scraper', is_scraper(session['ua'])):
-        dbg("[HUMAN FALSE] scraper detected")
-        return False
+    if session.get('is_scraper', is_scraper(session.get('ua', ''))):
+        human_score = min(human_score, 10)
+        dbg(f"[SCORE] scraper detected → human_score={human_score}")
 
     # ----------------------------------------------------------------------
     # 7. Headless browser
     # ----------------------------------------------------------------------
     if session.get('headless_ua', False):
-        dbg("[HUMAN FALSE] headless_ua=True")
-        return False
+        human_score = min(human_score, 10)
+        dbg(f"[SCORE] headless_ua=True (automation tool) → human_score={human_score}")
 
     # ----------------------------------------------------------------------
     # 8. User-Agent based rules
     # ----------------------------------------------------------------------
-    if session['bot_ua']:
-        dbg("[HUMAN FALSE] bot_ua=True")
-        return False
+    if session.get('bot_ua', False):
+        human_score = min(human_score, 20)
+        dbg(f"[SCORE] bot_ua=True → human_score={human_score}")
 
-    if session['short_ua']:
-        dbg("[HUMAN FALSE] short_ua=True")
-        return False
+    if session.get('short_ua', False):
+        human_score -= 20
+        dbg(f"[SCORE] short_ua=True → human_score={human_score}")
 
-    if session['ai_bot_ua']:
-        dbg("[HUMAN FALSE] ai_bot_ua=True")
-        return False
+    if session.get('ai_bot_ua', False):
+        human_score = min(human_score, 8)
+        dbg(f"[SCORE] ai_bot_ua=True (AI crawler) → human_score={human_score}")
 
     # ----------------------------------------------------------------------
     # 9. Weak TLS cipher
     # ----------------------------------------------------------------------
-    if session['weak_cipher']:
-        dbg("[HUMAN FALSE] weak_cipher=True")
-        return False
+    if session.get('weak_cipher', False):
+        human_score -= 15
+        dbg(f"[SCORE] weak_cipher=True (outdated/suspicious) → human_score={human_score}")
 
     # ----------------------------------------------------------------------
     # 10. AI crawler UA patterns
     # ----------------------------------------------------------------------
-    if is_ai_bot_user_agent(session['ua']):
-        dbg("[HUMAN FALSE] AI crawler UA pattern detected")
-        return False
+    if is_ai_bot_user_agent(session.get('ua', '')):
+        human_score = min(human_score, 8)
+        dbg(f"[SCORE] AI crawler UA pattern detected → human_score={human_score}")
 
     # ----------------------------------------------------------------------
-    # Passed all rules
+    # Ensure score is in valid range [1, 99]
     # ----------------------------------------------------------------------
-    dbg(f"[HUMAN TRUE] Passed all checks (num_languages={num_languages})")
-    return True
+    human_score = max(1, min(99, human_score))
+
+    # ----------------------------------------------------------------------
+    # Determine if human based on threshold (>30 = human)
+    # ----------------------------------------------------------------------
+    is_human_result = human_score > 30
+
+    if is_human_result:
+        dbg(f"[HUMAN TRUE] human_score={human_score} > 30 (num_languages={num_languages})")
+    else:
+        dbg(f"[HUMAN FALSE] human_score={human_score} <= 30")
+
+    return (is_human_result, human_score)
 
 
 def is_ai_bot_user_agent(user_agent: str) -> bool:
@@ -439,6 +569,7 @@ def is_ai_bot_user_agent(user_agent: str) -> bool:
         r"amazonbot",  # Amazon AI research
         r"yandexbot",  # Russia's search/LLM training
         r"cohere",  # Cohere.ai
+        r"perplexity",  # Perplexity AI
         r"ai\scrawler",  # catch-all
         r"meta-externalagent",  # ← facebook training
     ]

@@ -576,6 +576,7 @@ class BaskervillehallSession(object):
             'verified_bot': session['verified_bot'],
             'cipher': session.get('cipher', ''),
             'ciphers': session.get('ciphers', ''),
+            'cipher_type': baskerville_rules.normalize_cipher(session.get('cipher', '')),
             'valid_browser_ciphers': baskerville_rules.is_valid_browser_ciphers(session['ciphers']),
             'weak_cipher': baskerville_rules.is_weak_cipher(session.get('cipher', '')),
             'asn': session['asn'],
@@ -616,9 +617,13 @@ class BaskervillehallSession(object):
         session_final['vps_asn'] = vps_asn
         session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
-        session_final['human'] = baskerville_rules.is_human(session_final)
-        self.logger.info(f"Human check ip={session['ip']}, session_id={session['session_id']}")
-        is_human(session_final, verbose=True, logger=self.logger)
+        # is_human now returns (bool, human_score) tuple
+        is_human_result, human_score = baskerville_rules.is_human(session_final)
+        session_final['human'] = is_human_result
+        session_final['human_score'] = human_score
+        self.logger.info(f"Human check ip={session['ip']}, session_id={session['session_id']}, human={is_human_result}, human_score={human_score}")
+        # Verbose logging for debugging
+        baskerville_rules.is_human(session_final, verbose=True, logger=self.logger)
         session_final['bad_bot'] = baskerville_rules.is_bad_bot(session_final)
 
         if session_final['human']:
@@ -1130,9 +1135,28 @@ class BaskervillehallSession(object):
                             'deflect_password': deflect_password,
                             'http_protocol': data.get('http_request_version', '')
                         }
+                        # Get cipher from different possible locations
                         cipher = data.get('ssl_cipher', '')
+                        if not cipher:
+                            # Try cloudflareProperties.tlsCipher
+                            cloudflare_props = data.get('cloudflareProperties', {})
+                            cipher = cloudflare_props.get('tlsCipher', '')
+                        if not cipher:
+                            # Fallback to top-level tlsCipher (legacy)
+                            cipher = data.get('tlsCipher', '')
+
+                        # Check if this is HTTP/3 without TLS info (QUIC)
+                        http_protocol = cloudflare_props.get('httpProtocol', data.get('http_request_version', ''))
+                        if not cipher and http_protocol == 'HTTP/3':
+                            # HTTP/3 uses QUIC with built-in encryption
+                            # Set a default strong cipher to indicate secure connection
+                            cipher = 'AEAD-AES128-GCM-SHA256'  # Standard for QUIC
+
                         ciphers = data.get('ssl_ciphers', '')
                         ciphers = ciphers.split(':') if ciphers else []
+                        # If no cipher list available, use the negotiated cipher
+                        if not ciphers and cipher:
+                            ciphers = [cipher]
                         accept_language = data.get('accept_language', '')
                         if len(accept_language) == 0:
                             accept_language = data.get('language', 'en-US')

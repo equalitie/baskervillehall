@@ -22,6 +22,8 @@ class BaskervilleClassifier(object):
             datetime_format='%Y-%m-%d %H:%M:%S',
             learning_rate=0.04,
             early_stopping_rounds=20,
+            feature_weights_boost=None,
+            feature_weights_reduce=None,
             logger=None,
     ):
         super().__init__()
@@ -31,6 +33,36 @@ class BaskervilleClassifier(object):
         self.learning_rate = learning_rate
         self.early_stopping_rounds = early_stopping_rounds
 
+        # Feature weights for rebalancing model
+        # Boost timing/behavior features, reduce fingerprint features
+        if feature_weights_boost is None:
+            self.feature_weights_boost = {
+                'interval_cv': 15.0,             # Critical timing pattern (×3 increase!)
+                'entropy': 10.0,                 # Content diversity (×2.5 increase!)
+                'interval_consistency': 8.0,     # Timing regularity (×2.7 increase!)
+                'unique_path_to_request_ratio': 5.0,  # Path diversity
+                'request_rate': 4.0,             # Scraping speed
+                'unique_path_rate': 4.0,         # Path access pattern
+                'request_interval_std': 3.0,     # Timing variance
+                'request_interval_average': 3.0, # Base timing
+            }
+        else:
+            self.feature_weights_boost = feature_weights_boost
+
+        if feature_weights_reduce is None:
+            self.feature_weights_reduce = {
+                'ua_score': 0.1,                 # EXTREME reduction! (was 0.3)
+                'cipher_type': 0.1,              # EXTREME reduction! (was 0.3)
+                'fingerprints_score': 0.1,       # Fingerprint signal
+                'valid_browser_ciphers': 0.2,    # Fingerprint signal
+                'num_ciphers': 0.3,              # Browser indicator
+                'headless_ua': 0.3,              # Fingerprint signal
+                'short_ua': 0.3,                 # Fingerprint signal
+                'weak_cipher': 0.3,              # Fingerprint signal
+            }
+        else:
+            self.feature_weights_reduce = feature_weights_reduce
+
         # Default numeric features if not provided
         if features is None:
             features = [
@@ -38,26 +70,38 @@ class BaskervilleClassifier(object):
                 'request_interval_std', 'response4xx_to_request_ratio',
                 'response5xx_to_request_ratio', 'top_page_to_request_ratio',
                 'unique_path_rate', 'unique_path_to_request_ratio',
-                'unique_query_rate', 'unique_query_to_unique_path_ratio',
-                'image_to_html_ratio', 'js_to_html_ratio', 'css_to_html_ratio',
-                'path_depth_average', 'path_depth_std', 'payload_size_log_average',
+                'unique_query_rate',
+                # 'unique_query_to_unique_path_ratio',  # Removed: meaningless after full_url change (always ≈1.0 for APIs)
+                # Domain-specific content features (removed - vary by site architecture):
+                # 'image_to_html_ratio', 'js_to_html_ratio', 'css_to_html_ratio',  # SPA vs static vs API
+                # 'path_depth_average', 'path_depth_std',  # Flat vs deep URL structure
+                # 'payload_size_log_average',  # JSON API vs HTML vs images
+                # 'api_ratio',  # Backend API vs frontend site
                 'entropy',
                 # 'num_requests', 'duration',
-                'edge_count', 'static_ratio',
-                'ua_count', 'api_ratio', 'num_ciphers', 'num_languages',
+                'edge_count',
+                # 'static_ratio',  # Removed: penalizes API endpoints (no CSS/JS) as bots
+                'num_ciphers',
+                # 'num_languages',  # Removed: Cloudflare only logs primary language (always 1), incompatible with training data
                 'ua_score', 'hour_bucket', 'odd_hour', 'fingerprints_score',
                 'interval_cv', 'interval_consistency',
-                'rate_499'
+                'rate_499',
+                # 'high_request_rate', 'extreme_request_rate'  # Removed: circular reasoning in training data
+                # These features don't work because:
+                # - WordPress sites have high rate due to parallel resource loading (HTTP/2 multiplexing)
+                # - Old labeling logic used "rate > 100" rule, contaminating training data
+                # - Model learned: high rate → HUMAN (opposite of intended!)
+                # - Use request_rate directly instead, model will learn non-linear relationship
             ]
 
         # Default categorical features if not provided
         if categorical_features is None:
             categorical_features = [
                 # 'country',
-                # 'primary_session',
+                # 'primary_session',  # Rule-based, не нужно ML
                 # 'bad_bot',
                 # 'human',
-                'cipher',
+                'cipher_type',  # Normalized cipher family instead of exact cipher
                 'valid_browser_ciphers',
                 'weak_cipher',
                 'headless_ua',
@@ -150,6 +194,26 @@ class BaskervilleClassifier(object):
         pos = (y_train == 1).sum()
         neg = (y_train == 0).sum()
         scale_pos_weight = neg / max(1, pos)
+        # Сильно уменьшаем агрессивность - короткие сессии людей имеют низкий entropy
+        scale_pos_weight = scale_pos_weight * 0.5
+
+        # Feature weights to rebalance model:
+        # - Boost timing/behavior features (interval_cv, entropy, consistency patterns)
+        # - Reduce fingerprint features (ua_score, cipher_type) which dominate SHAP
+        feature_names = self.get_all_features()
+        feature_weights = np.ones(len(feature_names))
+
+        # Apply weights from parameters
+        for i, fname in enumerate(feature_names):
+            if fname in self.feature_weights_boost:
+                feature_weights[i] = self.feature_weights_boost[fname]
+            elif fname in self.feature_weights_reduce:
+                feature_weights[i] = self.feature_weights_reduce[fname]
+
+        self.logger.info(f"Feature weights applied:")
+        for i, fname in enumerate(feature_names):
+            if feature_weights[i] != 1.0:
+                self.logger.info(f"  {fname:40s} weight={feature_weights[i]:.1f}")
 
         # XGBoost params for CV and final training
         cv_params = {
@@ -164,13 +228,13 @@ class BaskervilleClassifier(object):
             "gamma": 0.1,
             "lambda": 1.0,
             "alpha": 0.0,
-            "scale_pos_weight": scale_pos_weight * 0.7,
+            "scale_pos_weight": scale_pos_weight,
             "max_delta_step": 1,
             "seed": 77,
         }
 
         # CV with early stopping to find best num_boost_round
-        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dtrain = xgb.DMatrix(X_train, label=y_train, feature_weights=feature_weights)
         self.logger.info("Training model...")
         cv = xgb.cv(
             params=cv_params,
@@ -253,6 +317,11 @@ class BaskervilleClassifier(object):
         p = proba.astype(float)
         t = float(self.threshold)
 
+        # Debug: log raw probabilities
+        if len(p) > 0:
+            self.logger.info(f"[_bot_score_from_proba] Raw proba: min={p.min():.6f}, max={p.max():.6f}, "
+                            f"mean={p.mean():.6f}, std={p.std():.6f}, threshold={t:.6f}")
+
         # Default: all scores = 50, just in case threshold is degenerate
         score = np.full_like(p, 50.0, dtype=float)
 
@@ -277,7 +346,18 @@ class BaskervilleClassifier(object):
 
         # Clip to [1, 99] and convert to integers
         score = np.clip(score, 1.0, 99.0)
-        return score.astype(int)
+        score_int = score.astype(int)
+
+        # Debug: log final scores
+        if len(score_int) > 0:
+            unique, counts = np.unique(score_int, return_counts=True)
+            self.logger.info(f"[_bot_score_from_proba] Final scores: min={score_int.min()}, max={score_int.max()}, "
+                            f"mean={score_int.mean():.1f}, unique_values={len(unique)}")
+            if len(unique) <= 10:
+                score_dist = ", ".join([f"{val}:{cnt}" for val, cnt in zip(unique, counts)])
+                self.logger.info(f"[_bot_score_from_proba] Score distribution: {score_dist}")
+
+        return score_int
 
     def transform(self, sessions, use_shapley=True):
         """
@@ -290,12 +370,30 @@ class BaskervilleClassifier(object):
         # Feature extraction
         X_np = self.feature_extractor.transform(sessions)
 
+        # Debug: log feature statistics to check if features vary
+        if len(X_np) > 0:
+            self.logger.info(f"[transform] Features shape: {X_np.shape}")
+            self.logger.info(f"[transform] Features stats: min={X_np.min():.4f}, max={X_np.max():.4f}, "
+                           f"mean={X_np.mean():.4f}, std={X_np.std():.4f}")
+            # Log first session's features
+            if len(X_np) > 0:
+                features_first = X_np[0]
+                self.logger.info(f"[transform] First session features (first 10): {features_first[:10]}")
+
         # Predictions
         dX = xgb.DMatrix(X_np, feature_names=self.get_all_features())
         y_proba = self.model.predict(dX)
         y_pred = (y_proba > self.threshold).astype(int)
 
         bot_score = self._bot_score_from_proba(y_proba)
+
+        # Debug logging for bot_score distribution
+        if len(y_proba) > 0:
+            self.logger.info(f"y_proba stats: min={y_proba.min():.4f}, max={y_proba.max():.4f}, "
+                            f"mean={y_proba.mean():.4f}, median={np.median(y_proba):.4f}")
+            self.logger.info(f"bot_score stats: min={bot_score.min()}, max={bot_score.max()}, "
+                            f"mean={bot_score.mean():.1f}, median={np.median(bot_score):.1f}")
+            self.logger.info(f"threshold={self.threshold:.4f}")
 
         # SHAP values (can be expensive, so controlled by flag)
         if use_shapley and self.explainer is not None:

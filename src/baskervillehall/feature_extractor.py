@@ -36,7 +36,15 @@ class FeatureExtractor(object):
             'ua_count', 'api_ratio', 'num_ciphers', 'num_languages',
             'ua_score', 'hour_bucket', 'odd_hour', 'fingerprints_score',
             'interval_cv', 'interval_consistency',
-            'rate_499'
+            'rate_499',
+            # 'high_request_rate', 'extreme_request_rate',  # Removed: circular reasoning in training data
+
+            # Deprecated engineered features (often learned with wrong correlations):
+            # 'extreme_rate_flag','high_rate_zero_entropy','bot_combo',
+
+            'primary_session', 'bad_bot', 'human',
+            'valid_browser_ciphers', 'weak_cipher', 'headless_ua', 'bot_ua',
+            'ai_bot_ua', 'verified_bot','short_ua','asset_only',
         ]
 
         self.pca_feature = pca_feature
@@ -48,10 +56,11 @@ class FeatureExtractor(object):
             raise RuntimeError(f'Feature(s) {not_supported} not supported.')
 
         supported_cats = [
-            'country', 'primary_session', 'bad_bot', 'human', 'cipher',
-            'valid_browser_ciphers', 'weak_cipher', 'headless_ua', 'bot_ua',
-            'ai_bot_ua', 'verified_bot', 'datacenter_asn', 'short_ua',
-            'asset_only', 'timezone'
+            'country',
+            'cipher',
+            'cipher_type',
+            'datacenter_asn',
+            'timezone'
         ]
         if categorical_features is None:
             categorical_features = supported_cats
@@ -188,13 +197,22 @@ class FeatureExtractor(object):
                 num_5xx += 1
             if code == 499:
                 num_499 += 1
+
+            # Get path and query
             url = r.get('url', '/')
+            query = r.get('query', '')
+
+            # For entropy and unique_path, use full URL (path + query)
+            # This correctly handles APIs where query parameters define different "pages"
+            # Example: /preview?url=site1.com vs /preview?url=site2.com are different pages
+            full_url = url + ('?' + query if query else '')
+
             payloads.append(int(r.get('payload', 0)) + 1.0)
-            slash_counts.append(len(url.split('/')) - 1)
-            url_map[url] += 1
+            slash_counts.append(len(url.split('/')) - 1)  # path_depth uses only path
+            url_map[full_url] += 1  # Use full URL for entropy/uniqueness
             edge_map[r.get('edge', '')] += 1
             ua_map[r.get('ua', '')] += 1
-            query_map[r.get('query', '')] += 1
+            query_map[query] += 1
             content_type = r.get('type', 'text/html')
             if content_type == 'text/html' or \
                content_type == 'text/html; charset=UTF-8' or \
@@ -225,9 +243,18 @@ class FeatureExtractor(object):
         if session_duration == 0.0:
             session_duration = 1.0
 
+        request_rate = hits / session_duration * 60
+        entropy = self.calculate_entropy(url_map)
+
         features['num_requests'] = len(requests)
         features['duration'] = session_duration
-        features['request_rate'] = hits / session_duration * 60
+        features['request_rate'] = request_rate
+
+        # Removed threshold features (circular reasoning in training data):
+        # features['high_request_rate'] = int(request_rate > 150)
+        # features['extreme_request_rate'] = int(request_rate > 300)
+        # WordPress sites have high rate due to HTTP/2 multiplexing - can't distinguish from bots by rate alone
+
         features['post_rate'] = num_post / hits
         features['request_interval_average'] = float(mean_iv)
         features['request_interval_std'] = std_iv if len(intervals) > 1 else 0
@@ -246,7 +273,7 @@ class FeatureExtractor(object):
         features['path_depth_average'] = mean_depth
         features['path_depth_std'] = np.std(slash_counts) if len(slash_counts) > 1 else 0
         features['payload_size_log_average'] = np.mean(np.log(payloads))
-        features['entropy'] = self.calculate_entropy(url_map)
+        features['entropy'] = entropy
         features['edge_count'] = len(edge_map.keys())
         features['ua_count'] = len(ua_map.keys())
         features['static_ratio'] = float(num_static) / hits
@@ -260,6 +287,24 @@ class FeatureExtractor(object):
         features['odd_hour'] = self.is_odd_hour(hour)
         features['fingerprints_score'] = float(session.get('fingerprints_score', 0.0))
         features['interval_cv'] = float(std_iv / mean_iv if mean_iv > 0 else 0.0)
+
+
+        features['primary_session'] = int(session['primary_session'])
+        features['bad_bot'] = int(session['bad_bot'])
+        features['human'] = int(session['human'])
+        features['valid_browser_ciphers'] = int(session['valid_browser_ciphers'])
+        features['weak_cipher'] = int(session['weak_cipher'])
+        features['headless_ua'] = int(session['headless_ua'])
+        features['bot_ua'] = int(session['bot_ua'])
+        features['ai_bot_ua'] = int(session['ai_bot_ua'])
+        features['verified_bot'] = int(session['verified_bot'])
+        features['short_ua'] = int(session['short_ua'])
+        features['asset_only'] = int(session['asset_only'])
+
+        # Deprecated - these features often learn wrong correlations:
+        # features['extreme_rate_flag'] = int(request_rate > 200)
+        # features['bot_combo'] = int(features['headless_ua'] and entropy == 0)
+        # features['high_rate_zero_entropy'] = request_rate * (1 if entropy == 0 else 0)
 
         # Interval consistency around the mode
         #   - round intervals to nearest integer second

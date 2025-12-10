@@ -41,8 +41,8 @@ docker push equalitie/baskervillehall:latest
 
 ### Building session image
 ```commandline
-docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session
-docker push equalitie/baskervillehall:session
+docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session2
+docker push equalitie/baskervillehall:session2
 
 ```
 
