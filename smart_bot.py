@@ -18,6 +18,12 @@ Usage:
 
     # Combined (all suspicious patterns)
     python smart_bot.py --mode combined --url https://example.com --num-requests 80
+
+    # Extreme interval_cv (alternating fast/slow requests)
+    python smart_bot.py --mode extreme-cv --urls-file urls_deflect.txt -n 50
+
+    # RECOMMENDED: High consistency mode (low interval_cv - BOT-LIKE)
+    python smart_bot.py --mode high-consistency-file --urls-file urls_extreme_cv.txt -n 40
 """
 
 import argparse
@@ -119,6 +125,10 @@ class SmartBot:
         elif self.mode == 'from-file':
             # Variable timing (more realistic)
             return random.uniform(0.5, 2.0)
+        elif self.mode == 'extreme-cv':
+            # EXTREME interval_cv (std >> mean) - very bot-like
+            # Alternating fast/slow: 0.1s, 3.0s, 0.2s, 2.5s, 0.1s, 3.5s
+            return random.choice([0.1, 0.15, 0.2]) if random.random() < 0.5 else random.uniform(2.5, 3.5)
         else:  # combined
             # Regular timing
             return 1.0
@@ -134,13 +144,15 @@ class SmartBot:
             urls = self._get_urls_from_file()
             print(f"[HIGH CONSISTENCY + FILE MODE] Loaded {len(urls)} URLs from {self.urls_file}")
             print(f"  Unique URLs: {len(set(urls))}")
-            print(f"  Fixed 1.0s intervals (HIGH CONSISTENCY)")
+            print(f"  Fixed 1.0s intervals (LOW interval_cv → BOT)")
+            print(f"  Expected interval_cv: < 0.3 (very bot-like)")
         elif self.mode == 'low-entropy':
             urls = self._get_urls_low_entropy()
             print(f"[LOW ENTROPY MODE] Scraping {len(urls)} requests from {len(set(urls))} unique URLs")
         elif self.mode == 'high-consistency':
             urls = self._get_urls_combined()
-            print(f"[HIGH CONSISTENCY MODE] Fixed 1.0s intervals between requests")
+            print(f"[HIGH CONSISTENCY MODE] Fixed 1.0s intervals (LOW interval_cv → BOT)")
+            print(f"  Expected interval_cv: < 0.3 (very bot-like - regular timing)")
         elif self.mode == 'api-scraper':
             urls = self._get_urls_api_scraper()
             print(f"[API SCRAPER MODE] 100% API endpoints")
@@ -152,7 +164,18 @@ class SmartBot:
                 print(f"  Unique URLs: {len(set(urls))}")
             else:
                 urls = self._get_urls_combined()
-            print(f"[COMBINED MODE] Low entropy + high consistency + fixed 1.0s timing")
+            print(f"[COMBINED MODE] Low entropy + LOW interval_cv (fixed 1.0s timing → BOT)")
+        elif self.mode == 'extreme-cv':
+            # Extreme CV mode: support both file and URL generation
+            if self.urls_file:
+                urls = self._get_urls_from_file()
+                print(f"[EXTREME CV MODE + FILE] Loaded {len(urls)} URLs from {self.urls_file}")
+                print(f"  Unique URLs: {len(set(urls))}")
+            else:
+                urls = self._get_urls_combined()
+            print(f"[EXTREME CV MODE] Alternating fast (0.1-0.2s) / slow (2.5-3.5s) intervals")
+            print(f"  Expected interval_cv: > 1.5 (looks HUMAN - unpredictable behavior!)")
+            print(f"  Note: Model interprets high CV as HUMAN, low CV as BOT")
         else:
             urls = self._get_urls_combined()
             print(f"[COMBINED MODE] Low entropy + high consistency + fast rate")
@@ -161,7 +184,15 @@ class SmartBot:
             print(f"Target: {self.base_url}")
         print(f"Total requests: {len(urls)}")
         print(f"Expected Cloudflare score: 99 (HUMAN - real browser)")
-        print(f"Expected Baskerville score: 5-20 (BOT - suspicious pattern)")
+
+        # Expected Baskerville score depends on mode
+        if self.mode in ['high-consistency', 'high-consistency-file', 'combined']:
+            print(f"Expected Baskerville score: 5-25 (BOT - low interval_cv + low entropy)")
+        elif self.mode == 'extreme-cv':
+            print(f"Expected Baskerville score: 60-85 (HUMAN - high interval_cv = unpredictable)")
+        else:
+            print(f"Expected Baskerville score: varies by mode")
+
         print(f"\nStarting in 3 seconds...")
         time.sleep(3)
 
@@ -193,6 +224,18 @@ class SmartBot:
             """)
 
             page = context.new_page()
+
+            # Block images, CSS, JS, fonts to reduce entropy (only load HTML)
+            # This makes bot behavior more obvious
+            def block_resources(route):
+                if route.request.resource_type in ["image", "stylesheet", "font", "media"]:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            # Enable resource blocking for modes that need low entropy
+            if self.mode in ['extreme-cv', 'low-entropy', 'combined', 'high-consistency', 'high-consistency-file']:
+                page.route("**/*", block_resources)
 
             start_time = time.time()
             session_cookie = None
@@ -287,12 +330,22 @@ class SmartBot:
             print(f"  entropy: ~{len(set(urls)).bit_length():.1f} (LOW - repeating URLs)")
             print(f"  request_rate: {rate:.1f}")
             print(f"  unique_path_to_request_ratio: {len(set(urls))/len(urls):.2f} (LOW)")
-            print(f"  interval_consistency: ~0.90-0.95 (HIGH - regular timing)")
 
-            print(f"\nThis should trigger BOT detection in Baskerville!")
-            print(f"Check predictor logs for:")
-            print(f"  - Cloudflare bot_score: 99 (HUMAN)")
-            print(f"  - Baskerville bot_score: 5-20 (BOT)")
+            if self.mode in ['high-consistency', 'high-consistency-file', 'combined']:
+                print(f"  interval_cv: < 0.3 (LOW - regular timing → BOT)")
+                print(f"  interval_consistency: ~0.90-0.95 (HIGH)")
+                print(f"\n✓ This should trigger BOT detection in Baskerville!")
+                print(f"  - Cloudflare bot_score: 99 (HUMAN)")
+                print(f"  - Baskerville bot_score: 5-25 (BOT - low interval_cv)")
+            elif self.mode == 'extreme-cv':
+                print(f"  interval_cv: > 1.5 (HIGH - unpredictable timing → HUMAN)")
+                print(f"  interval_consistency: moderate")
+                print(f"\n✗ This will look HUMAN in Baskerville!")
+                print(f"  - Cloudflare bot_score: 99 (HUMAN)")
+                print(f"  - Baskerville bot_score: 60-85 (HUMAN - high interval_cv)")
+            else:
+                print(f"  interval_consistency: varies by mode")
+                print(f"\nCheck predictor logs for bot detection results")
 
             browser.close()
 
@@ -327,13 +380,17 @@ Examples:
   # Combined with URL (all suspicious patterns)
   python smart_bot.py --mode combined --url https://example.com -n 80
 
+  # Extreme interval_cv mode (alternating fast/slow - VERY BOT-LIKE)
+  python smart_bot.py --mode extreme-cv --urls-file urls_deflect.txt -n 50
+
 Modes:
   from-file              - Load URLs from file (variable timing)
   high-consistency-file  - Load URLs from file + fixed 1.0s intervals (HIGH consistency)
   low-entropy            - Repeat same 3-4 URLs (entropy < 2.0)
-  high-consistency       - Fixed 1.0s intervals (consistency > 0.9)
+  high-consistency       - Fixed 1.0s intervals (LOW interval_cv → BOT-LIKE)
   api-scraper            - Only API endpoints (api_ratio = 100%)
   combined               - Low entropy + high consistency + fixed timing (works with --url or --urls-file)
+  extreme-cv             - Extreme interval_cv (alternating 0.1-0.2s / 2.5-3.5s) - looks HUMAN (unpredictable)
         """
     )
 
@@ -349,7 +406,7 @@ Modes:
 
     parser.add_argument(
         '--mode',
-        choices=['from-file', 'high-consistency-file', 'low-entropy', 'high-consistency', 'api-scraper', 'combined'],
+        choices=['from-file', 'high-consistency-file', 'low-entropy', 'high-consistency', 'api-scraper', 'combined', 'extreme-cv'],
         default='combined',
         help='Bot mode (default: combined)'
     )
@@ -370,11 +427,11 @@ Modes:
     args = parser.parse_args()
 
     # Auto-detect mode if urls-file is provided (but don't force to from-file)
-    # Keep combined mode if explicitly set
-    if args.urls_file and args.mode == 'combined' and not args.url:
-        # User wants combined mode with file
+    # Keep combined/extreme-cv mode if explicitly set
+    if args.urls_file and args.mode in ['combined', 'extreme-cv'] and not args.url:
+        # User wants combined/extreme-cv mode with file
         pass
-    elif args.urls_file and args.mode == 'combined' and args.url:
+    elif args.urls_file and args.mode in ['combined', 'extreme-cv'] and args.url:
         # Both url and file provided - use file
         args.url = None
 
@@ -382,10 +439,10 @@ Modes:
     if args.mode in ['from-file', 'high-consistency-file']:
         if not args.urls_file:
             parser.error(f"--urls-file is required when using --mode {args.mode}")
-    elif args.mode == 'combined':
-        # Combined mode can work with either --url or --urls-file
+    elif args.mode in ['combined', 'extreme-cv']:
+        # Combined and extreme-cv modes can work with either --url or --urls-file
         if not args.url and not args.urls_file:
-            parser.error("--url or --urls-file is required when using --mode combined")
+            parser.error(f"--url or --urls-file is required when using --mode {args.mode}")
     else:
         if not args.url:
             parser.error(f"--url is required when using --mode {args.mode}")

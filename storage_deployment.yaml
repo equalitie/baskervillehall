@@ -31,7 +31,7 @@ spec:
       restartPolicy: Always
       containers:
       - name: "baskervillehall-storage"
-        image: "equalitie/baskervillehall:session"
+        image: "equalitie/baskervillehall:session2"
         imagePullPolicy: Always
         resources:
           requests:

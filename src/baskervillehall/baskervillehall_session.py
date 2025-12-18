@@ -7,7 +7,7 @@ import time as time_module
 from collections import OrderedDict
 from datetime import datetime, time, timezone
 
-from baskervillehall.baskerville_rules import is_human
+from baskervillehall.baskerville_rules import is_human, get_baskerville_score_1
 from baskervillehall.frequency_analyzer import FrequencyAnalyzer
 from baskervillehall.session_fingerprints import SessionFingerprints
 from baskervillehall.vpn_detector import VpnDetector
@@ -594,8 +594,8 @@ class BaskervillehallSession(object):
             'is_scraper': scraper_name is not None,
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
+            'baskerville_score_1': get_baskerville_score_1(session),
         }
-
         if self.current_lag > self.lag_critical_threshold:
             session_final['fingerprints'] = ''
             session_final['fingerprints_score'] = 0.0
@@ -617,11 +617,10 @@ class BaskervillehallSession(object):
         session_final['vps_asn'] = vps_asn
         session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
-        # is_human now returns (bool, human_score) tuple
-        is_human_result, human_score = baskerville_rules.is_human(session_final)
+        is_human_result, baskerville_score_3 = baskerville_rules.is_human(session_final)
         session_final['human'] = is_human_result
-        session_final['human_score'] = human_score
-        self.logger.info(f"Human check ip={session['ip']}, session_id={session['session_id']}, human={is_human_result}, human_score={human_score}")
+        session_final['baskerville_score3'] = baskerville_score_3
+        self.logger.info(f"Human check ip={session['ip']}, session_id={session['session_id']}, human={is_human_result}")
         # Verbose logging for debugging
         baskerville_rules.is_human(session_final, verbose=True, logger=self.logger)
         session_final['bad_bot'] = baskerville_rules.is_bad_bot(session_final)
@@ -671,8 +670,9 @@ class BaskervillehallSession(object):
 
         prev_size = self.flush_size_primary.get(ip, 0)
         incr = size - prev_size
-        if size <= flush_threshold or incr < min_flush_increment:
-            return
+        if size != 1:
+            if size <= flush_threshold or incr < min_flush_increment:
+                return
         self.flush_size_primary[ip] = size
 
         hosts = {}
@@ -723,7 +723,7 @@ class BaskervillehallSession(object):
             elif self.current_lag >= self.lag_high_threshold:
                 send_threshold = max(send_threshold, int(self.min_number_of_requests * 1.5))
 
-            if request_count >= send_threshold:
+            if request_count >= send_threshold or request_count == 1:
                 reqs.sort(key=lambda x: x['ts'])
                 session = {
                     'ua': meta['ua'],
@@ -748,7 +748,7 @@ class BaskervillehallSession(object):
                     'accept_language': meta['accept_language'],
                     'timezone': meta['timezone'],
                     'is_monotonic': True,
-                    'cloudflare_score': meta.get('cloudflare_score', ''),
+                    'cloudflare_score': meta.get('cloudflare_score', 0),
                     'http_protocol': meta.get('http_protocol', ''),
                 }
                 t_send = self._t()
@@ -867,7 +867,7 @@ class BaskervillehallSession(object):
                             'accept_language': meta['accept_language'],
                             'timezone': meta['timezone'],
                             'is_monotonic': True,
-                            'cloudflare_score': meta.get('cloudflare_score', ''),
+                            'cloudflare_score': meta.get('cloudflare_score', 0),
                             'http_protocol': meta.get('http_protocol', ''),
                         }
                         self.send_session(summary)
@@ -1104,7 +1104,7 @@ class BaskervillehallSession(object):
                         deflect_password = False
                         bot_score = data.get('banjax_bot_score', -1.0)
                         bot_score_top_factor = data.get('banjax_bot_score_top_factor', '')
-                        cloudflare_score = ''
+                        cloudflare_score = 0
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
                             if banjax_decision == 'ShaChallengePassed':
@@ -1137,9 +1137,8 @@ class BaskervillehallSession(object):
                         }
                         # Get cipher from different possible locations
                         cipher = data.get('ssl_cipher', '')
+                        cloudflare_props = data.get('cloudflareProperties', {})
                         if not cipher:
-                            # Try cloudflareProperties.tlsCipher
-                            cloudflare_props = data.get('cloudflareProperties', {})
                             cipher = cloudflare_props.get('tlsCipher', '')
                         if not cipher:
                             # Fallback to top-level tlsCipher (legacy)
@@ -1316,7 +1315,7 @@ class BaskervillehallSession(object):
                             'accept_language': first_session['accept_language'],
                             'timezone': first_session['timezone'],
                             'is_monotonic': True,
-                            'cloudflare_score': first_session.get('cloudflare_score', ''),
+                            'cloudflare_score': first_session.get('cloudflare_score', 0),
                             'http_protocol': first_session.get('http_protocol', ''),
                         }
                         self.send_session(emergency_flush_session)

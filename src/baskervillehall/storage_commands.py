@@ -48,6 +48,9 @@ class StorageCommands(StorageBase):
         if duration < 1:
             duration = 1
         num_ua = self.get_number_of_useragents(s)
+        cloudflare_score = command.get("cloudflare_score", 0)
+        if cloudflare_score == '':
+            cloudflare_score = 0
         shapley_formatted_if = json.dumps(command['shapley_if']) if len(command['shapley_if']) > 0 else ''
         shapley_formatted_ae = json.dumps(command['shapley_ae']) if len(command['shapley_ae']) > 0 else ''
         ua = s["ua"].replace("\'", "")
@@ -77,6 +80,6 @@ class StorageCommands(StorageBase):
             f'{duration:.1f}, \'{command["start"]}\', \'{command["end"]}\',\n'\
             f'\'{requests}\', \'pipeline\',\'{s["scraper_name"]}\','\
             f'{command["prediction_if"]},{command["prediction_ae"]},'\
-            f'{command["baskerville_score"]},'\
-            f'{command["cloudflare_score"]}'\
+            f'{command.get("baskerville_score", 0)},'\
+            f'{cloudflare_score}'\
             f');'

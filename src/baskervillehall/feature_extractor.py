@@ -8,6 +8,7 @@ import pytz
 
 from baskervillehall.pca_feature import PCAFeature
 from sklearn.preprocessing import OneHotEncoder
+from baskervillehall.utils_entropy import entropy_from_counts
 
 
 class FeatureExtractor(object):
@@ -107,18 +108,6 @@ class FeatureExtractor(object):
                 'static': r.get('static', False),
             })
         return sorted(processed, key=lambda x: x['ts'])
-
-    def calculate_entropy(self, counts: dict[str, int]) -> float:
-        total = sum(counts.values())
-        if total == 0:
-            return 0.0
-        H = 0.0
-        for c in counts.values():
-            if c == 0:
-                continue
-            p = c / total
-            H -= p * math.log(p, 2)
-        return H
 
     def is_api_request(self, request):
         ctype = request.get('type', 'text/html')
@@ -244,7 +233,7 @@ class FeatureExtractor(object):
             session_duration = 1.0
 
         request_rate = hits / session_duration * 60
-        entropy = self.calculate_entropy(url_map)
+        entropy = entropy_from_counts(url_map)
 
         features['num_requests'] = len(requests)
         features['duration'] = session_duration

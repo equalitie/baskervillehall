@@ -1,0 +1,152 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dashboard-cache-refresh
+  namespace: default
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: refresh
+              image: postgres:16
+              env:
+                - name: PGHOST
+                  value: "postgres-baskervillehall"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: "baskerville"
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-baskervillehall-secret
+                      key: user
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-baskervillehall-secret
+                      key: password
+              command: ["bash","-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  psql -v ON_ERROR_STOP=1 <<'SQL'
+
+                  -- 1) challenged (current + previous hour)
+                  WITH hours AS (
+                    SELECT generate_series(
+                      date_trunc('hour', now()) - interval '1 hour',
+                      date_trunc('hour', now()),
+                      interval '1 hour'
+                    ) AS h0
+                  ),
+                  agg AS (
+                    SELECT
+                      h.h0 AS bucket_hour,
+                      COUNT(DISTINCT c.ip_address) AS challenged_ips
+                    FROM hours h
+                    LEFT JOIN public.challenge_command_history c
+                      ON c.session_end >= h.h0
+                     AND c.session_end <  h.h0 + interval '1 hour'
+                    GROUP BY h.h0
+                  )
+                  INSERT INTO public.dashboard_challenged_1h (bucket_hour, challenged_ips, updated_at)
+                  SELECT bucket_hour, challenged_ips::bigint, now()
+                  FROM agg
+                  ON CONFLICT (bucket_hour) DO UPDATE
+                  SET challenged_ips = EXCLUDED.challenged_ips,
+                      updated_at     = EXCLUDED.updated_at;
+
+                  -- 2) passed (current + previous hour)
+                  WITH hours AS (
+                    SELECT generate_series(
+                      date_trunc('hour', now()) - interval '1 hour',
+                      date_trunc('hour', now()),
+                      interval '1 hour'
+                    ) AS h0
+                  ),
+                  agg AS (
+                    SELECT
+                      h.h0 AS bucket_hour,
+                      COUNT(DISTINCT c.ip_address) FILTER (WHERE c.passed_challenge = 1) AS passed_ips
+                    FROM hours h
+                    LEFT JOIN public.challenge_command_history c
+                      ON c.session_end >= h.h0
+                     AND c.session_end <  h.h0 + interval '1 hour'
+                    GROUP BY h.h0
+                  )
+                  INSERT INTO public.dashboard_passed_1h (bucket_hour, passed_ips, updated_at)
+                  SELECT bucket_hour, passed_ips::bigint, now()
+                  FROM agg
+                  ON CONFLICT (bucket_hour) DO UPDATE
+                  SET passed_ips  = EXCLUDED.passed_ips,
+                      updated_at  = EXCLUDED.updated_at;
+
+                  -- 3) precision per-hour (100 - 100*passed/total)
+                  WITH hours AS (
+                    SELECT generate_series(
+                      date_trunc('hour', now()) - interval '1 hour',
+                      date_trunc('hour', now()),
+                      interval '1 hour'
+                    ) AS h0
+                  ),
+                  agg AS (
+                    SELECT
+                      h.h0 AS bucket_hour,
+                      COUNT(DISTINCT c.ip_address) AS total_ips,
+                      COUNT(DISTINCT c.ip_address) FILTER (WHERE c.passed_challenge = 1) AS passed_ips
+                    FROM hours h
+                    LEFT JOIN public.challenge_command_history c
+                      ON c.session_end >= h.h0
+                     AND c.session_end <  h.h0 + interval '1 hour'
+                    GROUP BY h.h0
+                  )
+                  INSERT INTO public.dashboard_precision_1h (bucket_hour, total_ips, passed_ips, precision_pct, updated_at)
+                  SELECT
+                    bucket_hour,
+                    total_ips::bigint,
+                    passed_ips::bigint,
+                    ROUND(100.0 - 100.0 * passed_ips / NULLIF(total_ips, 0), 1) AS precision_pct,
+                    now()
+                  FROM agg
+                  ON CONFLICT (bucket_hour) DO UPDATE
+                  SET total_ips      = EXCLUDED.total_ips,
+                      passed_ips     = EXCLUDED.passed_ips,
+                      precision_pct  = EXCLUDED.precision_pct,
+                      updated_at     = EXCLUDED.updated_at;
+
+                  -- 4) human vs bot (sessions, current + previous hour)
+                  WITH hours AS (
+                    SELECT generate_series(
+                      date_trunc('hour', now()) - interval '1 hour',
+                      date_trunc('hour', now()),
+                      interval '1 hour'
+                    ) AS h0
+                  ),
+                  agg AS (
+                    SELECT
+                      h.h0 AS bucket_hour,
+                      CASE WHEN s.human = 1 THEN 'human' ELSE 'bot' END AS human_label,
+                      COUNT(DISTINCT s.ip_cookie) AS cnt
+                    FROM hours h
+                    LEFT JOIN public.sessions s
+                      ON s.session_end >= h.h0
+                     AND s.session_end <  h.h0 + interval '1 hour'
+                    GROUP BY h.h0, CASE WHEN s.human = 1 THEN 'human' ELSE 'bot' END
+                  )
+                  INSERT INTO public.dashboard_human_bot_1h (bucket_hour, human_label, cnt, updated_at)
+                  SELECT bucket_hour, human_label, cnt::bigint, now()
+                  FROM agg
+                  ON CONFLICT (bucket_hour, human_label) DO UPDATE
+                  SET cnt        = EXCLUDED.cnt,
+                      updated_at = EXCLUDED.updated_at;
+
+                  SQL

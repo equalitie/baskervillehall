@@ -1,6 +1,25 @@
 import re
 from enum import Enum
 
+# Suspicious URL patterns typical for scanners/exploit attempts
+SUSPICIOUS_PATH_PATTERNS = [
+    r"/wp-admin/.*\.php$",
+    r"/wp-admin/.*",
+    r"/wp-includes/.*",
+    r"/wp-content/.*",
+    r"/xmlrpc\.php$",
+
+    r"autoload_classmap\.php",
+    r"/pwnd\.php",
+    r"/pwnd/",
+    r"/backups-dup-lite",
+    r"/uploads/\d{4}/",
+    r"/\.env",
+    r"/config\.php",
+]
+
+compiled_path_patterns = [re.compile(p, re.IGNORECASE) for p in SUSPICIOUS_PATH_PATTERNS]
+
 # Define patterns for known scraping tools and bots
 SCRAPER_PATTERNS = {
     "scrapy":           r"\bScrapy/\d+\.\d+(?:\.\d+)?",
@@ -37,7 +56,6 @@ class ModelType(Enum):
     BOT = 'bot'
     GENERIC = 'generic'
 
-
 def count_accepted_languages(header: str) -> int:
     """
     Count distinct language codes in an Accept-Language HTTP header.
@@ -53,6 +71,52 @@ def count_accepted_languages(header: str) -> int:
             languages.add(lang_code)
     return len(languages)
 
+def compute_num_languages(session: dict, dbg=None) -> int:
+    """
+    Compute num_languages for a session, reusing Accept-Language extraction logic.
+
+    - If session['num_languages'] is already set and > 0, returns it.
+    - Otherwise tries to recover Accept-Language from various locations and count languages.
+    - Uses optional dbg() callback if provided (for is_human verbose logging).
+    """
+    num_languages = session.get("num_languages", 0)
+    if num_languages:
+        return num_languages
+
+    raw_accept_lang = (
+        session.get("accept_language")
+        or session.get("Accept-Language")
+    )
+
+    # Try top-level headers dict
+    if not raw_accept_lang:
+        headers = session.get("headers", {})
+        headers_lower = {k.lower(): v for k, v in headers.items()}
+        raw_accept_lang = headers_lower.get("accept-language")
+
+    # Try first request headers if still not found
+    if not raw_accept_lang and session.get("requests"):
+        req0 = session["requests"][0]
+
+        raw_accept_lang = (
+            req0.get("accept_language")
+            or req0.get("Accept-Language")
+        )
+
+        if not raw_accept_lang:
+            h = req0.get("headers", {})
+            h_lower = {k.lower(): v for k, v in h.items()}
+            raw_accept_lang = h_lower.get("accept-language")
+
+    if raw_accept_lang:
+        num_languages = count_accepted_languages(raw_accept_lang)
+        if dbg:
+            dbg(f"[compute_num_languages] Recomputed num_languages={num_languages} from Accept-Language={raw_accept_lang!r}")
+    else:
+        if dbg:
+            dbg("[compute_num_languages] No Accept-Language found; num_languages remains 0")
+
+    return num_languages
 
 def is_asset_only_session(session):
     requests = session['requests']
@@ -248,7 +312,7 @@ def is_bot_user_agent(user_agent):
         r'facebookexternalhit', r'facebookcatalog', r'twitterbot', r'linkedinbot',
         r'pinterestbot', r'whatsapp', r'telegrambot', r'slackbot', r'discordbot',
         r'ahrefsbot', r'semrushbot', r'mj12bot', r'dotbot', r'uptimerobot',
-        r'structured-data'
+        r'structured-data',
         'curl', 'wget', 'python-requests', 'aiohttp', 'urllib', 'httpie',
         'go-http-client', 'okhttp', 'java', 'libcurl', 'node-fetch',
         'axios', 'postmanruntime', 'insomnia', 'restsharp', 'powershell',
@@ -327,7 +391,7 @@ def ua_score(user_agent: str) -> float:
         'facebookexternalhit', 'facebookcatalog', 'twitterbot', 'linkedinbot',
         'pinterestbot', 'whatsapp', 'telegrambot', 'slackbot', 'discordbot',
         'ahrefsbot', 'semrushbot', 'mj12bot', 'dotbot', 'uptimerobot',
-        'structured-data'
+        'structured-data',
         'curl', 'wget', 'python-requests', 'aiohttp', 'urllib', 'httpie',
         'go-http-client', 'okhttp', 'java', 'libcurl', 'node-fetch',
         'axios', 'postmanruntime', 'insomnia', 'restsharp', 'powershell',
@@ -345,196 +409,6 @@ def ua_score(user_agent: str) -> float:
 
     # Normalize to [0, 1]
     return min(score / max_score, 1.0)
-
-
-def is_human(session, verbose: bool = False, logger=None):
-    """
-    Rule-based human detection with optional debugging.
-
-    Parameters:
-        session (dict): Parsed session object.
-        verbose (bool): If True, logs detailed rule evaluation.
-        logger: Optional logger. If None, messages are printed.
-
-    Returns:
-        tuple: (bool, int) where:
-            - bool: True if the session is considered human (score > 30), False otherwise
-            - int: human_score from 1 to 99 (1 = automated, 99 = human, similar to Cloudflare bot score)
-    """
-
-    def dbg(message: str):
-        """Emit debug output if verbose mode is enabled."""
-        if verbose:
-            if logger:
-                logger.info(message)
-            else:
-                print(message)
-
-    # Start with maximum human score (99 = definitely human, 1 = definitely bot)
-    human_score = 99
-
-    # ----------------------------------------------------------------------
-    # 1. Language detection (critical rule)
-    # ----------------------------------------------------------------------
-    # Start with existing field if available.
-    num_languages = session.get("num_languages", 0)
-
-    # If num_languages is zero, attempt to recover Accept-Language
-    # from multiple possible locations inside the session object.
-    if num_languages == 0:
-        raw_accept_lang = (
-            session.get("accept_language") or
-            session.get("Accept-Language")
-        )
-
-        if not raw_accept_lang:
-            headers = session.get("headers", {})
-            headers_lower = {k.lower(): v for k, v in headers.items()}
-            raw_accept_lang = headers_lower.get("accept-language")
-
-        if not raw_accept_lang and session.get("requests"):
-            req0 = session["requests"][0]
-
-            raw_accept_lang = (
-                req0.get("accept_language") or
-                req0.get("Accept-Language")
-            )
-
-            if not raw_accept_lang:
-                h = req0.get("headers", {})
-                h_lower = {k.lower(): v for k, v in h.items()}
-                raw_accept_lang = h_lower.get("accept-language")
-
-        # If we found Accept-Language, compute num_languages
-        if raw_accept_lang:
-            num_languages = count_accepted_languages(raw_accept_lang)
-            dbg(f"[is_human] Recomputed num_languages={num_languages} from Accept-Language={raw_accept_lang!r}")
-        else:
-            dbg("[is_human] No Accept-Language found; num_languages remains 0")
-
-    if num_languages == 0:
-        # Critical indicator - almost certainly a bot
-        human_score = 1
-        dbg(f"[SCORE] num_languages=0 → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 2. HTTP Protocol version check
-    # ----------------------------------------------------------------------
-    http_protocol = session.get('http_protocol', '')
-    if http_protocol:
-        # HTTP/1.0 is very suspicious - almost certainly a bot
-        if http_protocol == 'HTTP/1.0':
-            human_score = min(human_score, 5)
-            dbg(f"[SCORE] http_protocol=HTTP/1.0 (very suspicious) → human_score={human_score}")
-        # HTTP/1.1 with other bot indicators is suspicious
-        # Modern browsers use HTTP/2 or HTTP/3
-        elif http_protocol == 'HTTP/1.1':
-            # Combine with UA score - if UA is also suspicious, likely a bot
-            ua_score_val = session.get('ua_score', 0)
-            if ua_score_val > 0.3:
-                human_score = min(human_score, 10)
-                dbg(f"[SCORE] http_protocol=HTTP/1.1 + ua_score={ua_score_val:.2f} (bot pattern) → human_score={human_score}")
-            # Also check for known scrapers
-            elif session.get('is_scraper', False):
-                human_score = min(human_score, 10)
-                dbg(f"[SCORE] http_protocol=HTTP/1.1 + is_scraper=True → human_score={human_score}")
-            else:
-                # Slight penalty for HTTP/1.1 even if no other indicators
-                human_score -= 5
-                dbg(f"[SCORE] http_protocol=HTTP/1.1 (suspicious) → human_score={human_score}")
-    else:
-        # No http_protocol data - log but don't penalize (backwards compatibility)
-        dbg("[INFO] http_protocol not available in session data")
-
-    # ----------------------------------------------------------------------
-    # 3. UA score (0-1 range, higher = more suspicious)
-    # ----------------------------------------------------------------------
-    ua_score_val = session.get('ua_score', 0)
-    if ua_score_val > 0.6:
-        # Very high UA score - strong bot indicator
-        human_score = min(human_score, 15)
-        dbg(f"[SCORE] ua_score={ua_score_val} > 0.6 (strong bot indicator) → human_score={human_score}")
-    elif ua_score_val > 0.3:
-        # Moderate penalty
-        penalty = int(ua_score_val * 40)
-        human_score -= penalty
-        dbg(f"[SCORE] ua_score={ua_score_val} → penalty={penalty} → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 4. Verified bot (legitimate crawlers like Googlebot, Bingbot)
-    # ----------------------------------------------------------------------
-    if session.get('verified_bot', False):
-        # Legitimate bot, but still automated
-        human_score = min(human_score, 15)
-        dbg(f"[SCORE] verified_bot=True (legitimate crawler) → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 5. Primary session (bot behavior - no session cookies)
-    # ----------------------------------------------------------------------
-    if session.get('primary_session', False):
-        human_score = min(human_score, 20)
-        dbg(f"[SCORE] primary_session=True (no cookies, bot-like) → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 6. Scraper detection
-    # ----------------------------------------------------------------------
-    if session.get('is_scraper', is_scraper(session.get('ua', ''))):
-        human_score = min(human_score, 10)
-        dbg(f"[SCORE] scraper detected → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 7. Headless browser
-    # ----------------------------------------------------------------------
-    if session.get('headless_ua', False):
-        human_score = min(human_score, 10)
-        dbg(f"[SCORE] headless_ua=True (automation tool) → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 8. User-Agent based rules
-    # ----------------------------------------------------------------------
-    if session.get('bot_ua', False):
-        human_score = min(human_score, 20)
-        dbg(f"[SCORE] bot_ua=True → human_score={human_score}")
-
-    if session.get('short_ua', False):
-        human_score -= 20
-        dbg(f"[SCORE] short_ua=True → human_score={human_score}")
-
-    if session.get('ai_bot_ua', False):
-        human_score = min(human_score, 8)
-        dbg(f"[SCORE] ai_bot_ua=True (AI crawler) → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 9. Weak TLS cipher
-    # ----------------------------------------------------------------------
-    if session.get('weak_cipher', False):
-        human_score -= 15
-        dbg(f"[SCORE] weak_cipher=True (outdated/suspicious) → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # 10. AI crawler UA patterns
-    # ----------------------------------------------------------------------
-    if is_ai_bot_user_agent(session.get('ua', '')):
-        human_score = min(human_score, 8)
-        dbg(f"[SCORE] AI crawler UA pattern detected → human_score={human_score}")
-
-    # ----------------------------------------------------------------------
-    # Ensure score is in valid range [1, 99]
-    # ----------------------------------------------------------------------
-    human_score = max(1, min(99, human_score))
-
-    # ----------------------------------------------------------------------
-    # Determine if human based on threshold (>30 = human)
-    # ----------------------------------------------------------------------
-    is_human_result = human_score > 30
-
-    if is_human_result:
-        dbg(f"[HUMAN TRUE] human_score={human_score} > 30 (num_languages={num_languages})")
-    else:
-        dbg(f"[HUMAN FALSE] human_score={human_score} <= 30")
-
-    return (is_human_result, human_score)
-
 
 def is_ai_bot_user_agent(user_agent: str) -> bool:
     """
@@ -584,7 +458,7 @@ def is_bad_bot(session):
     if not session['primary_session']:
         return False
 
-    if not session['bot_ua'] or not session['ai_bot_ua']:
+    if not session['bot_ua'] and not session['ai_bot_ua']:
         return True
 
     # a legit bot does not change its user agent
@@ -599,3 +473,474 @@ def is_bad_bot(session):
             return True
 
     return False
+
+def path_suspicion_score(url: str, status_code: int) -> float:
+    """
+    Returns a score between 0.0 and 1.0 representing how suspicious the URL looks.
+    0.0 = not suspicious
+    1.0 = highly suspicious (exploit/scan pattern)
+    """
+    if not url:
+        return 0.0
+
+    u = url.lower()
+    score = 0.0
+
+    # Any .php request outside normal app flow is suspicious
+    if ".php" in u:
+        score += 0.3
+
+    # Explicit known exploit/scan patterns
+    for pat in compiled_path_patterns:
+        if pat.search(u):
+            score += 0.5
+            break
+
+    # 404 on a suspicious path increases suspicion
+    if status_code is not None and status_code == 404 and (".php" in u or "wp-" in u):
+        score += 0.3
+
+    return min(score, 1.0)
+
+
+def cipher_suspicion_score(cipher_type: str) -> float:
+    """
+    Converts normalized cipher family into a suspicion score.
+    0.0 = modern secure browser cipher
+    1.0 = weak/legacy/bot-like cipher
+    """
+    if not cipher_type:
+        return 0.3  # unknown -> slightly suspicious
+
+    ct = cipher_type.lower()
+
+    if ct in ("modern_aes128_gcm", "modern_aes256_gcm", "modern_chacha20"):
+        return 0.0
+
+    if ct == "ecdhe_cbc":
+        return 0.2
+
+    if ct == "rsa_legacy":
+        return 0.6
+
+    if ct == "weak":
+        return 1.0
+
+    # "none", "other", "grease" — mildly suspicious
+    if ct in ("none", "other", "grease"):
+        return 0.4
+
+    return 0.4
+
+
+def get_baskerville_score_1(session: dict) -> int:
+    """
+    Computes baskerville_score_1 for a full session,
+    using ONLY the first request plus very cheap session-level signals.
+
+    Output:
+        1   = almost certainly a bot
+        99  = almost certainly human
+    """
+    requests = session.get("requests", [])
+    if not requests:
+        return 50  # neutral fallback
+
+    req = requests[0]  # use first request in the session
+
+    # Extract core fields
+    ua = req.get("ua", "") or req.get("user_agent", "")
+    url = req.get("url", "") or req.get("path", "")
+    status = req.get("code", None)
+
+    # Suspicion based on UA (0..1 where 1 = suspicious)
+    ua_susp = ua_score(ua)
+
+    # Suspicion based on URL/path
+    path_susp = path_suspicion_score(url, status_code=status)
+
+    # Cipher suspicion (from session metadata)
+    cipher_type = session.get("cipher_type")
+    cipher = session.get("cipher")
+
+    # If cipher_type missing but cipher exists, normalize it
+    if cipher_type is None and cipher:
+        cipher_type = normalize_cipher(cipher)
+
+    cipher_susp = cipher_suspicion_score(cipher_type)
+
+    # Language suspicion (reuse same logic as is_human, but without logging)
+    num_languages = compute_num_languages(session, dbg=None)
+    # 0 languages = highly suspicious, >=1 = not suspicious
+    lang_susp = 1.0 if num_languages == 0 else 0.0
+
+    # Weighted combination into bot suspicion raw score (0..1)
+    # Path is most informative for scanners, then UA, then cipher + language.
+    bot_susp_raw = (
+        0.5 * path_susp +
+        0.2 * ua_susp +
+        0.15 * cipher_susp +
+        0.15 * lang_susp
+    )
+
+    # Convert into baskerville human-like score (1..99)
+    baskerville_score_1 = int(round(99 * (1.0 - bot_susp_raw)))
+    baskerville_score_1 = max(1, min(99, baskerville_score_1))
+
+    return baskerville_score_1
+
+import math
+
+
+def _entropy_from_counts(counts: dict[str, int]) -> float:
+    """
+    Same entropy formula used in FeatureExtractor.calculate_entropy().
+    """
+    total = sum(counts.values())
+    if total == 0:
+        return 0.0
+
+    H = 0.0
+    for c in counts.values():
+        if c == 0:
+            continue
+        p = c / total
+        H -= p * math.log(p, 2)
+    return H
+
+
+def get_baskerville_score_2(session: dict) -> int:
+    """
+    Computes baskerville_score_2 for a session with a small number of requests.
+
+    Uses ONLY cheap, rule-based features:
+      - aggregated path suspicion
+      - UA suspicion
+      - primary_session flag (no cookies)
+      - cipher_type suspicion
+      - entropy of URLs (important! bots have very low entropy)
+      - num_languages (0 = suspicious)
+
+    Output:
+        1   = almost certainly a bot
+        99  = almost certainly a human
+    """
+    requests = session.get("requests", [])
+    if not requests:
+        return 50
+
+    # If session has only 1 request, score_0 should handle it.
+    if len(requests) == 1:
+        return 50
+
+    # ----------------------------------------------------------------------
+    # 1. Aggregate path suspicion across requests
+    # ----------------------------------------------------------------------
+    path_susps = []
+    for r in requests:
+        url = r.get("url", "") or r.get("path", "")
+        status = r.get("code", None)
+        path_susps.append(path_suspicion_score(url, status_code=status))
+
+    avg_path_susp = sum(path_susps) / len(path_susps) if path_susps else 0.0
+
+    # ----------------------------------------------------------------------
+    # 2. UA suspicion (0..1)
+    # ----------------------------------------------------------------------
+    first_req = requests[0]
+    ua = first_req.get("ua", "") or first_req.get("user_agent", "")
+    ua_susp = ua_score(ua)
+
+    # ----------------------------------------------------------------------
+    # 3. Cipher suspicion
+    # ----------------------------------------------------------------------
+    cipher_type = session.get("cipher_type")
+    cipher = session.get("cipher")
+    if cipher_type is None and cipher:
+        cipher_type = normalize_cipher(cipher)
+    cipher_susp = cipher_suspicion_score(cipher_type)
+
+    # ----------------------------------------------------------------------
+    # 4. Primary session suspicion (no cookies)
+    # ----------------------------------------------------------------------
+    primary_susp = 1.0 if session.get("primary_session", False) else 0.0
+
+    # ----------------------------------------------------------------------
+    # 5. Language suspicion — IMPORTANT:
+    #    Cloudflare gives only 0 or 1, never more.
+    #    Therefore: 0 = highly suspicious (no Accept-Language).
+    # ----------------------------------------------------------------------
+    num_languages = session.get("num_languages", 0)
+    lang_susp = 1.0 if num_languages == 0 else 0.0
+
+    # ----------------------------------------------------------------------
+    # 6. URL entropy — bots typically have extremely low entropy (<0.3).
+    #    Humans click around → entropy >1.0.
+    # ----------------------------------------------------------------------
+    url_counts = {}
+    for r in requests:
+        u = r.get("url", "") or r.get("path", "")
+        url_counts[u] = url_counts.get(u, 0) + 1
+
+    entropy = _entropy_from_counts(url_counts)
+    entropy_norm = min(entropy / 3.0, 1.0)  # normalize typical human range
+    entropy_susp = 1.0 - entropy_norm       # low entropy = suspicious
+
+    # ----------------------------------------------------------------------
+    # 7. Weighted suspicion score (0..1)
+    #
+    # Tuned so that:
+    #   ✔ scanners (/wp-admin + 404 + curl) → score < 30
+    #   ✔ real users → score > 70
+    #
+    # ----------------------------------------------------------------------
+    bot_susp_raw = (
+        0.45 * avg_path_susp +
+        0.15 * ua_susp +
+        0.10 * primary_susp +
+        0.05 * cipher_susp +
+        0.15 * lang_susp +
+        0.10 * entropy_susp
+    )
+
+    # Convert to human-like score (1..99)
+    score = int(round(99 * (1.0 - bot_susp_raw)))
+    score = max(1, min(99, score))
+
+    return score
+
+def get_baskerville_score_3(session: dict, verbose: bool = False, logger=None) -> int:
+    """
+    Computes baskerville_score_3 for a full session using all cheap rule-based signals.
+
+    This is the "full context" rule-based score that replaces the old is_human human_score.
+
+    Output:
+        1   = almost certainly a bot
+        99  = almost certainly a human
+    """
+
+    def dbg(message: str):
+        """Emit debug output if verbose mode is enabled."""
+        if verbose:
+            if logger:
+                logger.info(message)
+            else:
+                print(message)
+
+    # Start with maximum human score (99 = definitely human, 1 = definitely bot)
+    baskerville_score_3 = 99
+
+    # ----------------------------------------------------------------------
+    # 1. Language detection (critical rule)
+    # ----------------------------------------------------------------------
+    num_languages = compute_num_languages(session, dbg=dbg)
+
+    if num_languages == 0:
+        # Critical indicator - almost certainly a bot
+        baskerville_score_3 = 1
+        dbg(f"[SCORE] num_languages=0 → baskerville_score_3={baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 2. HTTP Protocol version check
+    # ----------------------------------------------------------------------
+    http_protocol = session.get('http_protocol', '')
+    if http_protocol:
+        # HTTP/1.0 is very suspicious - almost certainly a bot
+        if http_protocol == 'HTTP/1.0':
+            baskerville_score_3 = min(baskerville_score_3, 5)
+            dbg(f"[SCORE] http_protocol=HTTP/1.0 (very suspicious) → baskerville_score_3={baskerville_score_3}")
+        # HTTP/1.1 with other bot indicators is suspicious
+        # Modern browsers use HTTP/2 or HTTP/3
+        elif http_protocol == 'HTTP/1.1':
+            # Combine with UA score - if UA is also suspicious, likely a bot
+            ua_score_val = session.get('ua_score', 0)
+            if ua_score_val > 0.3:
+                prev = baskerville_score_3
+                baskerville_score_3 = min(baskerville_score_3, 10)
+                dbg(f"[SCORE] http_protocol=HTTP/1.1 + ua_score={ua_score_val:.2f} (bot pattern) → {prev} → {baskerville_score_3}")
+            # Also check for known scrapers
+            elif session.get('is_scraper', False):
+                prev = baskerville_score_3
+                baskerville_score_3 = min(baskerville_score_3, 10)
+                dbg(f"[SCORE] http_protocol=HTTP/1.1 + is_scraper=True → {prev} → {baskerville_score_3}")
+            else:
+                # Slight penalty for HTTP/1.1 even if no other indicators
+                baskerville_score_3 -= 5
+                dbg(f"[SCORE] http_protocol=HTTP/1.1 (suspicious) → baskerville_score_3={baskerville_score_3}")
+    else:
+        # No http_protocol data - log but don't penalize (backwards compatibility)
+        dbg("[INFO] http_protocol not available in session data")
+
+    # ----------------------------------------------------------------------
+    # 3. UA score (0-1 range, higher = more suspicious)
+    # ----------------------------------------------------------------------
+    ua_score_val = session.get('ua_score', 0)
+    if ua_score_val > 0.6:
+        # Very high UA score - strong bot indicator
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 15)
+        dbg(f"[SCORE] ua_score={ua_score_val} > 0.6 (strong bot indicator) → {prev} → {baskerville_score_3}")
+    elif ua_score_val > 0.3:
+        # Moderate penalty
+        penalty = int(ua_score_val * 40)
+        baskerville_score_3 -= penalty
+        dbg(f"[SCORE] ua_score={ua_score_val} → penalty={penalty} → baskerville_score_3={baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 4. Verified bot (legitimate crawlers like Googlebot, Bingbot)
+    # ----------------------------------------------------------------------
+    if session.get('verified_bot', False):
+        # Legitimate bot, but still automated
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 15)
+        dbg(f"[SCORE] verified_bot=True (legitimate crawler) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 5. Primary session (bot behavior - no session cookies)
+    # ----------------------------------------------------------------------
+    if session.get('primary_session', False):
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 20)
+        dbg(f"[SCORE] primary_session=True (no cookies, bot-like) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 6. Scraper detection
+    # ----------------------------------------------------------------------
+    if session.get('is_scraper', is_scraper(session.get('ua', ''))):
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 10)
+        dbg(f"[SCORE] scraper detected → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 7. Headless browser
+    # ----------------------------------------------------------------------
+    if session.get('headless_ua', False):
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 10)
+        dbg(f"[SCORE] headless_ua=True (automation tool) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 8. User-Agent based rules
+    # ----------------------------------------------------------------------
+    if session.get('bot_ua', False):
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 20)
+        dbg(f"[SCORE] bot_ua=True → {prev} → {baskerville_score_3}")
+
+    if session.get('short_ua', False):
+        prev = baskerville_score_3
+        baskerville_score_3 -= 20
+        dbg(f"[SCORE] short_ua=True → {prev} → {baskerville_score_3}")
+
+    if session.get('ai_bot_ua', False):
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 8)
+        dbg(f"[SCORE] ai_bot_ua=True (AI crawler) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 9. Weak TLS cipher (precomputed flag)
+    # ----------------------------------------------------------------------
+    if session.get('weak_cipher', False):
+        prev = baskerville_score_3
+        baskerville_score_3 -= 15
+        dbg(f"[SCORE] weak_cipher=True (outdated/suspicious) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 10. AI crawler UA patterns
+    # ----------------------------------------------------------------------
+    if is_ai_bot_user_agent(session.get('ua', '')):
+        prev = baskerville_score_3
+        baskerville_score_3 = min(baskerville_score_3, 8)
+        dbg(f"[SCORE] AI crawler UA pattern detected → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 11. Full-session URL features (path suspicion + entropy + primary_session)
+    # ----------------------------------------------------------------------
+    requests = session.get("requests") or []
+    if requests:
+        # 11.1 Aggregate path suspicion across all requests
+        path_susps = []
+        for r in requests:
+            url = r.get("url", "") or r.get("path", "")
+            status = r.get("code", None)
+            path_susps.append(path_suspicion_score(url, status_code=status))
+
+        avg_path_susp = sum(path_susps) / len(path_susps) if path_susps else 0.0
+        dbg(f"[INFO] avg_path_susp={avg_path_susp:.3f} over {len(requests)} requests")
+
+        if avg_path_susp > 0.7:
+            prev = baskerville_score_3
+            baskerville_score_3 = min(baskerville_score_3, 10)
+            dbg(f"[SCORE] avg_path_susp={avg_path_susp:.2f} (high exploit/scan pattern) → {prev} → {baskerville_score_3}")
+        elif avg_path_susp > 0.4:
+            prev = baskerville_score_3
+            baskerville_score_3 = min(baskerville_score_3, 25)
+            dbg(f"[SCORE] avg_path_susp={avg_path_susp:.2f} (suspicious paths) → {prev} → {baskerville_score_3}")
+
+        # 11.2 Strong rule: many requests + no cookies + suspicious paths
+        if session.get("primary_session", False) and len(requests) >= 5 and avg_path_susp > 0.4:
+            prev = baskerville_score_3
+            baskerville_score_3 = min(baskerville_score_3, 8)
+            dbg(
+                f"[SCORE] primary_session=True + {len(requests)} requests + high path_susp "
+                f"→ {prev} → {baskerville_score_3}"
+            )
+
+        # 11.3 Entropy of URLs
+        if len(requests) >= 3:
+            url_counts: dict[str, int] = {}
+            for r in requests:
+                u = r.get("url", "") or r.get("path", "")
+                url_counts[u] = url_counts.get(u, 0) + 1
+
+            entropy = _entropy_from_counts(url_counts)
+            dbg(f"[INFO] entropy={entropy:.3f} for {len(url_counts)} distinct URLs")
+
+            if entropy < 0.3:
+                prev = baskerville_score_3
+                baskerville_score_3 = min(baskerville_score_3, 10)
+                dbg(f"[SCORE] entropy={entropy:.2f} (very low, repetitive URLs) → {prev} → {baskerville_score_3}")
+            elif entropy < 0.8:
+                prev = baskerville_score_3
+                baskerville_score_3 = min(baskerville_score_3, 25)
+                dbg(f"[SCORE] entropy={entropy:.2f} (low URL diversity) → {prev} → {baskerville_score_3}")
+
+    # 11.4 Cipher family suspicion (normalized cipher_type)
+    cipher_type = session.get("cipher_type")
+    cipher = session.get("cipher")
+    if cipher_type is None and cipher:
+        cipher_type = normalize_cipher(cipher)
+
+    if cipher_type is not None:
+        ct_susp = cipher_suspicion_score(cipher_type)
+        dbg(f"[INFO] cipher_type={cipher_type}, cipher_susp={ct_susp:.2f}")
+        if ct_susp >= 0.8:
+            prev = baskerville_score_3
+            baskerville_score_3 = min(baskerville_score_3, 10)
+            dbg(f"[SCORE] cipher_type={cipher_type} (very weak/legacy) → {prev} → {baskerville_score_3}")
+        elif ct_susp >= 0.4:
+            prev = baskerville_score_3
+            baskerville_score_3 = max(1, baskerville_score_3 - 10)
+            dbg(f"[SCORE] cipher_type={cipher_type} (legacy/mixed) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # Clamp into [1, 99]
+    # ----------------------------------------------------------------------
+    baskerville_score_3 = max(1, min(99, baskerville_score_3))
+    dbg(f"[FINAL] baskerville_score_3={baskerville_score_3}")
+
+    return baskerville_score_3
+
+
+def is_human(session, verbose: bool = False, logger=None):
+    """
+    Backwards-compatible wrapper around baskerville_score_3.
+
+    Returns:
+        (bool, int):
+          - bool: True if baskerville_score_3 > 30 (considered human)
+          - int:  baskerville_score_3 in [1..99]
+    """
+    baskerville_score_3 = get_baskerville_score_3(session, verbose=verbose, logger=logger)
+    return (baskerville_score_3 > 30, baskerville_score_3)
