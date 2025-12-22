@@ -39,10 +39,15 @@ docker buildx build --platform linux/amd64 -f ./Dockerfile_latest . -t equalitie
 docker push equalitie/baskervillehall:latest
 ```
 
+```
+docker buildx build --platform linux/amd64 -f ./Dockerfile_latest . -t equalitie/baskervillehall:dev
+docker push equalitie/baskervillehall:dev
+```
+
 ### Building session image
 ```commandline
-docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session
-docker push equalitie/baskervillehall:session
+docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session2
+docker push equalitie/baskervillehall:session2
 
 ```
 

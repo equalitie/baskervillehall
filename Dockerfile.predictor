@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Force correct numpy version first
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip uninstall -y numpy scikit-learn || true
+
+# Copy and install Python requirements
+COPY requirements.predictor.txt /tmp/requirements.predictor.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.predictor.txt
+RUN pip install --no-cache-dir shap==0.46.0 pandas tensorflow-hub==0.14.0 tensorflow-text==2.13.0
+# Copy source code
+COPY ./src /usr/bin/baskervillehall/src
+COPY ./setup.py /usr/bin/baskervillehall/setup.py
+COPY ./README.md /usr/bin/baskervillehall/README.md
+COPY requirements.predictor.txt /usr/bin/baskervillehall/requirements.txt
+
+# Install the package
+WORKDIR /usr/bin/baskervillehall
+RUN pip install -e .
+
+# Clean up build dependencies
+RUN apt-get autoremove -y gcc g++ && \
+    apt-get autoclean && \
+    pip cache purge
+
+# Set Python path
+ENV PYTHONPATH="/usr/bin/baskervillehall/src"

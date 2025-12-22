@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-baskervillehall-lb
+  namespace: default
+  labels:
+    app: postgres-baskervillehall
+  annotations:
+    loadbalancer.ovhcloud.com/class: "octavia"
+
+spec:
+  type: LoadBalancer
+
+  loadBalancerSourceRanges:
+    - 134.122.32.231/32
+    - 147.182.146.235/32
+    - 212.105.155.18/32
+
+  selector:
+    app: postgres-baskervillehall
+
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

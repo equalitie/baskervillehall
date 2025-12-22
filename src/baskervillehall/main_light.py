@@ -84,12 +84,14 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT', "%Y-%m-%d %H:%M:%S"),
             'min_number_of_requests': int(os.environ.get('MIN_NUMBER_OF_REQUESTS', 5)),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
+            'deflect_config_auth': os.environ.get('DEFLECT_CONFIG_AUTH'),
             'whitelist_url_default': os.environ.get('WHITELIST_URL_DEFAULT').split(','),
             'postgres_connection': postgres_connection,
             'lag_high_threshold': int(os.environ.get('LAG_HIGH_THRESHOLD', 3000)),
             'lag_moderate_threshold': int(os.environ.get('LAG_MODERATE_THRESHOLD', 1500)),
             'lag_emergency_threshold': int(os.environ.get('LAG_EMERGENCY_THRESHOLD', 8000)),
-            'lag_critical_threshold': int(os.environ.get('LAG_CRITICAL_THRESHOLD', 6000))
+            'lag_critical_threshold': int(os.environ.get('LAG_CRITICAL_THRESHOLD', 6000)),
+            'score_2_num_requests': int(os.environ.get('SCORE_2_NUM_REQUESTS', 5)),
         }
 
         logger.info("Starting session pipeline")

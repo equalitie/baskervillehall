@@ -60,6 +60,7 @@ class ModelLoader(object):
             with self.lock:
                 self.models[host] = (model, datetime.now())
                 self.logger.info(f'Loaded model for host {host} {self.model_type.value}. '
+                                 f' {self.s3_path} '
                                  f'Total models = {len(self.models.keys())}')
 
     def start(self):

@@ -1,0 +1,83 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-predictor-ch"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-predictor-ch"
+spec:
+  replicas: 1
+  serviceName: "baskervillehall-predictor-ch"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-predictor-ch"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-predictor-ch"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nodepool
+                    operator: In
+                    values:
+                      - postgres
+      restartPolicy: Always
+      containers:
+      - name: "baskervillehall-predictor-ch"
+        image: "equalitie/baskervillehall:dev"
+        imagePullPolicy: Always
+        command:
+          - python
+        args:
+          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - predict
+        envFrom:
+          - configMapRef:
+              name: baskervillehall-ch
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: S3_ACCESS
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_access
+        - name: S3_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_secret
+        - name: S3_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_endpoint
+        - name: S3_REGION
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_region
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DATABASE_NAME
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_DATABASE_NAME

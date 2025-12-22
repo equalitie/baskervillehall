@@ -1,0 +1,13 @@
+kafka-python
+psycopg2-binary
+pandas
+numpy
+psutil
+requests
+cachetools
+scikit-learn
+pytz
+python-dateutil
+sqlalchemy
+orjson
+ciso8601

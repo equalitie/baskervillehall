@@ -1,0 +1,29 @@
+# Minimal Dockerfile for session pipeline only
+FROM python:3.11-slim
+
+# Install only essential system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /usr/bin/baskervillehall
+
+# Copy only session-related requirements
+COPY requirements.session.txt ./
+
+# Install only minimal Python dependencies needed for session processing
+RUN pip install --no-cache-dir -r requirements.session.txt
+
+# Copy source code
+COPY ./src ./src
+COPY ./setup.py ./
+
+# Install the package
+RUN pip install -e .
+
+# Set user
+USER 1000
+
+CMD ["python", "/usr/bin/baskervillehall/src/baskervillehall/main.py", "session"]

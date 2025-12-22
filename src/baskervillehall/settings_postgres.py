@@ -14,7 +14,7 @@ class SettingsPostgres(Settings):
         self.postgres_connection = postgres_connection
 
     def read(self):
-        if len(self.postgres_connection['host']) == 0:
+        if len(self.postgres_connection.get('host', '')) == 0:
             return
 
         connection = psycopg2.connect(**self.postgres_connection)

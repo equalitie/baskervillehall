@@ -1,26 +1,24 @@
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 import json
 import time
 
 
 class JsonUrlReader(object):
-    def __init__(self, url, logger=None, refresh_period_in_seconds=300):
+    def __init__(self, url, logger=None, refresh_period_in_seconds=300, headers=None):
         self.url = url
         self.refresh_period_in_seconds = refresh_period_in_seconds
         self.last_timestamp = None
         self.logger = logger
         self.data = None
-
-    import json
-    from urllib.request import urlopen
-    from urllib.error import URLError, HTTPError
+        self.headers = headers or {}
 
     def read_json_from_url(self, url):
         html = None
 
         try:
-            html = urlopen(url, timeout=3).read()
+            request = Request(url, headers=self.headers)
+            html = urlopen(request, timeout=3).read()
         except TimeoutError as e:
             if self.logger:
                 self.logger.error(f'Timeout while parsing url {url}', exc_info=e)

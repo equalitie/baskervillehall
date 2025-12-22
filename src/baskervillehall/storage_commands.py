@@ -31,6 +31,10 @@ class StorageCommands(StorageBase):
         )
         self.num_requests = num_requests
 
+    def get_delete_query(self, ts):
+        return (f"delete from {self.table} where created_at < \'{ts.strftime(self.datetime_format)}\'"
+                f"and not (human = 1) ;")
+
     def get_sql(self, record):
         command = record
         s = command['session']
@@ -44,6 +48,9 @@ class StorageCommands(StorageBase):
         if duration < 1:
             duration = 1
         num_ua = self.get_number_of_useragents(s)
+        cloudflare_score = command.get("cloudflare_score", 0)
+        if cloudflare_score == '':
+            cloudflare_score = 0
         shapley_formatted_if = json.dumps(command['shapley_if']) if len(command['shapley_if']) > 0 else ''
         shapley_formatted_ae = json.dumps(command['shapley_ae']) if len(command['shapley_ae']) > 0 else ''
         ua = s["ua"].replace("\'", "")
@@ -53,7 +60,7 @@ class StorageCommands(StorageBase):
             f'datacenter, hits, score_if, score_ae, threshold_ae, bot_score, bot_score_top_factor,' \
             f'shapley_feature_if, shapley_feature_ae,difficulty, shapley_if, shapley_ae,request_count, command_type_name, source, \n'\
             f'meta, hit_rate, num_user_agent,'\
-            f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae)\n'\
+            f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae,baskerville_score,cloudflare_score)\n'\
             f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{command["session_id"]}\',\n'\
             f'\'{s["ip"]}_{command["session_id"]}\',{int(s["primary_session"])},\n'\
             f'{int(s["human"])},'\
@@ -72,5 +79,7 @@ class StorageCommands(StorageBase):
             f'{hits * 60.0 / duration:.1f}, {num_ua}, '\
             f'{duration:.1f}, \'{command["start"]}\', \'{command["end"]}\',\n'\
             f'\'{requests}\', \'pipeline\',\'{s["scraper_name"]}\','\
-            f'{command["prediction_if"]},{command["prediction_ae"]}'\
+            f'{command["prediction_if"]},{command["prediction_ae"]},'\
+            f'{command.get("baskerville_score", 0)},'\
+            f'{cloudflare_score}'\
             f');'

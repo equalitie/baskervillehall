@@ -63,7 +63,7 @@ def main():
     }
 
     kafka_connection_output = {
-        'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT')
+        'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT', '')
     }
 
     debug_ip = os.environ.get('DEBUG_IP')
@@ -138,6 +138,7 @@ def main():
             'datetime_format': os.environ.get('DATETIME_FORMAT'),
             'n_jobs_predict': int(os.environ.get('N_JOBS_PREDICT')),
             'deflect_config_url': os.environ.get('DEFLECT_CONFIG_URL'),
+            'deflect_config_auth': os.environ.get('DEFLECT_CONFIG_AUTH'),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
             'postgres_connection': None, #postgres_connection,
@@ -159,6 +160,8 @@ def main():
             'rate_limit_expiration': int(os.environ.get('RATE_LIMIT_EXPIRATION', 300)),
             'dnet_partition_map': json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
             'print_log_in_command': os.environ.get('PRINT_LOG_IN_COMMAND') == 'True',
+            'use_baskerville_score': os.environ.get('USE_BASKERVILLE_SCORE', 'False') == 'True',
+            'verbose_classifier': os.environ.get('VERBOSE_CLASSIFIER', 'False') == 'True',
         }
 
         predictor = BaskervillehallPredictor(

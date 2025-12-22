@@ -107,6 +107,8 @@ CREATE TABLE public.challenge_command_history (
 	scraper_name text,
 	prediction_if int4 DEFAULT 0 NULL,
 	prediction_ae int4 DEFAULT 0 NULL,
+	baskerville_score int4 DEFAULT 0 NULL,
+	cloudflare_score int4 DEFAULT 0 NULL,
 
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );
@@ -119,4 +121,35 @@ CREATE INDEX idx_challenge_ip_created
 -- public.challenge_command_history foreign keys
 
 ALTER TABLE public.challenge_command_history ADD CONSTRAINT challenge_command_history_hostname_id_fkey FOREIGN KEY (hostname_id) REFERENCES public.hostname(hostname_id) ON DELETE CASCADE;
+
+
+
+CREATE TABLE IF NOT EXISTS public.dashboard_challenged_1h (
+  bucket_hour timestamptz PRIMARY KEY,
+  challenged_ips bigint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.dashboard_passed_1h (
+  bucket_hour timestamptz PRIMARY KEY,
+  passed_ips bigint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.dashboard_precision_1h (
+  bucket_hour timestamptz PRIMARY KEY,
+  total_ips bigint NOT NULL,
+  passed_ips bigint NOT NULL,
+  precision_pct numeric(5,1) NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.dashboard_human_bot_1h (
+  bucket_hour timestamptz NOT NULL,
+  human_label text NOT NULL,
+  cnt bigint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (bucket_hour, human_label)
+);
+
 
