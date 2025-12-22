@@ -592,12 +592,51 @@ class BaskervillehallPredictor(object):
 
         if producer_output is not None:
             # do not send heavy fields to the commands
-            payload.pop('session')
-            payload.pop('baskerville_score')
-            payload.pop('cloudflare_score')
-            payload['print_log'] = self.print_log_in_command
 
-            payload_encoded = json.dumps(payload).encode("utf-8")
+            output_payload = {}
+
+            for k in [
+                "Name",
+                "difficulty",
+                "Value",
+                "country",
+                "continent",
+                "datacenter_code",
+                "session_id",
+                "host",
+                "source",
+                "shapley",
+                "shapley_if",
+                "shapley_ae",
+                "meta",
+                "prediction_if",
+                "prediction_ae",
+                "shapley_feature",
+                "shapley_feature_if",
+                "shapley_feature_ae",
+                "start",
+                "end",
+                "duration",
+                "score",
+                "score_if",
+                "score_ae",
+                "bot_score",
+                "bot_score_top_factor",
+                "num_requests",
+                "user_agent",
+                "human",
+                "datacenter_asn",
+                "scraper_name",
+                "threshold_ae",
+                "rate_limit_hits",
+                "rate_limit_interval",
+                "rate_limit_expiration"
+                ]:
+                output_payload[k] = payload[k]
+
+            output_payload['print_log'] = self.print_log_in_command
+
+            payload_encoded = json.dumps(output_payload).encode("utf-8")
             partition = self.dnet_partition_map.get(dnet, -1)
             if partition < 0:
                 self.logger.warning(f"Dnet  {dnet} is not found in "
@@ -939,6 +978,17 @@ class BaskervillehallPredictor(object):
         )
         self.send(producer, None, payload, key=host, dnet=dnet)
 
+    def process_immature_session(self, session):
+        self.logger.info(f"Immature session is_human={is_human(session)}, "
+                         f"len={len(session['requests'])}, "
+                         f"score1 = {session.get('baskerville_score_1', 'N/A')}, "
+                         f"score2 = {session.get('baskerville_score_2', 'N/A')}, "
+                         f"ip={session['ip']}, "
+                         f"session_id={session['session_id']} ")
+
+
+
+
     def run(self):
         pending_challenge_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         pending_interactive_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
@@ -1038,6 +1088,10 @@ class BaskervillehallPredictor(object):
                     if session.get("deflect_password", False):
                         continue
 
+                    if session.get('immature_session', False):
+                        self.process_immature_session(session)
+                        continue
+
                     if not session.get("primary_session", False):
                         ip_with_sessions[session["ip"]] = True
 
@@ -1075,3 +1129,4 @@ class BaskervillehallPredictor(object):
                 producer_output.flush()
 
         self.logger.info("Predictor finished")
+

@@ -90,7 +90,8 @@ def main():
             'lag_high_threshold': int(os.environ.get('LAG_HIGH_THRESHOLD', 3000)),
             'lag_moderate_threshold': int(os.environ.get('LAG_MODERATE_THRESHOLD', 1500)),
             'lag_emergency_threshold': int(os.environ.get('LAG_EMERGENCY_THRESHOLD', 8000)),
-            'lag_critical_threshold': int(os.environ.get('LAG_CRITICAL_THRESHOLD', 6000))
+            'lag_critical_threshold': int(os.environ.get('LAG_CRITICAL_THRESHOLD', 6000)),
+            'score_2_num_requests': int(os.environ.get('SCORE_2_NUM_REQUESTS', 5)),
         }
 
         logger.info("Starting session pipeline")

@@ -7,7 +7,10 @@ import time as time_module
 from collections import OrderedDict
 from datetime import datetime, time, timezone
 
-from baskervillehall.baskerville_rules import is_human, get_baskerville_score_1
+from baskervillehall.baskerville_rules import (is_human,
+                                               get_baskerville_score_1,
+                                               get_baskerville_score_2,
+                                               get_baskerville_score_3)
 from baskervillehall.frequency_analyzer import FrequencyAnalyzer
 from baskervillehall.session_fingerprints import SessionFingerprints
 from baskervillehall.vpn_detector import VpnDetector
@@ -25,22 +28,32 @@ from kafka.errors import NoBrokersAvailable
 try:
     import orjson as _json
 
-    def _loads(b): return _json.loads(b)
-    def _dumps(o): return _json.dumps(o)  # -> bytes
+
+    def _loads(b):
+        return _json.loads(b)
+
+
+    def _dumps(o):
+        return _json.dumps(o)  # -> bytes
 except Exception:  # pragma: no cover
     import json as _json
+
 
     def _loads(b):
         if isinstance(b, (bytes, bytearray)):
             return _json.loads(b.decode('utf-8', errors='replace'))
         return _json.loads(b)
 
-    def _dumps(o): return _json.dumps(o).encode('utf-8')
+
+    def _dumps(o):
+        return _json.dumps(o).encode('utf-8')
 
 try:
     import ciso8601 as _ciso
 
-    def _iso(s): return _ciso.parse_datetime(s)
+
+    def _iso(s):
+        return _ciso.parse_datetime(s)
 except Exception:  # pragma: no cover
     def _iso(s):
         if s.endswith('Z'):
@@ -65,15 +78,15 @@ def log_partition_assignment(consumer, logger):
     """Logs current partitions, offsets and lag owned by this consumer."""
     try:
         assignment = consumer.assignment()  # set[TopicPartition]
-        subs = consumer.subscription()      # set[str] or None
+        subs = consumer.subscription()  # set[str] or None
         if not assignment:
             logger.info("Assignment: ∅ (no partitions yet) | subscription=%s", list(subs) if subs else "None")
             return
 
         tps = sorted(list(assignment), key=lambda tp: (tp.topic, tp.partition))
         # Offsets
-        ends = consumer.end_offsets(tps)           # {TopicPartition: int}
-        begins = consumer.beginning_offsets(tps)   # {TopicPartition: int}
+        ends = consumer.end_offsets(tps)  # {TopicPartition: int}
+        begins = consumer.beginning_offsets(tps)  # {TopicPartition: int}
         positions = {tp: consumer.position(tp) for tp in tps}  # {TopicPartition: int or None}
 
         lines = []
@@ -113,38 +126,39 @@ def _to_naive_utc(dt: datetime) -> datetime:
 
 class BaskervillehallSession(object):
     def __init__(
-        self,
-        topic_weblogs='BASKERVILLEHALL_WEBLOGS',
-        topic_sessions='BASKERVILLEHALL_SESSIONS',
-        group_id='session_pipeline',
-        kafka_connection=None,
-        flush_increment=10,
-        min_session_duration=5,
-        max_session_duration=60,
-        reset_duration=5,
-        session_inactivity=1,
-        garbage_collection_period=2,
-        deflect_config_url=None,
-        deflect_config_auth=None,
-        whitelist_url_default=None,
-        whitelist_ip=None,
-        white_list_refresh_period=5,
-        max_primary_sessions_per_ip=10,
-        primary_session_expiration=10,
-        datetime_format='%Y-%m-%d %H:%M:%S',
-        read_from_beginning=False,
-        min_number_of_requests=10,
-        debug_ip=None,
-        logger=None,
-        asn_database_path='',
-        asn_database2_path='',
-        postgres_connection=None,
-        max_session_age_hours=24,
-        lag_high_threshold=10000,
-        lag_moderate_threshold=5000,
-        lag_emergency_threshold=20000,
-        lag_critical_threshold=15000,
-        enable_emergency_partition_seek=True
+            self,
+            topic_weblogs='BASKERVILLEHALL_WEBLOGS',
+            topic_sessions='BASKERVILLEHALL_SESSIONS',
+            group_id='session_pipeline',
+            kafka_connection=None,
+            flush_increment=10,
+            min_session_duration=5,
+            max_session_duration=60,
+            reset_duration=5,
+            session_inactivity=1,
+            garbage_collection_period=2,
+            deflect_config_url=None,
+            deflect_config_auth=None,
+            whitelist_url_default=None,
+            whitelist_ip=None,
+            white_list_refresh_period=5,
+            max_primary_sessions_per_ip=10,
+            primary_session_expiration=10,
+            datetime_format='%Y-%m-%d %H:%M:%S',
+            read_from_beginning=False,
+            min_number_of_requests=10,
+            debug_ip=None,
+            logger=None,
+            asn_database_path='',
+            asn_database2_path='',
+            postgres_connection=None,
+            max_session_age_hours=24,
+            lag_high_threshold=10000,
+            lag_moderate_threshold=5000,
+            lag_emergency_threshold=20000,
+            lag_critical_threshold=15000,
+            enable_emergency_partition_seek=True,
+            score_2_num_requests=5
     ):
         super().__init__()
         if kafka_connection is None:
@@ -256,6 +270,7 @@ class BaskervillehallSession(object):
             'message_count': 0.0,
         }
         self.last_profile_report = datetime.utcnow()
+        self.score_2_num_requests = score_2_num_requests
 
     def _t(self):
         return time_module.time()
@@ -290,7 +305,8 @@ class BaskervillehallSession(object):
              for k, v in self.profile_stats.items() if k != 'message_count'],
             key=lambda x: x[1], reverse=True
         )
-        self.logger.warning(f"🔍 PERFORMANCE PROFILE (last {self.profile_stats['message_count']} messages, {avg_msg_time:.4f}s avg/msg):")
+        self.logger.warning(
+            f"🔍 PERFORMANCE PROFILE (last {self.profile_stats['message_count']} messages, {avg_msg_time:.4f}s avg/msg):")
         for name, time_spent, percentage in sorted_stats[:14]:
             if time_spent > 0:
                 self.logger.warning(f"  {name}: {time_spent:.3f}s ({percentage:.1f}%)")
@@ -360,24 +376,33 @@ class BaskervillehallSession(object):
                 return consumer, producer
             except NoBrokersAvailable as e:
                 delay = initial_delay * (2 ** attempt)
-                self.logger.warning(f"No Kafka brokers available (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s... Error: {e}")
+                self.logger.warning(
+                    f"No Kafka brokers available (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s... Error: {e}")
                 time_module.sleep(delay)
                 if consumer:
-                    try: consumer.close()
-                    except: pass
+                    try:
+                        consumer.close()
+                    except:
+                        pass
                 if producer:
-                    try: producer.close()
-                    except: pass
+                    try:
+                        producer.close()
+                    except:
+                        pass
             except Exception as e:
                 delay = initial_delay * (2 ** attempt)
                 self.logger.error(f"Unexpected Kafka error (attempt {attempt + 1}/{max_retries}): {e}")
                 time_module.sleep(delay)
                 if consumer:
-                    try: consumer.close()
-                    except: pass
+                    try:
+                        consumer.close()
+                    except:
+                        pass
                 if producer:
-                    try: producer.close()
-                    except: pass
+                    try:
+                        producer.close()
+                    except:
+                        pass
         raise Exception(f"Failed to connect to Kafka after {max_retries} attempts")
 
     def update_lag_metrics(self, lag):
@@ -498,7 +523,10 @@ class BaskervillehallSession(object):
     def check_and_send_session(self, session):
         if session['duration'] < self.max_session_duration:
             size = len(session['requests'])
-            if session['duration'] > self.min_session_duration and size > self.min_number_of_requests:
+            immature_session = self.score_2_num_requests <= size < self.min_number_of_requests
+            session['immature_session'] = immature_session
+            if (immature_session and not session.get('immature_session_flushed', False) ) or \
+                    (session['duration'] > self.min_session_duration and size > self.min_number_of_requests):
                 if 'flush_size' not in session or size - session.get('flush_size') > self.flush_increment:
                     if 'flush_end' not in session or (session['end'] - session['flush_end']).total_seconds() > 0:
                         t0 = self._t()
@@ -506,6 +534,7 @@ class BaskervillehallSession(object):
                         self._acc('session_send', t0)
                         session['flush_size'] = size
                         session['flush_end'] = session['end']
+                        session['immature_session_flushed'] = True
 
     def send_session(self, session):
         """
@@ -528,6 +557,12 @@ class BaskervillehallSession(object):
         bot_score = -1.0
         bot_score_top_factor = ''
         deflect_password = False
+
+        # Compute baskerville scores only once (they're based on first request)
+        if 'baskerville_score_1' not in session:
+            session['baskerville_score_1'] = get_baskerville_score_1(session)
+        if 'baskerville_score_2' not in session:
+            session['baskerville_score_2'] = get_baskerville_score_2(session)
 
         for r in requests_sorted:
             rf = {
@@ -594,8 +629,11 @@ class BaskervillehallSession(object):
             'is_scraper': scraper_name is not None,
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
-            'baskerville_score_1': get_baskerville_score_1(session),
+            'immature_session': session['immature_session'],
+            'baskerville_score_1': session['baskerville_score_1'],
+            'baskerville_score_2': session['baskerville_score_2'],
         }
+
         if self.current_lag > self.lag_critical_threshold:
             session_final['fingerprints'] = ''
             session_final['fingerprints_score'] = 0.0
@@ -611,18 +649,16 @@ class BaskervillehallSession(object):
         vps_asn = self.asn_database2.is_vps_asn(asn)
         malicious_asn = self.asn_database2.is_malicious_asn(asn)
         vpn_asn = self.asn_database2.is_vpn_asn(asn)
-        session_final['datacenter_asn'] = self.asn_database.is_datacenter_asn(asn) or vps_asn or malicious_asn or vpn_asn
+        session_final['datacenter_asn'] = self.asn_database.is_datacenter_asn(
+            asn) or vps_asn or malicious_asn or vpn_asn
         session_final['vpn_asn'] = vpn_asn
         session_final['malicious_asn'] = malicious_asn
         session_final['vps_asn'] = vps_asn
         session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
-        is_human_result, baskerville_score_3 = baskerville_rules.is_human(session_final)
-        session_final['human'] = is_human_result
-        session_final['baskerville_score3'] = baskerville_score_3
-        self.logger.info(f"Human check ip={session['ip']}, session_id={session['session_id']}, human={is_human_result}")
-        # Verbose logging for debugging
-        baskerville_rules.is_human(session_final, verbose=True, logger=self.logger)
+        session_final['baskerville_score_3'] = get_baskerville_score_3(session_final)
+        session_final['human'] = is_human(session_final)
+
         session_final['bad_bot'] = baskerville_rules.is_bad_bot(session_final)
 
         if session_final['human']:
@@ -711,7 +747,7 @@ class BaskervillehallSession(object):
             meta = h['meta']
 
             send_threshold = self.min_number_of_requests
-            
+
             if duration > self.max_session_duration:
                 if self.debugging:
                     self.logger.info(f'Deleting overlong primary for IP={ip}, host={host} (duration {duration:.1f}s)')
@@ -723,7 +759,8 @@ class BaskervillehallSession(object):
             elif self.current_lag >= self.lag_high_threshold:
                 send_threshold = max(send_threshold, int(self.min_number_of_requests * 1.5))
 
-            if request_count >= send_threshold or request_count == 1:
+            immature_session = request_count == 1
+            if immature_session or request_count >= send_threshold:
                 reqs.sort(key=lambda x: x['ts'])
                 session = {
                     'ua': meta['ua'],
@@ -750,6 +787,7 @@ class BaskervillehallSession(object):
                     'is_monotonic': True,
                     'cloudflare_score': meta.get('cloudflare_score', 0),
                     'http_protocol': meta.get('http_protocol', ''),
+                    'immature_session': immature_session,
                 }
                 t_send = self._t()
                 self.send_session(session)
@@ -807,7 +845,8 @@ class BaskervillehallSession(object):
                     self.ips_primary.pop(ip, None)
                     continue
                 oldest = min((s['start'] for s in sessions_for_ip.values()), default=None)
-                if oldest and (current_event_ts_horizon - oldest).total_seconds() > self.primary_session_expiration * 60:
+                if oldest and (
+                        current_event_ts_horizon - oldest).total_seconds() > self.primary_session_expiration * 60:
                     deleted_primary_sessions_count += len(sessions_for_ip)
                     self.ips_primary.pop(ip, None)
                     self.flush_size_primary.pop(ip, None)
@@ -841,7 +880,8 @@ class BaskervillehallSession(object):
                         continue
                     current_aggregated_duration = (h['latest_ts'] - h['oldest_ts']).total_seconds()
                     oldest_age = (current_event_ts_horizon - h['oldest_ts']).total_seconds()
-                    should_flush = (current_aggregated_duration > self.max_session_duration) or (oldest_age > self.primary_session_expiration * 60)
+                    should_flush = (current_aggregated_duration > self.max_session_duration) or (
+                                oldest_age > self.primary_session_expiration * 60)
                     if should_flush and len(reqs_sorted) >= self.min_number_of_requests:
                         meta = h['first_session_data']
                         summary = {
@@ -873,8 +913,10 @@ class BaskervillehallSession(object):
                         self.send_session(summary)
 
                 if hosts_data:
-                    oldest_any = min((v['oldest_ts'] for v in hosts_data.values() if v['oldest_ts'] != datetime.max), default=None)
-                    if oldest_any and (current_event_ts_horizon - oldest_any).total_seconds() > self.primary_session_expiration * 60:
+                    oldest_any = min((v['oldest_ts'] for v in hosts_data.values() if v['oldest_ts'] != datetime.max),
+                                     default=None)
+                    if oldest_any and (
+                            current_event_ts_horizon - oldest_any).total_seconds() > self.primary_session_expiration * 60:
                         deleted_primary_sessions_count += len(sessions_for_ip)
                         self.ips_primary[ip] = {}
                         self.flush_size_primary.pop(ip, None)
@@ -925,7 +967,8 @@ class BaskervillehallSession(object):
 
         try:
             consumer, self.producer = self.create_kafka_connections()
-            self.logger.info(f'Starting Baskervillehall sessionizer from topic {self.topic_weblogs} to {self.topic_sessions}')
+            self.logger.info(
+                f'Starting Baskervillehall sessionizer from topic {self.topic_weblogs} to {self.topic_sessions}')
 
             ts_gc_trigger_wall_clock = datetime.utcnow()
             latest_event_ts_seen = None
@@ -950,7 +993,7 @@ class BaskervillehallSession(object):
                 max_records = self.get_adaptive_max_records()
                 t_poll = self._t()
                 raw_messages = consumer.poll(timeout_ms=250, max_records=max_records
-                                             #, update_offsets=False
+                                             # , update_offsets=False
                                              )
                 poll_time = time_module.time() - t_poll
                 self._acc('kafka_operations', t_poll)
@@ -964,7 +1007,8 @@ class BaskervillehallSession(object):
                             try:
                                 pos = consumer.position(tp)
                                 end = consumer.end_offsets([tp]).get(tp, 'unknown')
-                                self.logger.warning(f'  {tp}: position={pos}, end={end}, lag={end-pos if end != "unknown" else "unknown"}')
+                                self.logger.warning(
+                                    f'  {tp}: position={pos}, end={end}, lag={end - pos if end != "unknown" else "unknown"}')
                             except Exception as e:
                                 self.logger.warning(f'  {tp}: error getting metrics - {e}')
                 else:
@@ -992,7 +1036,8 @@ class BaskervillehallSession(object):
                         self.logger.info(
                             f'Lag = {lag} (adaptive max_records: {max_records}, dropped: {self.messages_dropped})')
                         ts_lag_report = datetime.utcnow()
-                        if self.profiling_enabled and (datetime.utcnow() - self.last_profile_report).total_seconds() > 30:
+                        if self.profiling_enabled and (
+                                datetime.utcnow() - self.last_profile_report).total_seconds() > 30:
                             self.report_performance_profile()
                             self.last_profile_report = datetime.utcnow()
 
@@ -1020,7 +1065,8 @@ class BaskervillehallSession(object):
 
                         self.skip_expensive_ops = self.current_lag > self.lag_critical_threshold
                         if self.current_lag > self.lag_emergency_threshold:
-                            self.emergency_session_cleanup(latest_event_ts_seen if latest_event_ts_seen else datetime.utcnow())
+                            self.emergency_session_cleanup(
+                                latest_event_ts_seen if latest_event_ts_seen else datetime.utcnow())
                             if self.enable_emergency_partition_seek:
                                 self.emergency_partition_seek(consumer)
 
@@ -1098,7 +1144,8 @@ class BaskervillehallSession(object):
                                 self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                                 self.profile_stats['message_count'] += 1
                                 continue
-                            session_id = '-' + ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(7))
+                            session_id = '-' + ''.join(
+                                random.choice(string.ascii_uppercase + string.digits) for _ in range(7))
 
                         passed_challenge = False
                         deflect_password = False
@@ -1109,10 +1156,10 @@ class BaskervillehallSession(object):
                             banjax_decision = data['banjax_decision']
                             if banjax_decision == 'ShaChallengePassed':
                                 passed_challenge = True
-                            if banjax_decision in ['PasswordChallengePassed', 'PasswordProtectedPriorityPass', 'PasswordChallengeRoamingPassed']:
+                            if banjax_decision in ['PasswordChallengePassed', 'PasswordProtectedPriorityPass',
+                                                   'PasswordChallengeRoamingPassed']:
                                 deflect_password = True
                         elif 'cloudflareProperties' in data:
-                            self.logger.info(data)
                             cloudflare_score = data['cloudflareProperties']['botManagement']['score']
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
@@ -1176,14 +1223,17 @@ class BaskervillehallSession(object):
                             elif ip in self.ips_primary and session_id in self.ips_primary[ip]:
                                 session = self.ips_primary[ip][session_id]
                                 where = 'primary'
+
                         self._acc('msg_session_lookup', t_lookup)
 
                         if where == 'main':
+                            self.logger.info(f"key={key} in main")
                             if self.is_session_expired(session, ts_event):
                                 t_cr = self._t()
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                               verified_bot, ts_event, cipher, ciphers, request,
-                                                              asn, asn_name, num_languages, accept_language, timezone_str,
+                                                              asn, asn_name, num_languages, accept_language,
+                                                              timezone_str,
                                                               dnet, cloudflare_score)
                                 self._acc('session_creation', t_cr)
                                 self.ips[ip][session_id] = session
@@ -1199,6 +1249,7 @@ class BaskervillehallSession(object):
                             self._last_sess_where = 'main'
 
                         elif where == 'primary':
+                            self.logger.info(f"key={key} already in primary")
                             t_upd = self._t()
                             self.update_session(session, request)
                             self._acc('session_update', t_upd)
@@ -1214,7 +1265,6 @@ class BaskervillehallSession(object):
                                 if not prim_map:
                                     self.ips_primary.pop(ip, None)
 
-
                             t_send = self._t()
                             self.check_and_send_session(session)
                             self._acc('session_send', t_send)
@@ -1223,6 +1273,7 @@ class BaskervillehallSession(object):
                             self._last_sess_where = 'main'
 
                         else:
+                            self.logger.info(f"key={key} is a new primary")
                             t_cr = self._t()
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,
@@ -1265,7 +1316,8 @@ class BaskervillehallSession(object):
                 session_age_hours = (current_ts - session['start']).total_seconds() / 3600
                 inactivity_minutes = (current_ts - session['end']).total_seconds() / 60
                 if (session_age_hours > 1 or inactivity_minutes > max(1, self.session_inactivity // 2)):
-                    if (session['duration'] > self.min_session_duration and len(session['requests']) >= self.min_number_of_requests):
+                    if (session['duration'] > self.min_session_duration and len(
+                            session['requests']) >= self.min_number_of_requests):
                         self.send_session(session)
                     sessions_to_delete.append(session_id)
                     cleared_main_sessions += 1

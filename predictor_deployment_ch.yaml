@@ -31,7 +31,7 @@ spec:
       restartPolicy: Always
       containers:
       - name: "baskervillehall-predictor-ch"
-        image: "equalitie/baskervillehall:latest"
+        image: "equalitie/baskervillehall:dev"
         imagePullPolicy: Always
         command:
           - python

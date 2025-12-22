@@ -75,12 +75,12 @@ def compute_num_languages(session: dict, dbg=None) -> int:
     """
     Compute num_languages for a session, reusing Accept-Language extraction logic.
 
-    - If session['num_languages'] is already set and > 0, returns it.
+    - If session['num_languages'] is already set (including 0), returns it.
     - Otherwise tries to recover Accept-Language from various locations and count languages.
     - Uses optional dbg() callback if provided (for is_human verbose logging).
     """
-    num_languages = session.get("num_languages", 0)
-    if num_languages:
+    num_languages = session.get("num_languages", None)
+    if num_languages is not None:
         return num_languages
 
     raw_accept_lang = (
@@ -932,15 +932,20 @@ def get_baskerville_score_3(session: dict, verbose: bool = False, logger=None) -
 
     return baskerville_score_3
 
+def get_score(session):
+    if session.get('immature_session'):
+        if len(session['requests']) == 1:
+            score = session['baskerville_score_1']
+        else:
+            score = session['baskerville_score_2']
+    else:
+        score = session['baskerville_score_3']
+    return score
 
-def is_human(session, verbose: bool = False, logger=None):
+def is_human(session):
     """
-    Backwards-compatible wrapper around baskerville_score_3.
-
     Returns:
-        (bool, int):
-          - bool: True if baskerville_score_3 > 30 (considered human)
-          - int:  baskerville_score_3 in [1..99]
+        (bool):
+          - bool: True if score > 30 (considered human)
     """
-    baskerville_score_3 = get_baskerville_score_3(session, verbose=verbose, logger=logger)
-    return (baskerville_score_3 > 30, baskerville_score_3)
+    return get_score(session) > 30
