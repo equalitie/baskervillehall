@@ -327,6 +327,10 @@ class BaskervillehallPredictor(object):
             "rate_limit_expiration": rate_limit_expiration,
             "baskerville_score": int(baskerville_score),
             "cloudflare_score": session.get("cloudflare_score", 0),
+            "baskerville_score_1": session.get("baskerville_score_1", 0),
+            "baskerville_score_2": session.get("baskerville_score_2", 0),
+            "baskerville_score_3": session.get("baskerville_score_3", 0),
+            "baskerville_score_4": baskerville_score,
         }
         return d
 
@@ -512,13 +516,11 @@ class BaskervillehallPredictor(object):
                 if 'entropy' in model_if.get_all_features():
                     entropy = float(vectors_if.iloc[i]['entropy'])
 
-            if human:
-                if scores_classifier is not None:
-                    baskerville_score = int(scores_classifier[i])
-                else:
-                    baskerville_score = session.get('human_score', 99)
+            if scores_classifier is not None:
+                baskerville_score = int(scores_classifier[i])
             else:
-                baskerville_score = session.get('human_score', 1)
+                baskerville_score = 0
+
             results.append(
                 {
                     "host": host,
@@ -978,7 +980,34 @@ class BaskervillehallPredictor(object):
         )
         self.send(producer, None, payload, key=host, dnet=dnet)
 
-    def process_immature_session(self, session):
+    def process_immature_session(self, session, producer):
+
+        payload = self.create_command(
+            command_name='no command',
+            session=session,
+            meta = 'immature_session',
+            prediction_if = 0,
+            score_if = 0,
+            shapley_if = 0,
+            shapley_feature_if = '',
+            prediction_ae = 0,
+            score_ae = 0,
+            shapley_ae = 0,
+            shapley_feature_ae = '',
+            difficulty = 0,
+            scraper_name = '',
+            threshold_ae = 0,
+            rate_limit_hits = 0,
+            rate_limit_interval = 0,
+            rate_limit_expiration = 0,
+            baskerville_score=0
+        )
+        self.send(producer=producer,
+                  producer_output=None,
+                  payload=payload,
+                  key=session['host'],
+                  dnet='')
+
         self.logger.info(f"Immature session is_human={is_human(session)}, "
                          f"len={len(session['requests'])}, "
                          f"score1 = {session.get('baskerville_score_1', 'N/A')}, "
@@ -1052,6 +1081,7 @@ class BaskervillehallPredictor(object):
                 predicting_total = 0
                 ip_whitelisted = 0
 
+                seen_sessions = {}  # Track duplicate sessions in this batch
                 for message in messages:
                     if (datetime.now() - ts_lag_report).total_seconds() > 5:
                         try:
@@ -1078,6 +1108,14 @@ class BaskervillehallPredictor(object):
                     ip = session["ip"]
                     host = message.key.decode("utf-8")
 
+                    # Check for duplicate sessions in this batch
+                    session_key = (ip, session.get('session_id', '-'), len(session.get('requests', [])))
+                    if session_key in seen_sessions:
+                        self.logger.warning(f"[DUPLICATE] Session seen before in this batch: "
+                                          f"ip={ip}, session_id={session.get('session_id')}, "
+                                          f"len={len(session.get('requests', []))}")
+                    seen_sessions[session_key] = True
+
                     if whitelist_ip.is_in_whitelist(host, session["ip"]):
                         ip_whitelisted += 1
                         continue
@@ -1089,7 +1127,7 @@ class BaskervillehallPredictor(object):
                         continue
 
                     if session.get('immature_session', False):
-                        self.process_immature_session(session)
+                        self.process_immature_session(session, producer)
                         continue
 
                     if not session.get("primary_session", False):

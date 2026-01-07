@@ -540,6 +540,10 @@ class BaskervillehallSession(object):
         """
         Send session data in full format.
         """
+        self.logger.info(f"[send_session] Sending session: ip={session['ip']}, "
+                        f"session_id={session['session_id']}, "
+                        f"len={len(session['requests'])}, "
+                        f"immature={session.get('immature_session', False)}")
         t_fmt = self._t()
         requests = session['requests']
 
@@ -629,9 +633,9 @@ class BaskervillehallSession(object):
             'is_scraper': scraper_name is not None,
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
-            'immature_session': session['immature_session'],
-            'baskerville_score_1': session['baskerville_score_1'],
-            'baskerville_score_2': session['baskerville_score_2'],
+            'immature_session': session.get('immature_session', False),
+            'baskerville_score_1': session.get('baskerville_score_1', 50),
+            'baskerville_score_2': session.get('baskerville_score_2', 50),
         }
 
         if self.current_lag > self.lag_critical_threshold:
@@ -1164,15 +1168,23 @@ class BaskervillehallSession(object):
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         t_build = self._t()
+
+                        # Safe conversion for numeric fields (may be empty strings)
+                        reply_length = data.get('reply_length_bytes', 0)
+                        payload = int(reply_length) if reply_length not in ('', None) else 0
+
+                        http_code = data.get('http_response_code', 0)
+                        code = int(http_code) if http_code not in ('', None) else 0
+
                         request = {
                             'ts': ts_event,
                             'dnet': dnet,
                             'url': url,
                             'ua': ua,
                             'query': data.get('querystring', ''),
-                            'code': data.get('http_response_code', 0),
+                            'code': code,
                             'type': data.get('content_type', ''),
-                            'payload': int(data.get('reply_length_bytes', 0)),
+                            'payload': payload,
                             'method': data.get('client_request_method', ''),
                             'edge': data.get('edge', ''),
                             'static': data.get('loc_in', '') == 'static_file',

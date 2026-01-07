@@ -22,7 +22,7 @@ spec:
       restartPolicy: Always
       containers:
       - name: "baskervillehall-storage-ch"
-        image: "equalitie/baskervillehall:session"
+        image: "equalitie/baskervillehall:session_dev"
         imagePullPolicy: Always
         command:
           - python
@@ -40,15 +40,15 @@ spec:
         - name: POSTGRES_USER
           valueFrom:
             secretKeyRef:
-              name: postgres-secret
-              key: POSTGRES_USER
+              name: postgres-baskervillehall-dev-secret
+              key: user
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: postgres-secret
-              key: POSTGRES_PASSWORD
+              name: postgres-baskervillehall-dev-secret
+              key: password
         - name: POSTGRES_DATABASE_NAME
           valueFrom:
             secretKeyRef:
-              name: postgres-secret
-              key: POSTGRES_DATABASE_NAME
+              name: postgres-baskervillehall-dev-secret
+              key: database

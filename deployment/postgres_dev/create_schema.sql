@@ -107,9 +107,13 @@ CREATE TABLE public.challenge_command_history (
 	scraper_name text,
 	prediction_if int4 DEFAULT 0 NULL,
 	prediction_ae int4 DEFAULT 0 NULL,
-	baskerville_score int4 DEFAULT 0 NULL,
 	cloudflare_score int4 DEFAULT 0 NULL,
+	baskerville_score int4 DEFAULT 0 NULL,
 
+	baskerville_score_1 int4 DEFAULT 0 NULL,
+	baskerville_score_2 int4 DEFAULT 0 NULL,
+	baskerville_score_3 int4 DEFAULT 0 NULL,
+	baskerville_score_4 int4 DEFAULT 0 NULL,
 	CONSTRAINT challenge_command_history_pkey PRIMARY KEY (challenge_command_id)
 );
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);
