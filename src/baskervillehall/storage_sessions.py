@@ -37,6 +37,8 @@ class StorageSessions(StorageBase):
         host_id = self.get_host_id(host)
         if len(host_id) == 0:
             return None
+        if record.get('immature_session', False):
+            return None
         hits = len(s['requests'])
         duration = s['duration']
         if duration < 1:

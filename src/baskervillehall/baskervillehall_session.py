@@ -629,7 +629,7 @@ class BaskervillehallSession(object):
             'is_scraper': scraper_name is not None,
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
-            'immature_session': session['immature_session'],
+            'immature_session': session.get('immature_session', False),
             'baskerville_score_1': session['baskerville_score_1'],
             'baskerville_score_2': session['baskerville_score_2'],
         }
@@ -1227,7 +1227,6 @@ class BaskervillehallSession(object):
                         self._acc('msg_session_lookup', t_lookup)
 
                         if where == 'main':
-                            self.logger.info(f"key={key} in main")
                             if self.is_session_expired(session, ts_event):
                                 t_cr = self._t()
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
@@ -1249,7 +1248,6 @@ class BaskervillehallSession(object):
                             self._last_sess_where = 'main'
 
                         elif where == 'primary':
-                            self.logger.info(f"key={key} already in primary")
                             t_upd = self._t()
                             self.update_session(session, request)
                             self._acc('session_update', t_upd)
@@ -1273,7 +1271,6 @@ class BaskervillehallSession(object):
                             self._last_sess_where = 'main'
 
                         else:
-                            self.logger.info(f"key={key} is a new primary")
                             t_cr = self._t()
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,
