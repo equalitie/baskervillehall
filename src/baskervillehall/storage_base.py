@@ -85,8 +85,10 @@ class StorageBase(object):
         return f"delete from {self.table} where created_at < \'{ts.strftime(self.datetime_format)}\';"
 
     def delete_old_records(self):
-        if self.delete_old_records_timestamp is None or \
-                (datetime.now() - self.delete_old_records_timestamp).total_seconds() > 60 * 60:
+        if self.delete_old_records_timestamp is None:
+            self.delete_old_records_timestamp = datetime.now()
+
+        if (datetime.now() - self.delete_old_records_timestamp).total_seconds() > 60 * 60:
             self.delete_old_records_timestamp = datetime.now()
 
             conn = None
@@ -152,7 +154,7 @@ class StorageBase(object):
             consumer.poll(timeout_ms=1000)
             if time_module.time() - start > 30:
                 break
-        self.logger.info(f"Assigned: {consumer.assignment()}")
+        self.logger.info(f"Topic {self.topic} Assigned: {consumer.assignment()}")
 
         ts_lag_report = datetime.now()
         while True:
@@ -164,8 +166,11 @@ class StorageBase(object):
                 for message in messages:
                     if (datetime.now() - ts_lag_report).total_seconds() > 5:
                         highwater = consumer.highwater(topic_partition)
-                        lag = (highwater - 1) - message.offset
-                        self.logger.info(f'Lag = {lag}')
+                        if highwater is not None:
+                            lag = (highwater - 1) - message.offset
+                            self.logger.info(f'Lag = {lag}')
+                        else:
+                            self.logger.warning(f'Highwater mark not available for {topic_partition}')
                         ts_lag_report = datetime.now()
 
                     if not message.value:
@@ -175,6 +180,7 @@ class StorageBase(object):
                 self.logger.info(f'Records: {len(records)}')
                 self.logger.info(self.postgres_connection)
                 conn = None
+                sql = None
                 try:
                     conn = psycopg2.connect(**self.postgres_connection)
                     cur = conn.cursor()

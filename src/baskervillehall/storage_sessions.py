@@ -38,6 +38,8 @@ class StorageSessions(StorageBase):
         if len(host_id) == 0:
             self.logger.warning("No host id found for session {}".format(record))
             return None
+        if record.get('immature_session', False):
+            return None
         hits = len(s['requests'])
         duration = s['duration']
         if duration < 1:
