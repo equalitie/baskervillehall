@@ -94,7 +94,7 @@ data:
     GROUP_ID_SESSION: "session_pipeline3"
     GROUP_ID_TRAIN: "train_pipeline"
     GROUP_ID_PREDICTOR: "predictor_pipeline6"
-    GROUP_ID_STORAGE: "storage"
+    GROUP_ID_STORAGE: "storage2"
     USE_RATE_LIMIT: "False"
     RATE_LIMIT_HITS: "20"
     RATE_LIMIT_INTERVAL: "60"
