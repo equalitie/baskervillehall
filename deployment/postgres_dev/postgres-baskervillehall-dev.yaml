@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-baskervillehall-dev
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres-baskervillehall-dev
+  template:
+    metadata:
+      labels:
+        app: postgres-baskervillehall-dev
+    spec:
+      initContainers:
+        - name: prestart-clean-shm
+          image: busybox:1.36
+          command: ["sh","-c","rm -f /dev/shm/PostgreSQL.* || true"]
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: dshm
+      volumes:
+        - name: postgres-pv-storage
+          persistentVolumeClaim:
+            claimName: postgres-baskervillehall-dev-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+      containers:
+        - name: postgres
+          image: postgres:11
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-baskervillehall-dev-secret
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-pv-storage
+            - mountPath: /dev/shm
+              name: dshm
+          readinessProbe:
+            exec: { command: ["pg_isready","-U","postgres"] }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready","-U","postgres"] }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+

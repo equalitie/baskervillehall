@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
       - name: "baskervillehall-session-ch"
-        image: "equalitie/baskervillehall:session2"
+        image: "equalitie/baskervillehall:session_dev"
         imagePullPolicy: Always
         command:
           - python

@@ -540,6 +540,10 @@ class BaskervillehallSession(object):
         """
         Send session data in full format.
         """
+        self.logger.info(f"[send_session] Sending session: ip={session['ip']}, "
+                        f"session_id={session['session_id']}, "
+                        f"len={len(session['requests'])}, "
+                        f"immature={session.get('immature_session', False)}")
         t_fmt = self._t()
         requests = session['requests']
 
@@ -630,8 +634,8 @@ class BaskervillehallSession(object):
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
             'immature_session': session.get('immature_session', False),
-            'baskerville_score_1': session['baskerville_score_1'],
-            'baskerville_score_2': session['baskerville_score_2'],
+            'baskerville_score_1': session.get('baskerville_score_1', 50),
+            'baskerville_score_2': session.get('baskerville_score_2', 50),
         }
 
         if self.current_lag > self.lag_critical_threshold:
@@ -656,7 +660,13 @@ class BaskervillehallSession(object):
         session_final['vps_asn'] = vps_asn
         session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
-        session_final['baskerville_score_3'] = get_baskerville_score_3(session_final)
+
+        # baskerville_score_3 should only be computed for full sessions, not immature
+        if session_final.get('immature_session', False):
+            session_final['baskerville_score_3'] = 50  # neutral score for immature sessions
+        else:
+            session_final['baskerville_score_3'] = get_baskerville_score_3(session_final)
+
         session_final['human'] = is_human(session_final)
 
         session_final['bad_bot'] = baskerville_rules.is_bad_bot(session_final)
@@ -1164,15 +1174,23 @@ class BaskervillehallSession(object):
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         t_build = self._t()
+
+                        # Safe conversion for numeric fields (may be empty strings)
+                        reply_length = data.get('reply_length_bytes', 0)
+                        payload = int(reply_length) if reply_length not in ('', None) else 0
+
+                        http_code = data.get('http_response_code', 0)
+                        code = int(http_code) if http_code not in ('', None) else 0
+
                         request = {
                             'ts': ts_event,
                             'dnet': dnet,
                             'url': url,
                             'ua': ua,
                             'query': data.get('querystring', ''),
-                            'code': data.get('http_response_code', 0),
+                            'code': code,
                             'type': data.get('content_type', ''),
-                            'payload': int(data.get('reply_length_bytes', 0)),
+                            'payload': payload,
                             'method': data.get('client_request_method', ''),
                             'edge': data.get('edge', ''),
                             'static': data.get('loc_in', '') == 'static_file',
@@ -1227,6 +1245,7 @@ class BaskervillehallSession(object):
                         self._acc('msg_session_lookup', t_lookup)
 
                         if where == 'main':
+                            self.logger.info(f"key={key} in main")
                             if self.is_session_expired(session, ts_event):
                                 t_cr = self._t()
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
@@ -1248,6 +1267,7 @@ class BaskervillehallSession(object):
                             self._last_sess_where = 'main'
 
                         elif where == 'primary':
+                            self.logger.info(f"key={key} already in primary")
                             t_upd = self._t()
                             self.update_session(session, request)
                             self._acc('session_update', t_upd)
@@ -1271,6 +1291,7 @@ class BaskervillehallSession(object):
                             self._last_sess_where = 'main'
 
                         else:
+                            self.logger.info(f"key={key} is a new primary")
                             t_cr = self._t()
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                           verified_bot, ts_event, cipher, ciphers, request,

@@ -216,6 +216,23 @@ class SmartBot:
                 ignore_https_errors=False,
             )
 
+            # Block resources at context level (more aggressive)
+            resource_counts = {}
+            def block_resources_context(route):
+                rtype = route.request.resource_type
+                resource_counts[rtype] = resource_counts.get(rtype, 0) + 1
+
+                if rtype in ["image", "stylesheet", "font", "media", "script"]:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            if self.mode in ['extreme-cv', 'low-entropy', 'combined', 'high-consistency', 'high-consistency-file']:
+                context.route("**/*", block_resources_context)
+                print(f"\n[BLOCKING MODE] Images, CSS, JS, fonts, media will be blocked")
+                print(f"  Only HTML requests will reach the server")
+                print(f"  Expected: ~1 request per page load (instead of 10-20)")
+
             # Stealth settings
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {
@@ -224,18 +241,6 @@ class SmartBot:
             """)
 
             page = context.new_page()
-
-            # Block images, CSS, JS, fonts to reduce entropy (only load HTML)
-            # This makes bot behavior more obvious
-            def block_resources(route):
-                if route.request.resource_type in ["image", "stylesheet", "font", "media"]:
-                    route.abort()
-                else:
-                    route.continue_()
-
-            # Enable resource blocking for modes that need low entropy
-            if self.mode in ['extreme-cv', 'low-entropy', 'combined', 'high-consistency', 'high-consistency-file']:
-                page.route("**/*", block_resources)
 
             start_time = time.time()
             session_cookie = None
@@ -325,6 +330,18 @@ class SmartBot:
                 print(f"\n✓ All {len(urls)} requests used same session cookie: {session_cookie}")
             else:
                 print(f"\n⚠️  No session cookie detected - requests may be treated as separate sessions!")
+
+            # Show resource blocking stats
+            if self.mode in ['extreme-cv', 'low-entropy', 'combined', 'high-consistency', 'high-consistency-file']:
+                print(f"\nResource blocking stats:")
+                total_blocked = sum(count for rtype, count in resource_counts.items()
+                                  if rtype in ["image", "stylesheet", "font", "media", "script"])
+                total_allowed = sum(count for rtype, count in resource_counts.items()
+                                  if rtype not in ["image", "stylesheet", "font", "media", "script"])
+                for rtype, count in sorted(resource_counts.items()):
+                    status = "BLOCKED" if rtype in ["image", "stylesheet", "font", "media", "script"] else "ALLOWED"
+                    print(f"  {rtype:15s}: {count:4d} {status}")
+                print(f"  Total blocked: {total_blocked}, Total allowed: {total_allowed}")
 
             print(f"\nExpected Baskerville features:")
             print(f"  entropy: ~{len(set(urls)).bit_length():.1f} (LOW - repeating URLs)")

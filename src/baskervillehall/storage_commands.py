@@ -51,8 +51,13 @@ class StorageCommands(StorageBase):
         cloudflare_score = command.get("cloudflare_score", 0)
         if cloudflare_score == '':
             cloudflare_score = 0
-        shapley_formatted_if = json.dumps(command['shapley_if']) if len(command['shapley_if']) > 0 else ''
-        shapley_formatted_ae = json.dumps(command['shapley_ae']) if len(command['shapley_ae']) > 0 else ''
+
+        # Safe handling of shapley values (can be int, dict, list, or None)
+        shapley_if = command.get('shapley_if', {})
+        shapley_formatted_if = json.dumps(shapley_if) if isinstance(shapley_if, (dict, list)) and shapley_if else ''
+
+        shapley_ae = command.get('shapley_ae', {})
+        shapley_formatted_ae = json.dumps(shapley_ae) if isinstance(shapley_ae, (dict, list)) and shapley_ae else ''
         ua = s["ua"].replace("\'", "")
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip_address, session_cookie, ip_cookie, '\
@@ -60,7 +65,9 @@ class StorageCommands(StorageBase):
             f'datacenter, hits, score_if, score_ae, threshold_ae, bot_score, bot_score_top_factor,' \
             f'shapley_feature_if, shapley_feature_ae,difficulty, shapley_if, shapley_ae,request_count, command_type_name, source, \n'\
             f'meta, hit_rate, num_user_agent,'\
-            f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae,baskerville_score,cloudflare_score)\n'\
+            f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae,'\
+            f'baskerville_score,baskerville_score_1,baskerville_score_2,baskerville_score_3,baskerville_score_4,'\
+            f'cloudflare_score)\n'\
             f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{command["session_id"]}\',\n'\
             f'\'{s["ip"]}_{command["session_id"]}\',{int(s["primary_session"])},\n'\
             f'{int(s["human"])},'\
@@ -81,5 +88,9 @@ class StorageCommands(StorageBase):
             f'\'{requests}\', \'pipeline\',\'{s["scraper_name"]}\','\
             f'{command["prediction_if"]},{command["prediction_ae"]},'\
             f'{command.get("baskerville_score", 0)},'\
+            f'{command.get("baskerville_score_1", 0)},'\
+            f'{command.get("baskerville_score_2", 0)},'\
+            f'{command.get("baskerville_score_3", 0)},'\
+            f'{command.get("baskerville_score_4", 0)},'\
             f'{cloudflare_score}'\
             f');'

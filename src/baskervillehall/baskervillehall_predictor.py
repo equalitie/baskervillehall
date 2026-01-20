@@ -327,6 +327,10 @@ class BaskervillehallPredictor(object):
             "rate_limit_expiration": rate_limit_expiration,
             "baskerville_score": int(baskerville_score),
             "cloudflare_score": session.get("cloudflare_score", 0),
+            "baskerville_score_1": session.get("baskerville_score_1", 0),
+            "baskerville_score_2": session.get("baskerville_score_2", 0),
+            "baskerville_score_3": session.get("baskerville_score_3", 0),
+            "baskerville_score_4": baskerville_score,
         }
         return d
 
@@ -408,7 +412,14 @@ class BaskervillehallPredictor(object):
                         self.logger.info(f"  Accept-Language: {sessions[i].get('accept_language', 'N/A')}")
                         self.logger.info(f"  num_languages: {sessions[i].get('num_languages', 'N/A')}")
                         self.logger.info(f"  cipher_type: {sessions[i].get('cipher_type', 'N/A')}")
-                        self.logger.info(f"Baskerville score: {scores_classifier[i]}, Baskerville_1: {sessions[i].get('baskerville_score_1', 'N/A')}, Cloudflare score: {sessions[i].get('cloudflare_score', 0)}, bot: {predictions_classifier[i]}")
+                        self.logger.info(
+                            f"Baskerville score_4: {scores_classifier[i]}, "
+                            f"score_1: {sessions[i].get('baskerville_score_1', 'N/A')}, "
+                            f"score_2: {sessions[i].get('baskerville_score_2', 'N/A')}, "
+                            f"score_3: {sessions[i].get('baskerville_score_3', 'N/A')}, "
+                            f"Cloudflare: {sessions[i].get('cloudflare_score', 0)}, "
+                            f"bot: {predictions_classifier[i]}"
+                        )
 
                         # Log ALL features actually used by the model
                         if features_df is not None and i < len(features_df):
@@ -459,6 +470,13 @@ class BaskervillehallPredictor(object):
                             self.logger.info(f"  {j+1}. {item['name']:35s} +{item['shapley']:6.3f}")
 
                         self.logger.info(f"{'='*80}\n")
+            else:
+                self.logger.warning(
+                    f"Baskerville classifier model not found for host={host}, "
+                    f"baskerville_score_4 will be 0. Check if classifier model is trained and loaded from S3."
+                )
+        else:
+            self.logger.debug("use_baskerville_score=False, skipping baskerville_score_4 computation")
 
         results = []
         for i, session in enumerate(sessions):
@@ -512,13 +530,11 @@ class BaskervillehallPredictor(object):
                 if 'entropy' in model_if.get_all_features():
                     entropy = float(vectors_if.iloc[i]['entropy'])
 
-            if human:
-                if scores_classifier is not None:
-                    baskerville_score = int(scores_classifier[i])
-                else:
-                    baskerville_score = session.get('human_score', 99)
+            if scores_classifier is not None:
+                baskerville_score = int(scores_classifier[i])
             else:
-                baskerville_score = session.get('human_score', 1)
+                baskerville_score = 0
+
             results.append(
                 {
                     "host": host,
@@ -703,7 +719,10 @@ class BaskervillehallPredictor(object):
             self.logger.info(
                 f"Classifier {command} for ip={ip}, "
                 f"human={human}, command={command}, session_id={session_id}, host={host}, "
-                f"baskerville_score={baskerville_score}  "
+                f"baskerville_score_4={baskerville_score}, "
+                f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+                f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+                f"score_3={session.get('baskerville_score_3', 'N/A')}, "
                 f"cloudflare_score={session.get('cloudflare_score', 0)}."
             )
             payload = self.create_command(
@@ -747,8 +766,11 @@ class BaskervillehallPredictor(object):
             self.logger.info(
                 f"High bot score - {command} for ip={ip}, "
                 f"human={human}, command={command}, session_id={session_id}, host={host}, "
-                f"top_factor = {bot_score_top_factor}  "
-                f"baskerville_score={baskerville_score}  "
+                f"top_factor={bot_score_top_factor}, "
+                f"baskerville_score_4={baskerville_score}, "
+                f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+                f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+                f"score_3={session.get('baskerville_score_3', 'N/A')}, "
                 f"cloudflare_score={session.get('cloudflare_score', 0)}."
             )
             payload = self.create_command(
@@ -783,11 +805,16 @@ class BaskervillehallPredictor(object):
             else:
                 command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             baskerville_score = 1
-            self.logger.info(f"Challenge ip (bad_bot),"
-                             f"Baskerville score {baskerville_score}, "
-                             f"Cloudflare score {session.get('cloudflare_score', 0)}, "
-                             f"ip = {ip} host={host}  "
-                             f"ua={session.get('ua')} end={session.get('end')}")
+            self.logger.info(
+                f"Challenge ip (bad_bot), "
+                f"ip={ip}, host={host}, "
+                f"baskerville_score_3={baskerville_score}, "
+                f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+                f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+                f"cloudflare_score={session.get('cloudflare_score', 0)}, "
+                f"ua={session.get('ua')}, "
+                f"end={session.get('end')}"
+            )
 
             payload = self.create_command(
                 command_name=command,
@@ -828,9 +855,13 @@ class BaskervillehallPredictor(object):
             self.logger.info(
                 f"meta {meta} - {command} for ip={ip}, "
                 f"human={human}, command={command}, session_id={session_id}, host={host}, "
-                f"top_factor = {bot_score_top_factor} ua={session.get('ua')}  "
-                f"baskerville_score={baskerville_score}. "
-                f"cloudflare_score={session.get('cloudflare_score', 0)} end={session.get('end')}."
+                f"top_factor={bot_score_top_factor}, ua={session.get('ua')}, "
+                f"baskerville_score_4={baskerville_score}, "
+                f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+                f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+                f"score_3={session.get('baskerville_score_3', 'N/A')}, "
+                f"cloudflare_score={session.get('cloudflare_score', 0)}, "
+                f"end={session.get('end')}."
             )
             payload = self.create_command(
                 command_name=command,
@@ -871,10 +902,14 @@ class BaskervillehallPredictor(object):
                 baskerville_score = 25
                 self.logger.info(
                     f"Too many sessions ({len(host_ip_sessions[host][ip])}) challenge_ip for ip={ip}, "
-                    f"human={human} session_id={session_id}, host={host}, "
-                    f"ua={session.get('ua')}  "
-                    f"baskerville_score={baskerville_score}. "
-                    f"cloudflare_score={session.get('cloudflare_score', 0)} end={session.get('end')}."
+                    f"human={human}, session_id={session_id}, host={host}, "
+                    f"ua={session.get('ua')}, "
+                    f"baskerville_score_4={baskerville_score}, "
+                    f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+                    f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+                    f"score_3={session.get('baskerville_score_3', 'N/A')}, "
+                    f"cloudflare_score={session.get('cloudflare_score', 0)}, "
+                    f"end={session.get('end')}."
                 )
 
                 payload = self.create_command(
@@ -922,9 +957,14 @@ class BaskervillehallPredictor(object):
             self.logger.info(
                 f"Anomaly {command} for ip={ip}, human={human}, command={command}, "
                 f"session_id={session_id}, host={host}, "
-                f"score_if={score_if}, score_ae={score_ae},  "
-                f"baskerville_score={baskerville_score}, baskerville_score_1={session.get('baskerville_score_1', 'N/A')}, "
-                f"cloudflare_score={session.get('cloudflare_score', 0)} end={session.get('end')}."
+                f"score_if={score_if}, score_ae={score_ae}, "
+                f"baskerville_score_5={baskerville_score}, "
+                f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+                f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+                f"score_3={session.get('baskerville_score_3', 'N/A')}, "
+                f"score_4={session.get('baskerville_score_4', 'N/A')}, "
+                f"cloudflare_score={session.get('cloudflare_score', 0)}, "
+                f"end={session.get('end')}."
             )
             payload = self.create_command(
                 command_name=command,
@@ -953,8 +993,12 @@ class BaskervillehallPredictor(object):
         self.logger.info(
             f"No command for ip={ip}, human={human}, "
             f"session_id={session_id}, host={host}, "
-            f"baskerville_score={baskerville_score}, baskerville_score_1={session.get('baskerville_score_1', 'N/A')}, "
-            f"cloudflare_score={session.get('cloudflare_score', 0)},  end={session.get('end')}."
+            f"baskerville_score_4={baskerville_score}, "
+            f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+            f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+            f"score_3={session.get('baskerville_score_3', 'N/A')}, "
+            f"cloudflare_score={session.get('cloudflare_score', 0)}, "
+            f"end={session.get('end')}."
         )
         payload = self.create_command(
             command_name='no command',
@@ -978,13 +1022,43 @@ class BaskervillehallPredictor(object):
         )
         self.send(producer, None, payload, key=host, dnet=dnet)
 
-    def process_immature_session(self, session):
-        self.logger.info(f"Immature session is_human={is_human(session)}, "
-                         f"len={len(session['requests'])}, "
-                         f"score1 = {session.get('baskerville_score_1', 'N/A')}, "
-                         f"score2 = {session.get('baskerville_score_2', 'N/A')}, "
-                         f"ip={session['ip']}, "
-                         f"session_id={session['session_id']} ")
+    def process_immature_session(self, session, producer):
+
+        payload = self.create_command(
+            command_name='no command',
+            session=session,
+            meta = 'immature_session',
+            prediction_if = 0,
+            score_if = 0,
+            shapley_if = 0,
+            shapley_feature_if = '',
+            prediction_ae = 0,
+            score_ae = 0,
+            shapley_ae = 0,
+            shapley_feature_ae = '',
+            difficulty = 0,
+            scraper_name = '',
+            threshold_ae = 0,
+            rate_limit_hits = 0,
+            rate_limit_interval = 0,
+            rate_limit_expiration = 0,
+            baskerville_score=0
+        )
+        self.send(producer=producer,
+                  producer_output=None,
+                  payload=payload,
+                  key=session['host'],
+                  dnet='')
+
+        self.logger.info(
+            f"Immature session is_human={is_human(session)}, "
+            f"len={len(session['requests'])}, "
+            f"score_1={session.get('baskerville_score_1', 'N/A')}, "
+            f"score_2={session.get('baskerville_score_2', 'N/A')}, "
+            f"cloudflare_score={session.get('cloudflare_score', 0)}, "
+            f"ip={session['ip']}, "
+            f"session_id={session['session_id']}"
+        )
 
 
 
@@ -1052,6 +1126,7 @@ class BaskervillehallPredictor(object):
                 predicting_total = 0
                 ip_whitelisted = 0
 
+                seen_sessions = {}  # Track duplicate sessions in this batch
                 for message in messages:
                     if (datetime.now() - ts_lag_report).total_seconds() > 5:
                         try:
@@ -1078,6 +1153,14 @@ class BaskervillehallPredictor(object):
                     ip = session["ip"]
                     host = message.key.decode("utf-8")
 
+                    # Check for duplicate sessions in this batch
+                    session_key = (ip, session.get('session_id', '-'), len(session.get('requests', [])))
+                    if session_key in seen_sessions:
+                        self.logger.warning(f"[DUPLICATE] Session seen before in this batch: "
+                                          f"ip={ip}, session_id={session.get('session_id')}, "
+                                          f"len={len(session.get('requests', []))}")
+                    seen_sessions[session_key] = True
+
                     if whitelist_ip.is_in_whitelist(host, session["ip"]):
                         ip_whitelisted += 1
                         continue
@@ -1089,7 +1172,7 @@ class BaskervillehallPredictor(object):
                         continue
 
                     if session.get('immature_session', False):
-                        self.process_immature_session(session)
+                        self.process_immature_session(session, producer)
                         continue
 
                     if not session.get("primary_session", False):

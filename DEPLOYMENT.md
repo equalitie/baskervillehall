@@ -49,6 +49,8 @@ docker push equalitie/baskervillehall:dev
 docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session2
 docker push equalitie/baskervillehall:session2
 
+docker buildx build --platform linux/amd64 -f ./Dockerfile.session-simple . -t equalitie/baskervillehall:session_dev
+docker push equalitie/baskervillehall:session_dev
 ```
 
 ### Building predict image
@@ -114,6 +116,15 @@ kubectl apply -f deployment/postgres/postgres-baskervillehall.yaml
 kubectl apply -f deployment/postgres/postgres-baskervillehall-service.yaml
 
 kubectl port-forward service/postgres-baskervillehall 5433:5432
+
+### Postgres deployment dev
+kubectl apply -f deployment/postgres_dev/postgres-baskervillehall-dev-secret.yaml
+kubectl apply -f deployment/postgres_dev/postgres-baskervillehall-dev-pv.yaml
+kubectl apply -f deployment/postgres_dev/postgres-baskervillehall-dev-pvc.yaml
+kubectl apply -f deployment/postgres_dev/postgres-baskervillehall-dev.yaml
+kubectl apply -f deployment/postgres_dev/postgres-baskervillehall-dev-service.yaml
+
+kubectl port-forward service/postgres-baskervillehall-dev 5433:5432
 
 ### Monitoring
 

@@ -51,7 +51,6 @@ class StorageBase(object):
                 host not in self.hostname_id or \
                 (datetime.now() - self.host_id_timestamp).total_seconds() > 60 * 10:
             self.host_id_timestamp = datetime.now()
-
             conn = None
             try:
                 conn = psycopg2.connect(**self.postgres_connection)
@@ -61,7 +60,6 @@ class StorageBase(object):
                 self.hostname_id = dict()
                 for r in cur.fetchall():
                     self.hostname_id[r[0]] = r[1]
-
                 if host not in self.hostname_id:
                     if self.autocreate_hostname_id:
                         sql = f'insert into public.hostname '\
@@ -162,6 +160,7 @@ class StorageBase(object):
         while True:
             self.delete_old_records()
             raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
+            self.logger.info(f'Raw messages: {len(raw_messages)}')
             for topic_partition, messages in raw_messages.items():
                 records = []
                 for message in messages:
@@ -178,6 +177,8 @@ class StorageBase(object):
                         continue
                     records.append(json.loads(message.value.decode("utf-8")))
 
+                self.logger.info(f'Records: {len(records)}')
+                self.logger.info(self.postgres_connection)
                 conn = None
                 sql = None
                 try:
@@ -186,6 +187,7 @@ class StorageBase(object):
 
                     for r in records:
                         sql = self.get_sql(r)
+                        self.logger.info(sql)
                         if sql:
                             cur.execute(sql)
                     conn.commit()

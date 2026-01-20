@@ -486,6 +486,17 @@ def path_suspicion_score(url: str, status_code: int) -> float:
     u = url.lower()
     score = 0.0
 
+    # Check if this is a static resource (CSS, JS, images, fonts, etc.)
+    static_extensions = ('.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
+                         '.woff', '.woff2', '.ttf', '.eot', '.ico', '.mp4', '.webm', '.pdf')
+    is_static = any(u.endswith(ext) for ext in static_extensions)
+
+    # wp-content and wp-includes are suspicious ONLY if:
+    # 1. They are .php files (exploit attempts)
+    # 2. They return 404 (scanning for vulnerabilities)
+    # 3. They are NOT static resources (legitimate site assets)
+    is_wp_path = ('/wp-content/' in u or '/wp-includes/' in u)
+
     # Any .php request outside normal app flow is suspicious
     if ".php" in u:
         score += 0.3
@@ -493,6 +504,9 @@ def path_suspicion_score(url: str, status_code: int) -> float:
     # Explicit known exploit/scan patterns
     for pat in compiled_path_patterns:
         if pat.search(u):
+            # Don't penalize static resources from wp-content/wp-includes
+            if is_wp_path and is_static:
+                continue
             score += 0.5
             break
 
@@ -575,12 +589,15 @@ def get_baskerville_score_1(session: dict) -> int:
     lang_susp = 1.0 if num_languages == 0 else 0.0
 
     # Weighted combination into bot suspicion raw score (0..1)
-    # Path is most informative for scanners, then UA, then cipher + language.
+    # UA is most informative (curl, wget, python-requests), then language, path, cipher.
+    # Increased ua_susp weight from 0.2 to 0.45 (45%) to better detect command-line tools
+    # Increased lang_susp weight from 0.15 to 0.2 (20%) - missing Accept-Language is strong signal
+    # Decreased path_susp weight from 0.5 to 0.2 (20%) - not all bots scan suspicious paths
     bot_susp_raw = (
-        0.5 * path_susp +
-        0.2 * ua_susp +
-        0.15 * cipher_susp +
-        0.15 * lang_susp
+        0.2 * path_susp +      # 20% - path patterns (scanners)
+        0.45 * ua_susp +       # 45% - User-Agent (strongest signal for curl/wget/requests)
+        0.15 * cipher_susp +   # 15% - cipher type
+        0.2 * lang_susp        # 20% - Accept-Language presence
     )
 
     # Convert into baskerville human-like score (1..99)
