@@ -1,3 +1,20 @@
+WITH hours AS (
+  SELECT generate_series(
+    date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '23 hours',
+    date_trunc('hour', now() AT TIME ZONE 'UTC'),
+    interval '1 hour'
+  ) AS bucket_hour
+)
+SELECT
+  h.bucket_hour AS "time",              -- UTC
+  COALESCE(c.challenged_ips, 0) AS challenged,
+  COALESCE(p.passed_ips, 0)     AS passed
+FROM hours h
+LEFT JOIN public.dashboard_challenged_1h c
+  ON c.bucket_hour = h.bucket_hour
+LEFT JOIN public.dashboard_passed_1h p
+  ON p.bucket_hour = h.bucket_hour
+ORDER BY h.bucket_hour;
 
 -- precision timeseries 24h
 WITH hours AS (

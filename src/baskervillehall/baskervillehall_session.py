@@ -660,7 +660,13 @@ class BaskervillehallSession(object):
         session_final['vps_asn'] = vps_asn
         session_final['vpn'] = self.vpn_detector.is_vpn(session_final['ip'])
         session_final['tor'] = self.tor_exit_scnaner.is_tor(session_final['ip'])
-        session_final['baskerville_score_3'] = get_baskerville_score_3(session_final)
+
+        # baskerville_score_3 should only be computed for full sessions, not immature
+        if session_final.get('immature_session', False):
+            session_final['baskerville_score_3'] = 50  # neutral score for immature sessions
+        else:
+            session_final['baskerville_score_3'] = get_baskerville_score_3(session_final)
+
         session_final['human'] = is_human(session_final)
 
         session_final['bad_bot'] = baskerville_rules.is_bad_bot(session_final)
