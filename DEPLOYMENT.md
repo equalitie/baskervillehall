@@ -133,3 +133,10 @@ helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring
 ```commandline
 kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
 ```
+
+```commandline
+kubectl create job \
+  --from=cronjob/dashboard-cache-refresh \
+  dashboard-cache-refresh-manual-$(date +%s)
+
+```

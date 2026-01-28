@@ -160,7 +160,7 @@ class StorageBase(object):
 
         ts_lag_report = datetime.now()
         while True:
-            self.delete_old_records()
+            # self.delete_old_records()
             raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
             for topic_partition, messages in raw_messages.items():
                 records = []

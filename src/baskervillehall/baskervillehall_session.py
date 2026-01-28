@@ -676,11 +676,12 @@ class BaskervillehallSession(object):
 
         self._acc('send_serialize', t_ser)
         t_send = self._t()
-        self.producer.send(
-            self.topic_sessions,
-            key=bytearray(session['host'], encoding='utf8'),
-            value=session_final
-        )
+        if not session_final.get('immature_session', False):
+            self.producer.send(
+                self.topic_sessions,
+                key=bytearray(session['host'], encoding='utf8'),
+                value=session_final
+            )
         self._acc('send_producer_send', t_send)
 
     def collect_primary_session(self, ip):

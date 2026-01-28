@@ -60,6 +60,7 @@ CREATE TABLE public.sessions (
 );
 ALTER TABLE public.sessions ADD CONSTRAINT sessions_hostname_id_fkey FOREIGN KEY (hostname_id) REFERENCES public.hostname(hostname_id) ON DELETE CASCADE;
 CREATE INDEX sessions_index ON sessions (session_end, host_name);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS sessions_created_at_idx ON public.sessions (created_at);
 
 DROP TABLE public.challenge_command_history;
 
@@ -114,6 +115,7 @@ CREATE TABLE public.challenge_command_history (
 );
 CREATE INDEX idx_hostname_command_type_to_command_history ON public.challenge_command_history USING btree (hostname_id, command_type_name);
 CREATE INDEX commands_index ON challenge_command_history (session_end, host_name);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS challenge_command_history_created_at_idx ON public.challenge_command_history (created_at);
 
 CREATE INDEX idx_challenge_ip_created
     ON challenge_command_history (ip_address, created_at);
