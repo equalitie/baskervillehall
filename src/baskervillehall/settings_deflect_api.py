@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 
 from baskervillehall.json_url_reader import JsonUrlReader
@@ -9,6 +10,8 @@ class SettingsDeflectAPI(object):
             self,
             url,
             auth,
+            ip_whitelist_url=None,
+            ip_whitelist_auth=None,
             whitelist_default=[],
             whitelist_default_block_session=[],
             logger=None,
@@ -17,6 +20,18 @@ class SettingsDeflectAPI(object):
                                     headers={'Authorization': f'Bearer {auth}'},
                                     logger=logger, refresh_period_in_seconds=refresh_period_in_seconds)
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
+
+        # IP whitelist reader (optional)
+        self.ip_whitelist_reader = None
+        if ip_whitelist_url and ip_whitelist_auth:
+            self.ip_whitelist_reader = JsonUrlReader(
+                url=ip_whitelist_url,
+                headers={'Authorization': f'Bearer {ip_whitelist_auth}'},
+                logger=logger,
+                refresh_period_in_seconds=refresh_period_in_seconds
+            )
+        self.ip_whitelist_data = {}
+        self.ip_whitelist_parsed = {}  # Cache of parsed IP networks per host
         self.domains = []
         self.prefixes = []
         self.matches = []
@@ -193,3 +208,67 @@ class SettingsDeflectAPI(object):
         if not host_data:
             return 0
         return host_data.get('sensitivity', 0)
+
+    def _refresh_ip_whitelist(self):
+        if not self.ip_whitelist_reader:
+            return
+
+        data, fresh = self.ip_whitelist_reader.get()
+        if data and fresh:
+            self.ip_whitelist_data = data
+            self.ip_whitelist_parsed = {}
+
+            # Parse all IP addresses/networks for each host
+            for host, ip_list in data.items():
+                parsed_networks = []
+                for ip_entry in ip_list:
+                    try:
+                        # Skip non-IP entries (like URL paths)
+                        if ip_entry.startswith('/'):
+                            continue
+                        # Try to parse as network (handles both single IPs and CIDRs)
+                        network = ipaddress.ip_network(ip_entry, strict=False)
+                        parsed_networks.append(network)
+                    except ValueError as e:
+                        self.logger.warning(f"Invalid IP/CIDR entry for {host}: {ip_entry!r} - {e}")
+                self.ip_whitelist_parsed[host] = parsed_networks
+
+            self.logger.info(f"IP whitelist refreshed: {len(self.ip_whitelist_parsed)} hosts loaded")
+
+    def is_ip_whitelisted(self, host, ip):
+        """
+        Check if an IP address is whitelisted for a given host.
+
+        Args:
+            host: The hostname to check (e.g., 'kavkaz-uzel.eu')
+            ip: The IP address to check (e.g., '104.131.108.241')
+
+        Returns:
+            True if the IP is whitelisted for this host, False otherwise
+        """
+        self._refresh_ip_whitelist()
+
+        if not self.ip_whitelist_reader:
+            return False
+
+        # Check host-specific whitelist
+        host_networks = self.ip_whitelist_parsed.get(host, [])
+
+        # Also check global whitelist if present
+        global_networks = self.ip_whitelist_parsed.get('global', [])
+
+        all_networks = host_networks + global_networks
+
+        if not all_networks:
+            return False
+
+        try:
+            ip_addr = ipaddress.ip_address(ip)
+            for network in all_networks:
+                if ip_addr in network:
+                    return True
+        except ValueError as e:
+            self.logger.warning(f"Invalid IP address: {ip!r} - {e}")
+            return False
+
+        return False

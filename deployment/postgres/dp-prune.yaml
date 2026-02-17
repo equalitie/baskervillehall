@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: dashboard-cache-refresh
+  name: dp-prune
   namespace: default
 spec:
   schedule: "0 3 * * *"
@@ -16,7 +16,7 @@ spec:
         spec:
           restartPolicy: OnFailure
           containers:
-            - name: refresh
+            - name: prune
               image: postgres:16
               env:
                 - name: PGHOST

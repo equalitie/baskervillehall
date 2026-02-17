@@ -101,6 +101,7 @@ def main():
             debug_ip=debug_ip,
             asn_database_path=os.environ.get('BAD_ASN_FILE', ''),  # Optional - will be empty
             asn_database2_path=os.environ.get('VPN_ASN_PATH', ''),  # Optional - will be empty
+            hostname=os.environ.get('MY_POD_NAME', 'SESSION_POD'),
             logger=logger
         )
 

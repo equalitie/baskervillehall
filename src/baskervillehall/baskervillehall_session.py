@@ -20,9 +20,10 @@ from baskervillehall import baskerville_rules
 from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
-from baskervillehall.whitelist_ip import WhitelistIP
+from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka.errors import NoBrokersAvailable
+from kafka.consumer.subscription_state import ConsumerRebalanceListener
 
 # Fast JSON / ISO date parsing
 try:
@@ -72,6 +73,17 @@ VIDEO_REGEX = re.compile(
     r'^[^ ]+\.(mp4|webm|mov|avi|mkv|flv|wmv|mpeg|mpg|m3u8|mpd)(\?.*)?$',
     re.IGNORECASE
 )
+
+class RebalanceLogger(ConsumerRebalanceListener):
+    def __init__(self, logger, name="consumer"):
+        self.logger = logger
+        self.name = name
+
+    def on_partitions_revoked(self, revoked):
+        self.logger.warning("[%s] REVOKED: %s", self.name, sorted(revoked, key=lambda tp:(tp.topic,tp.partition)))
+
+    def on_partitions_assigned(self, assigned):
+        self.logger.warning("[%s] ASSIGNED: %s", self.name, sorted(assigned, key=lambda tp:(tp.topic,tp.partition)))
 
 
 def log_partition_assignment(consumer, logger):
@@ -140,7 +152,6 @@ class BaskervillehallSession(object):
             deflect_config_url=None,
             deflect_config_auth=None,
             whitelist_url_default=None,
-            whitelist_ip=None,
             white_list_refresh_period=5,
             max_primary_sessions_per_ip=10,
             primary_session_expiration=10,
@@ -158,7 +169,8 @@ class BaskervillehallSession(object):
             lag_emergency_threshold=20000,
             lag_critical_threshold=15000,
             enable_emergency_partition_seek=True,
-            score_2_num_requests=5
+            score_2_num_requests=5,
+            hostname='localhost',
     ):
         super().__init__()
         if kafka_connection is None:
@@ -166,6 +178,7 @@ class BaskervillehallSession(object):
         if whitelist_url_default is None:
             whitelist_url_default = []
 
+        self.hostname = hostname
         self.skip_expensive_op = False
         self.topic_weblogs = topic_weblogs
         self.topic_sessions = topic_sessions
@@ -176,7 +189,6 @@ class BaskervillehallSession(object):
         self.base_flush_increment = flush_increment
         self.garbage_collection_period = garbage_collection_period
         self.whitelist_url_default = whitelist_url_default
-        self.whitelist_ip = whitelist_ip
         self.deflect_config_url = deflect_config_url
         self.deflect_config_auth = deflect_config_auth
         self.reset_duration = reset_duration
@@ -194,7 +206,7 @@ class BaskervillehallSession(object):
 
         # Lag metrics
         self.current_lag = 0
-        self.base_max_records = 5000
+        self.base_max_records = 2000
         self.lag_high_threshold = lag_high_threshold
         self.lag_moderate_threshold = lag_moderate_threshold
         self.lag_emergency_threshold = lag_emergency_threshold
@@ -355,13 +367,18 @@ class BaskervillehallSession(object):
                     'enable_auto_commit': True,
                     # longer timeouts under burst
                     'request_timeout_ms': 60000,
-                    'session_timeout_ms': 20000,
+                    'session_timeout_ms': 30000,
+                    'max_poll_interval_ms': 20*60*1000,
+                    'heartbeat_interval_ms': 5000,
                     'group_id': self.group_id,
-                    'auto_offset_reset': 'earliest' if self.read_from_beginning else 'latest'
+                    'auto_offset_reset': 'earliest' if self.read_from_beginning else 'latest',
+                    'client_id': f"session-pipeline-{self.hostname}",
                 })
                 consumer = KafkaConsumer(**consumer_opts)
 
                 consumer.subscribe([self.topic_weblogs])
+                listener = RebalanceLogger(self.logger, name=self.hostname)
+                consumer.subscribe([self.topic_weblogs], listener=listener)
 
                 # wait (up to ~30s) for a real assignment
                 start = time_module.time()
@@ -961,10 +978,6 @@ class BaskervillehallSession(object):
             logger=self.logger,
             refresh_period_in_seconds=60 * self.white_list_refresh_period
         )
-        whitelist_ip = WhitelistIP(
-            self.whitelist_ip, logger=self.logger,
-            refresh_period_in_seconds=60 * self.white_list_refresh_period
-        )
 
         try:
             consumer, self.producer = self.create_kafka_connections()
@@ -1109,7 +1122,7 @@ class BaskervillehallSession(object):
                         k1 = ('hip', host, ip)
                         cached = self._wl_get(k1)
                         if cached is None:
-                            allowed = whitelist_ip.is_in_whitelist(host, ip) or settings.is_host_whitelisted(host)
+                            allowed = settings.is_host_whitelisted(host)
                             self._wl_put(k1, allowed)
                         else:
                             allowed = cached

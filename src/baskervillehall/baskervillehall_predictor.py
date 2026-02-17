@@ -26,8 +26,6 @@ from baskervillehall.baskerville_rules import detect_scraper, is_human
 from baskervillehall.model_storage import ModelStorage
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.settings_postgres import SettingsPostgres
-from baskervillehall.whitelist_ip import WhitelistIP
-
 
 
 
@@ -120,9 +118,10 @@ class BaskervillehallPredictor(object):
         maxsize_pending=10000000,
         n_jobs_predict=-1,
         logger=None,
-        whitelist_ip=None,
         deflect_config_url=None,
         deflect_config_auth=None,
+        ip_whitelist_url=None,
+        ip_whitelist_auth=None,
         white_list_refresh_period=5,
         bad_bot_challenge=True,
         debug_ip=None,
@@ -168,7 +167,6 @@ class BaskervillehallPredictor(object):
         self.min_number_of_requests = min_number_of_requests
         self.white_list_refresh_in_minutes = white_list_refresh_in_minutes
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
-        self.whitelist_ip = whitelist_ip
         self.model_reload_in_minutes = model_reload_in_minutes
         self.max_models = max_models
         self.pending_ttl = pending_ttl
@@ -219,6 +217,8 @@ class BaskervillehallPredictor(object):
             self.settings = SettingsDeflectAPI(
                 url=self.deflect_config_url,
                 auth=self.deflect_config_auth,
+                ip_whitelist_url=ip_whitelist_url,
+                ip_whitelist_auth=ip_whitelist_auth,
                 logger=self.logger,
                 refresh_period_in_seconds=60 * self.white_list_refresh_period,
             )
@@ -778,10 +778,18 @@ class BaskervillehallPredictor(object):
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
-            if entropy == 0:
+
+            if host == 'antijob.net':
                 command = "block_ip"
             else:
-                command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+                command = "challenge_ip"
+
+            # if entropy == 0:
+            #     command = "block_ip"
+            # else:
+            #     command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+
+
             baskerville_score = 1
             self.logger.info(f"Challenge ip (bad_bot),"
                              f"Baskerville score {baskerville_score}, "
@@ -1036,12 +1044,6 @@ class BaskervillehallPredictor(object):
             f"Starting predicting on topic {self.topic_sessions}"
         )
         self.logger.info(f"debug_ip={self.debug_ip}")
-        whitelist_ip = WhitelistIP(
-            self.whitelist_ip,
-            logger=self.logger,
-            refresh_period_in_seconds=60 * self.white_list_refresh_in_minutes,
-        )
-
         ts_lag_report = datetime.now()
 
         while True:
@@ -1078,7 +1080,7 @@ class BaskervillehallPredictor(object):
                     ip = session["ip"]
                     host = message.key.decode("utf-8")
 
-                    if whitelist_ip.is_in_whitelist(host, session["ip"]):
+                    if self.settings.is_ip_whitelisted(host, session["ip"]):
                         ip_whitelisted += 1
                         continue
 

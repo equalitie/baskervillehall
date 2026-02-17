@@ -7,7 +7,7 @@ metadata:
   labels:
     app: "baskervillehall-session"
 spec:
-  replicas: 9
+  replicas: 18
   serviceName: "baskervillehall-session"
   updateStrategy:
     type: RollingUpdate
