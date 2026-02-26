@@ -1,8 +1,9 @@
 import logging
+import time
 import boto3
 import hashlib
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ResponseStreamingError
 import os
 import pickle
 from datetime import datetime
@@ -46,10 +47,22 @@ class ModelIO(object):
             config=cfg
         )
 
-    def _load_object(self, path):
-        s3 = self._create_session()
+    def _load_object(self, path, max_retries=3):
         bucket, key = self._split_s3_path(path)
-        return s3.get_object(Bucket=bucket, Key=key)['Body'].read()
+        for attempt in range(max_retries):
+            s3 = self._create_session()
+            try:
+                return s3.get_object(Bucket=bucket, Key=key)['Body'].read()
+            except (ResponseStreamingError, ConnectionError, OSError) as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    self.logger.warning(
+                        f'S3 read failed for {key} (attempt {attempt + 1}/{max_retries}), '
+                        f'retrying in {wait}s: {e}'
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
     def _save_object(self, body, path):
         # Ensure body is bytes
@@ -98,6 +111,9 @@ class ModelIO(object):
             if ex.response['Error']['Code'] != 'NoSuchKey':
                 self.logger.info(ex)
             return None
+        except (ResponseStreamingError, ConnectionError, OSError) as ex:
+            self.logger.warning(f'Failed to load model for {host}/{model_type.value}: {ex}')
+            return None
 
     def load_exact_path(self, path):
         try:
@@ -105,4 +121,7 @@ class ModelIO(object):
         except ClientError as ex:
             if ex.response['Error']['Code'] != 'NoSuchKey':
                 self.logger.info(ex)
+            return None
+        except (ResponseStreamingError, ConnectionError, OSError) as ex:
+            self.logger.warning(f'Failed to load model from {path}: {ex}')
             return None

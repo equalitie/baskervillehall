@@ -18,6 +18,7 @@ from baskervillehall.asn_database import ASNDatabase
 from baskervillehall.asn_database2 import ASNDatabase2
 from baskervillehall import baskerville_rules
 from baskervillehall.bot_verificator import BotVerificator
+from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -143,6 +144,7 @@ class BaskervillehallSession(object):
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             group_id='session_pipeline',
             kafka_connection=None,
+            kafka_connection_commands=None,
             flush_increment=10,
             min_session_duration=5,
             max_session_duration=60,
@@ -171,6 +173,8 @@ class BaskervillehallSession(object):
             enable_emergency_partition_seek=True,
             score_2_num_requests=5,
             hostname='localhost',
+            topic_commands=None,
+            dnet_partition_map=None
     ):
         super().__init__()
         if kafka_connection is None:
@@ -199,6 +203,7 @@ class BaskervillehallSession(object):
         self.max_session_duration = max_session_duration
         self.read_from_beginning = read_from_beginning
         self.logger = logger
+        self.dnet_partition_map = dnet_partition_map
         self.debug_ip = debug_ip
         self.primary_session_expiration = primary_session_expiration
         self.min_number_of_requests = min_number_of_requests
@@ -237,6 +242,12 @@ class BaskervillehallSession(object):
             db_config=postgres_connection
         )
         self.fingerprints_analyzer = FrequencyAnalyzer()
+        self.country_blocker = CountryBlocker(
+            kafka_connection=kafka_connection_commands,
+            topic_commands=topic_commands or 'banjax_command_topic',
+            dnet_partition_map=self.dnet_partition_map,
+            logger=self.logger,
+        )
 
         self.primary_collect_cooldown_sec = 2.0
         self._last_primary_collect = {}
@@ -647,8 +658,8 @@ class BaskervillehallSession(object):
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
             'immature_session': session.get('immature_session', False),
-            'baskerville_score_1': session['baskerville_score_1'],
-            'baskerville_score_2': session['baskerville_score_2'],
+            'baskerville_score_1': session.get('baskerville_score_1', 50),
+            'baskerville_score_2': session.get('baskerville_score_2', 50),
         }
 
         if self.current_lag > self.lag_critical_threshold:
@@ -1152,6 +1163,11 @@ class BaskervillehallSession(object):
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
                         dnet = data.get('dnet', '-')
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
+
+                        if self.country_blocker.process(host, ip, country, dnet):
+                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                            self.profile_stats['message_count'] += 1
+                            continue
 
                         if len(session_id) < 5:
                             if data.get('loc_in', '') == 'static_file':

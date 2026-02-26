@@ -103,36 +103,36 @@ class BaskervillehallTrainer(object):
             return False
         self.logger.info(f'Training model for {host}, {model_type.value}')
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
-        categorical_features = self.categorical_features
+        features = self.features
         if model_type == ModelType.GENERIC:
-            if 'human' not in categorical_features:
-                categorical_features.append('human')
+            if 'human' not in features:
+                features.append('human')
 
         if model_type == ModelType.GENERIC or model_type == ModelType.BOT:
-            if 'valid_browser_ciphers' not in categorical_features:
-                categorical_features.append('valid_browser_ciphers')
-            if 'weak_cipher' not in categorical_features:
-                categorical_features.append('weak_cipher')
-            if 'headless_ua' not in categorical_features:
-                categorical_features.append('headless_ua')
-            if 'bot_ua' not in categorical_features:
-                categorical_features.append('bot_ua')
-            if 'short_ua' not in categorical_features:
-                categorical_features.append('short_ua')
-            if 'ai_bot_ua' not in categorical_features:
-                categorical_features.append('ai_bot_ua')
-            if 'verified_bot' not in categorical_features:
-                categorical_features.append('verified_bot')
-            if 'asset_only' not in categorical_features:
-                categorical_features.append('asset_only')
+            if 'valid_browser_ciphers' not in features:
+                features.append('valid_browser_ciphers')
+            if 'weak_cipher' not in features:
+                features.append('weak_cipher')
+            if 'headless_ua' not in features:
+                features.append('headless_ua')
+            if 'bot_ua' not in features:
+                features.append('bot_ua')
+            if 'short_ua' not in features:
+                features.append('short_ua')
+            if 'ai_bot_ua' not in features:
+                features.append('ai_bot_ua')
+            if 'verified_bot' not in features:
+                features.append('verified_bot')
+            if 'asset_only' not in features:
+                features.append('asset_only')
 
         model = BaskervillehallIsolationForest(
             n_estimators=self.n_estimators,
             max_samples=self.max_samples,
             contamination=self.contamination,
             max_features=self.max_features,
-            features=self.features,
-            categorical_features=categorical_features,
+            features=features,
+            categorical_features=self.categorical_features,
             pca_feature=self.pca_feature,
             datetime_format=self.datetime_format,
             bootstrap=self.bootstrap,
@@ -175,7 +175,7 @@ class BaskervillehallTrainer(object):
             contamination=self.contamination,
             num_epochs=50,
             features=self.features,
-            categorical_features=categorical_features,
+            categorical_features=self.categorical_features,
             pca_feature=self.pca_feature,
             datetime_format=self.datetime_format,
             shap_num_background=30,

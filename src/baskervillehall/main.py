@@ -171,6 +171,7 @@ def main():
             kafka_connection_output=kafka_connection_output,
             s3_connection=s3_connection,
             debug_ip=debug_ip,
+            hostname=os.environ.get('MY_POD_NAME', 'SESSION_POD'),
             logger=logger
         )
         predictor.run()

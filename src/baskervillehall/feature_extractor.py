@@ -38,11 +38,6 @@ class FeatureExtractor(object):
             'ua_score', 'hour_bucket', 'odd_hour', 'fingerprints_score',
             'interval_cv', 'interval_consistency',
             'rate_499',
-            # 'high_request_rate', 'extreme_request_rate',  # Removed: circular reasoning in training data
-
-            # Deprecated engineered features (often learned with wrong correlations):
-            # 'extreme_rate_flag','high_rate_zero_entropy','bot_combo',
-
             'primary_session', 'bad_bot', 'human',
             'valid_browser_ciphers', 'weak_cipher', 'headless_ua', 'bot_ua',
             'ai_bot_ua', 'verified_bot','short_ua','asset_only',
