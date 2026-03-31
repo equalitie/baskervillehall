@@ -165,7 +165,7 @@ class SettingsDeflectAPI(object):
 
                 if self.matches:
                     self.logger.info(f"\n=== Exact Matches (first 10 of {len(self.matches)}) ===")
-                    for match in self.matches[:10]:
+                    for match in list(self.matches)[:10]:
                         self.logger.info(f"  - {match}")
 
                 if self.stars:
