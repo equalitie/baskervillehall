@@ -1,7 +1,7 @@
 import logging
 import time
 import boto3
-import hashlib
+
 from botocore.config import Config
 from botocore.exceptions import ClientError, ResponseStreamingError
 import os
@@ -36,7 +36,9 @@ class ModelIO(object):
             s3={
                 'addressing_style': 'path',      # https://endpoint/bucket/key
                 'use_chunked_encoding': False    # send Content-Length instead of chunked
-            }
+            },
+            request_checksum_calculation='when_required',
+            response_checksum_validation='when_required',
         )
         return boto3.session.Session().client(
             service_name='s3',
@@ -69,9 +71,6 @@ class ModelIO(object):
         if isinstance(body, str):
             body = body.encode('utf-8')
 
-        # compute SHA-256 digest of the full body
-        digest = hashlib.sha256(body).hexdigest()
-
         s3 = self._create_session()
         bucket, key = self._split_s3_path(path)
         try:
@@ -79,8 +78,6 @@ class ModelIO(object):
                 Body=body,
                 Bucket=bucket,
                 Key=key,
-                ChecksumAlgorithm='SHA256',
-                ChecksumSHA256=digest
             )
         except ClientError as e:
             self.logger.error("S3 PutObject failed", exc_info=True)

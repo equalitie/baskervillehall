@@ -58,8 +58,15 @@ spec:
                      AND c.session_end <  h.h0 + interval '1 hour'
                     GROUP BY h.h0
                   )
-                  INSERT INTO public.dashboard_challenged_1h (bucket_hour, challenged_ips, updated_at)
-                  SELECT bucket_hour, challenged_ips::bigint, now()
+                  INSERT INTO public.dashboard_challenged_1h (
+                    bucket_hour,
+                    challenged_ips,
+                    updated_at
+                  )
+                  SELECT
+                    bucket_hour,
+                    challenged_ips::bigint,
+                    now()
                   FROM agg
                   ON CONFLICT (bucket_hour) DO UPDATE
                   SET challenged_ips = EXCLUDED.challenged_ips,
@@ -83,8 +90,15 @@ spec:
                      AND c.session_end <  h.h0 + interval '1 hour'
                     GROUP BY h.h0
                   )
-                  INSERT INTO public.dashboard_passed_1h (bucket_hour, passed_ips, updated_at)
-                  SELECT bucket_hour, passed_ips::bigint, now()
+                  INSERT INTO public.dashboard_passed_1h (
+                    bucket_hour,
+                    passed_ips,
+                    updated_at
+                  )
+                  SELECT
+                    bucket_hour,
+                    passed_ips::bigint,
+                    now()
                   FROM agg
                   ON CONFLICT (bucket_hour) DO UPDATE
                   SET passed_ips  = EXCLUDED.passed_ips,
@@ -109,12 +123,21 @@ spec:
                      AND c.session_end <  h.h0 + interval '1 hour'
                     GROUP BY h.h0
                   )
-                  INSERT INTO public.dashboard_precision_1h (bucket_hour, total_ips, passed_ips, precision_pct, updated_at)
+                  INSERT INTO public.dashboard_precision_1h (
+                    bucket_hour,
+                    total_ips,
+                    passed_ips,
+                    precision_pct,
+                    updated_at
+                  )
                   SELECT
                     bucket_hour,
                     total_ips::bigint,
                     passed_ips::bigint,
-                    ROUND(100.0 - 100.0 * passed_ips / NULLIF(total_ips, 0), 1) AS precision_pct,
+                    CASE
+                      WHEN total_ips = 0 THEN 0.0
+                      ELSE ROUND(100.0 - 100.0 * passed_ips / total_ips, 1)
+                    END AS precision_pct,
                     now()
                   FROM agg
                   ON CONFLICT (bucket_hour) DO UPDATE
@@ -142,8 +165,17 @@ spec:
                      AND s.session_end <  h.h0 + interval '1 hour'
                     GROUP BY h.h0, CASE WHEN s.human = 1 THEN 'human' ELSE 'bot' END
                   )
-                  INSERT INTO public.dashboard_human_bot_1h (bucket_hour, human_label, cnt, updated_at)
-                  SELECT bucket_hour, human_label, cnt::bigint, now()
+                  INSERT INTO public.dashboard_human_bot_1h (
+                    bucket_hour,
+                    human_label,
+                    cnt,
+                    updated_at
+                  )
+                  SELECT
+                    bucket_hour,
+                    human_label,
+                    COALESCE(cnt, 0)::bigint,
+                    now()
                   FROM agg
                   ON CONFLICT (bucket_hour, human_label) DO UPDATE
                   SET cnt        = EXCLUDED.cnt,

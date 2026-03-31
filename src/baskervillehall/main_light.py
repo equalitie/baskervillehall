@@ -60,7 +60,7 @@ def main():
         'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS')
     }
 
-    kafka_connection_commands = {
+    kafka_connection_output = {
         'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT')
     }
 
@@ -106,7 +106,7 @@ def main():
         sessionizer = BaskervillehallSession(
             **params,
             kafka_connection=kafka_connection,
-            kafka_connection_commands=kafka_connection_commands,
+            kafka_connection_output=kafka_connection_output,
             debug_ip=debug_ip,
             asn_database_path=os.environ.get('BAD_ASN_FILE', ''),  # Optional - will be empty
             asn_database2_path=os.environ.get('VPN_ASN_PATH', ''),  # Optional - will be empty

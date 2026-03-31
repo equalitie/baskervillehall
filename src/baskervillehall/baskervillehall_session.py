@@ -144,7 +144,7 @@ class BaskervillehallSession(object):
             topic_sessions='BASKERVILLEHALL_SESSIONS',
             group_id='session_pipeline',
             kafka_connection=None,
-            kafka_connection_commands=None,
+            kafka_connection_output=None,
             flush_increment=10,
             min_session_duration=5,
             max_session_duration=60,
@@ -154,7 +154,7 @@ class BaskervillehallSession(object):
             deflect_config_url=None,
             deflect_config_auth=None,
             whitelist_url_default=None,
-            white_list_refresh_period=5,
+            white_list_refresh_period=2,
             max_primary_sessions_per_ip=10,
             primary_session_expiration=10,
             datetime_format='%Y-%m-%d %H:%M:%S',
@@ -179,6 +179,9 @@ class BaskervillehallSession(object):
         super().__init__()
         if kafka_connection is None:
             kafka_connection = {'bootstrap_servers': 'localhost:9092'}
+        if kafka_connection_output is None:
+            kafka_connection_output = {'bootstrap_servers': 'localhost:9092'}
+        self.kafka_connection_output = kafka_connection_output
         if whitelist_url_default is None:
             whitelist_url_default = []
 
@@ -242,10 +245,21 @@ class BaskervillehallSession(object):
             db_config=postgres_connection
         )
         self.fingerprints_analyzer = FrequencyAnalyzer()
+
+        self.settings = SettingsDeflectAPI(
+            url=self.deflect_config_url,
+            auth=self.deflect_config_auth,
+            whitelist_default=self.whitelist_url_default,
+            logger=self.logger,
+            refresh_period_in_seconds=60 * self.white_list_refresh_period
+        )
+
         self.country_blocker = CountryBlocker(
-            kafka_connection=kafka_connection_commands,
+            kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
             topic_commands=topic_commands or 'banjax_command_topic',
             dnet_partition_map=self.dnet_partition_map,
+            deflect_api_setting=self.settings,
             logger=self.logger,
         )
 
@@ -982,13 +996,6 @@ class BaskervillehallSession(object):
         return ''
 
     def run(self):
-        settings = SettingsDeflectAPI(
-            url=self.deflect_config_url,
-            auth=self.deflect_config_auth,
-            whitelist_default=self.whitelist_url_default,
-            logger=self.logger,
-            refresh_period_in_seconds=60 * self.white_list_refresh_period
-        )
 
         try:
             consumer, self.producer = self.create_kafka_connections()
@@ -1128,12 +1135,36 @@ class BaskervillehallSession(object):
                                 asn_number=asn, asn_name=asn_name, timestamp=ts_event
                             )
 
+                        ua = data.get('client_ua', data.get('client_user_agent', ''))
+                        geoip = data.get('geoip', {})
+                        country = geoip.get('country_code2', geoip.get('country_code', ''))
+                        dnet = data.get('dnet', '-')
+                        timezone_str = geoip.get('timezone', 'America/Los_Angeles')
+
+                        if self.country_blocker.process(host, ip, country, dnet):
+                            if host == 'farmal.in':
+                                self.logger.info(f'{host} country {country} blocked ip{ip}')
+                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                            self.profile_stats['message_count'] += 1
+                            continue
+
+                        if host == 'farmal.in':
+                            self.logger.info(f' {host} country {country} ip {ip} is not blocked')
+                            self.logger.info(data)
+                        if len(session_id) < 5:
+                            if data.get('loc_in', '') == 'static_file':
+                                self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                                self.profile_stats['message_count'] += 1
+                                continue
+                            session_id = '-' + ''.join(
+                                random.choice(string.ascii_uppercase + string.digits) for _ in range(7))
+
                         # Whitelist with TTL cache
                         t_wl = self._t()
                         k1 = ('hip', host, ip)
                         cached = self._wl_get(k1)
                         if cached is None:
-                            allowed = settings.is_host_whitelisted(host)
+                            allowed = self.settings.is_host_whitelisted(host)
                             self._wl_put(k1, allowed)
                         else:
                             allowed = cached
@@ -1147,7 +1178,7 @@ class BaskervillehallSession(object):
                         k2 = ('url', url)
                         cached = self._wl_get(k2)
                         if cached is None:
-                            allowed2 = settings.is_in_whitelist(url)
+                            allowed2 = self.settings.is_in_whitelist(url)
                             self._wl_put(k2, allowed2)
                         else:
                             allowed2 = cached
@@ -1157,25 +1188,6 @@ class BaskervillehallSession(object):
                             self.profile_stats['message_count'] += 1
                             continue
                         self._acc('whitelist_checks', t_wl)
-
-                        ua = data.get('client_ua', data.get('client_user_agent', ''))
-                        geoip = data.get('geoip', {})
-                        country = geoip.get('country_code2', geoip.get('country_code', ''))
-                        dnet = data.get('dnet', '-')
-                        timezone_str = geoip.get('timezone', 'America/Los_Angeles')
-
-                        if self.country_blocker.process(host, ip, country, dnet):
-                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
-                            self.profile_stats['message_count'] += 1
-                            continue
-
-                        if len(session_id) < 5:
-                            if data.get('loc_in', '') == 'static_file':
-                                self.profile_stats['message_processing'] += (time_module.time() - msg_start)
-                                self.profile_stats['message_count'] += 1
-                                continue
-                            session_id = '-' + ''.join(
-                                random.choice(string.ascii_uppercase + string.digits) for _ in range(7))
 
                         passed_challenge = False
                         deflect_password = False

@@ -60,7 +60,12 @@ class JsonUrlReader(object):
             if self.url:
                 if self.logger:
                     self.logger.info(f'Refreshing from url...')
-                self.data = self.read_json_from_url(self.url)
+                result = self.read_json_from_url(self.url)
+                if result is not None:
+                    self.data = result
+                else:
+                    if self.logger:
+                        self.logger.warning(f'Failed to refresh from url, keeping previous data')
                 return True
         return False
 

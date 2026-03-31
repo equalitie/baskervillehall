@@ -37,23 +37,25 @@ class StorageCommands(StorageBase):
 
     def get_sql(self, record):
         command = record
-        s = command['session']
-        requests = self.get_session_requests(s, self.num_requests)
+        session = command.get('session', {})
+        if len(session.keys()) == 0:
+            return None
+        requests = self.get_session_requests(session, self.num_requests)
         host = command["host"]
         host_id = self.get_host_id(host)
         if len(host_id) == 0:
             return None
-        hits = len(s['requests'])
+        hits = len(session['requests'])
         duration = command['duration']
         if duration < 1:
             duration = 1
-        num_ua = self.get_number_of_useragents(s)
+        num_ua = self.get_number_of_useragents(session)
         cloudflare_score = command.get("cloudflare_score", 0)
         if cloudflare_score == '':
             cloudflare_score = 0
         shapley_formatted_if = json.dumps(command['shapley_if']) if len(command['shapley_if']) > 0 else ''
         shapley_formatted_ae = json.dumps(command['shapley_ae']) if len(command['shapley_ae']) > 0 else ''
-        ua = s["ua"].replace("\'", "")
+        ua = session.get("ua", '').replace("\'", "")
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip_address, session_cookie, ip_cookie, '\
             f'primary_session, human, passed_challenge, user_agent, country, continent, '\
@@ -61,12 +63,12 @@ class StorageCommands(StorageBase):
             f'shapley_feature_if, shapley_feature_ae,difficulty, shapley_if, shapley_ae,request_count, command_type_name, source, \n'\
             f'meta, hit_rate, num_user_agent,'\
             f'duration, session_start, session_end, requests,updated_by,scraper_name,prediction_if,prediction_ae,baskerville_score,cloudflare_score)\n'\
-            f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{command["session_id"]}\',\n'\
-            f'\'{s["ip"]}_{command["session_id"]}\',{int(s["primary_session"])},\n'\
-            f'{int(s["human"])},'\
-            f'{int(s["passed_challenge"])}, \'{ua}\', \n \'{s["country"]}\','\
-            f' \'{s["continent"]}\', '\
-            f'\'{s["datacenter_code"]}\',\n'\
+            f'values (\'{host_id}\', \'{host}\', \'{session["ip"]}\', \'{command["session_id"]}\',\n'\
+            f'\'{session["ip"]}_{command["session_id"]}\',{int(session["primary_session"])},\n'\
+            f'{int(session["human"])},'\
+            f'{int(session["passed_challenge"])}, \'{ua}\', \n \'{session["country"]}\','\
+            f' \'{session["continent"]}\', '\
+            f'\'{session["datacenter_code"]}\',\n'\
             f'{hits}, {command["score_if"]},{command["score_ae"]},{command["threshold_ae"]},'\
             f'{command.get("bot_score", 0.0)},'\
             f'\'{command.get("bot_score_top_factor", "")}\','\
@@ -78,7 +80,7 @@ class StorageCommands(StorageBase):
             f'\'{command["meta"]}\',' \
             f'{hits * 60.0 / duration:.1f}, {num_ua}, '\
             f'{duration:.1f}, \'{command["start"]}\', \'{command["end"]}\',\n'\
-            f'\'{requests}\', \'pipeline\',\'{s["scraper_name"]}\','\
+            f'\'{requests}\', \'pipeline\',\'{session["scraper_name"]}\','\
             f'{command["prediction_if"]},{command["prediction_ae"]},'\
             f'{command.get("baskerville_score", 0)},'\
             f'{cloudflare_score}'\
