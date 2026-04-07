@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dp-prune
+  namespace: default
+spec:
+  schedule: "0 3 * * *"
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: prune
+              image: postgres:16
+              env:
+                - name: PGHOST
+                  value: "postgres-baskervillehall"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: "baskerville"
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-baskervillehall-secret
+                      key: user
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-baskervillehall-secret
+                      key: password
+              command: ["bash","-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  psql -v ON_ERROR_STOP=1 <<'SQL'
+                  SET statement_timeout = '30min';
+
+                  DELETE FROM public.challenge_command_history
+                  WHERE created_at < (now() AT TIME ZONE 'UTC') - INTERVAL '3 days';
+
+                  DELETE FROM public.sessions
+                  WHERE created_at < (now() AT TIME ZONE 'UTC') - INTERVAL '3 days';
+
+                  DELETE FROM public.vpn
+                  WHERE "timestamp" < (now() AT TIME ZONE 'UTC') - INTERVAL '3 days';
+                  SQL

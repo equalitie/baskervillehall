@@ -1,3 +1,4 @@
+import gc
 import logging
 import time
 import json
@@ -11,6 +12,31 @@ from baskervillehall.baskervillehall_isolation_forest import BaskervillehallIsol
 from baskervillehall.host_selector import HostSelector
 from baskervillehall.model_io import ModelIO
 from kafka import KafkaConsumer, TopicPartition
+
+# Fields needed from each session for feature extraction and training
+_SESSION_KEYS = {
+    'requests', 'duration', 'start', 'timezone',
+    'ciphers', 'num_languages', 'ua_score', 'fingerprints_score',
+    'primary_session', 'bad_bot', 'human',
+    'valid_browser_ciphers', 'weak_cipher', 'headless_ua', 'bot_ua',
+    'ai_bot_ua', 'verified_bot', 'short_ua', 'asset_only',
+    # categorical features
+    'country', 'cipher', 'cipher_type', 'datacenter_asn',
+}
+
+# Fields needed from each request inside a session
+_REQUEST_KEYS = {'ts', 'code', 'url', 'payload', 'edge', 'ua', 'query', 'type', 'method', 'static'}
+
+
+def _strip_session(session):
+    """Strip session to only the fields needed for training, reducing memory."""
+    stripped = {k: session[k] for k in _SESSION_KEYS if k in session}
+    if 'requests' in stripped:
+        stripped['requests'] = [
+            {k: r[k] for k in _REQUEST_KEYS if k in r}
+            for r in stripped['requests']
+        ]
+    return stripped
 
 
 class BaskervillehallTrainer(object):
@@ -28,12 +54,12 @@ class BaskervillehallTrainer(object):
             min_session_duration=20,
             min_number_of_requests=2,
             accepted_contamination=0.1,
-            n_estimators=500,
+            n_estimators=512,
             max_samples="auto",
             contamination="auto",
             max_features=1.0,
             bootstrap=True,
-            n_jobs=-1,
+            n_jobs=1,
             random_state=None,
             datetime_format='%Y-%m-%d %H:%M:%S',
 
@@ -103,36 +129,36 @@ class BaskervillehallTrainer(object):
             return False
         self.logger.info(f'Training model for {host}, {model_type.value}')
         model_io = ModelIO(**self.s3_connection, logger=self.logger)
-        categorical_features = self.categorical_features
+        features = self.features
         if model_type == ModelType.GENERIC:
-            if 'human' not in categorical_features:
-                categorical_features.append('human')
+            if 'human' not in features:
+                features.append('human')
 
         if model_type == ModelType.GENERIC or model_type == ModelType.BOT:
-            if 'valid_browser_ciphers' not in categorical_features:
-                categorical_features.append('valid_browser_ciphers')
-            if 'weak_cipher' not in categorical_features:
-                categorical_features.append('weak_cipher')
-            if 'headless_ua' not in categorical_features:
-                categorical_features.append('headless_ua')
-            if 'bot_ua' not in categorical_features:
-                categorical_features.append('bot_ua')
-            if 'short_ua' not in categorical_features:
-                categorical_features.append('short_ua')
-            if 'ai_bot_ua' not in categorical_features:
-                categorical_features.append('ai_bot_ua')
-            if 'verified_bot' not in categorical_features:
-                categorical_features.append('verified_bot')
-            if 'asset_only' not in categorical_features:
-                categorical_features.append('asset_only')
+            if 'valid_browser_ciphers' not in features:
+                features.append('valid_browser_ciphers')
+            if 'weak_cipher' not in features:
+                features.append('weak_cipher')
+            if 'headless_ua' not in features:
+                features.append('headless_ua')
+            if 'bot_ua' not in features:
+                features.append('bot_ua')
+            if 'short_ua' not in features:
+                features.append('short_ua')
+            if 'ai_bot_ua' not in features:
+                features.append('ai_bot_ua')
+            if 'verified_bot' not in features:
+                features.append('verified_bot')
+            if 'asset_only' not in features:
+                features.append('asset_only')
 
         model = BaskervillehallIsolationForest(
             n_estimators=self.n_estimators,
             max_samples=self.max_samples,
             contamination=self.contamination,
             max_features=self.max_features,
-            features=self.features,
-            categorical_features=categorical_features,
+            features=features,
+            categorical_features=self.categorical_features,
             pca_feature=self.pca_feature,
             datetime_format=self.datetime_format,
             bootstrap=self.bootstrap,
@@ -144,10 +170,14 @@ class BaskervillehallTrainer(object):
         old_model = model_io.load(self.s3_path, host, model_type)
         if old_model:
             scores, _, _ = old_model.transform(sessions)
-            contamination = float(len(scores[scores < 0])) / len(scores)
+            del old_model
+            n_negative = int((scores < 0).sum())
+            n_total = len(scores)
+            del scores
+            contamination = float(n_negative) / n_total
             if contamination > self.accepted_contamination:
                 self.logger.info(f'Skipping training. High contamination: {contamination:.2f}. '
-                                 f'Host = {host}. {scores.shape[0]} records, type={model_type.value}')
+                                 f'Host = {host}. {n_total} records, type={model_type.value}')
                 return False
 
         self.logger.info(f'Training host {host}, dataset size {len(sessions)}, type={model_type.value}')
@@ -168,6 +198,8 @@ class BaskervillehallTrainer(object):
         self.logger.info(f'@@@ Saving model for {host}, type={model_type.value}...')
         model.clear_embeddings()
         model_io.save(model, self.s3_path, host, model_type=model_type)
+        del model
+        gc.collect()
 
         self.logger.info(f'Training Autoencoder model for {host}, {model_type.value}')
         model_auto_encoder = BaskervillehallAutoEncoder(
@@ -175,7 +207,7 @@ class BaskervillehallTrainer(object):
             contamination=self.contamination,
             num_epochs=50,
             features=self.features,
-            categorical_features=categorical_features,
+            categorical_features=self.categorical_features,
             pca_feature=self.pca_feature,
             datetime_format=self.datetime_format,
             shap_num_background=30,
@@ -185,6 +217,7 @@ class BaskervillehallTrainer(object):
         self.logger.info(f'Autoencoder model trained')
         self.logger.info(f'Saving Autoencoder model for {host}, {model_type.value}')
         model_io.save(model_auto_encoder, f'{self.s3_path}_autoencoder3', host, model_type=model_type)
+        del model_auto_encoder
         self.logger.info(f'Autoencoder model saved')
 
         return True
@@ -193,14 +226,12 @@ class BaskervillehallTrainer(object):
         try:
             consumer_opts = dict(self.kafka_connection)
             consumer_opts.update({
-                # pull large chunks per fetch
-                'fetch_max_bytes': 64 * 1024 * 1024,  # 64MB across partitions
-                'max_partition_fetch_bytes': 32 * 1024 * 1024,  # 32MB per partition
-                'fetch_min_bytes': 4 * 1024 * 1024,  # coalesce small messages into 1MB+
-                'fetch_max_wait_ms': 500,  # wait a bit to batch
-                # socket buffers to avoid throttling
-                'receive_buffer_bytes': 8 * 1024 * 1024,
-                'send_buffer_bytes': 8 * 1024 * 1024,
+                'fetch_max_bytes': 16 * 1024 * 1024,   # 16MB across partitions
+                'max_partition_fetch_bytes': 4 * 1024 * 1024,  # 4MB per partition
+                'fetch_min_bytes': 1024 * 1024,         # 1MB min before returning
+                'fetch_max_wait_ms': 500,
+                'receive_buffer_bytes': 4 * 1024 * 1024,
+                'send_buffer_bytes': 1024 * 1024,
                 # we assign partitions manually; commits don’t matter
                 'enable_auto_commit': True,
                 # longer timeouts under burst
@@ -284,11 +315,11 @@ class BaskervillehallTrainer(object):
 
                             if session.get('human', False):
                                 if len(batch[host]['human']) < self.num_sessions:
-                                    batch[host]['human'].append(session)
+                                    batch[host]['human'].append(_strip_session(session))
                             else:
                                 if not session.get('bad_bot', False):
                                     if len(batch[host]['bot']) < self.num_sessions:
-                                        batch[host]['bot'].append(session)
+                                        batch[host]['bot'].append(_strip_session(session))
 
                 self.logger.info('The new batch:')
                 for host, v in batch.items():
@@ -300,6 +331,12 @@ class BaskervillehallTrainer(object):
                         if not self.train_and_save_model(v['human'], host, ModelType.HUMAN) or \
                         not self.train_and_save_model(v['bot'], host, ModelType.BOT):
                             self.train_and_save_model(v['bot']+v['human'], host, ModelType.GENERIC)
+                    # Free session data for this host before processing next
+                    v['bot'].clear()
+                    v['human'].clear()
+                    gc.collect()
+                del batch
+                gc.collect()
 
 
         except Exception as ex:

@@ -16,7 +16,7 @@ class WhitelistURL(object):
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
         self.domains = []
         self.prefixes = []
-        self.matches = []
+        self.matches = set()
         self.stars = []
         self.double_stars = []
         self.whitelist_default = whitelist_default
@@ -34,7 +34,7 @@ class WhitelistURL(object):
 
             self.domains = []
             self.prefixes = []
-            self.matches = []
+            self.matches = set()
             self.stars = []
             for url in white_list:
                 if url.find('/') < 0:
@@ -42,7 +42,7 @@ class WhitelistURL(object):
                 else:
                     star_pos = url.find('*')
                     if url.find('*') < 0:
-                        self.matches.append(url)
+                        self.matches.add(url)
                     else:
                         if star_pos == len(url) - 1:
                             self.prefixes.append(url[:-1])

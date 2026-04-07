@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 
 from baskervillehall.json_url_reader import JsonUrlReader
@@ -9,17 +10,32 @@ class SettingsDeflectAPI(object):
             self,
             url,
             auth,
+            ip_whitelist_url=None,
+            ip_whitelist_auth=None,
             whitelist_default=[],
             whitelist_default_block_session=[],
             logger=None,
             refresh_period_in_seconds=300):
+        self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
+
         self.reader = JsonUrlReader(url=url,
                                     headers={'Authorization': f'Bearer {auth}'},
-                                    logger=logger, refresh_period_in_seconds=refresh_period_in_seconds)
-        self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
+                                    logger=self.logger, refresh_period_in_seconds=refresh_period_in_seconds)
+
+        # IP whitelist reader (optional)
+        self.ip_whitelist_reader = None
+        if ip_whitelist_url and ip_whitelist_auth:
+            self.ip_whitelist_reader = JsonUrlReader(
+                url=ip_whitelist_url,
+                headers={'Authorization': f'Bearer {ip_whitelist_auth}'},
+                logger=logger,
+                refresh_period_in_seconds=refresh_period_in_seconds
+            )
+        self.ip_whitelist_data = {}
+        self.ip_whitelist_parsed = {}  # Cache of parsed IP networks per host
         self.domains = []
         self.prefixes = []
-        self.matches = []
+        self.matches = set()
         self.stars = []
         self.config =  {}
         self.double_stars = []
@@ -47,13 +63,21 @@ class SettingsDeflectAPI(object):
                         self.logger.warning(f"Invalid sensitivity value for {host}: {sensitivity_raw!r}, using 0")
                     sensitivity = 0
 
+                if v.get('allowlist_domain', False):
+                    white_list.append(host)
+
                 self.config[host] = {
-                    'sensitivity': sensitivity
+                    'sensitivity': sensitivity,
+                    'country_mode': v.get('country_mode', None),
+                    'country_blacklist': set(v.get('country_blacklist', [])),
+                    'country_whitelist': set(v.get('country_whitelist', [])),
+                    'country_action_type': v.get('country_action_type', 'challenge'),
+                    'ttl_ban_time': v.get('ttl_ban_time', 300),
                 }
 
             self.domains = []
             self.prefixes = []
-            self.matches = []
+            self.matches = set()
             self.stars = []
             for url in white_list:
                 if url.find('/') < 0:
@@ -61,7 +85,7 @@ class SettingsDeflectAPI(object):
                 else:
                     star_pos = url.find('*')
                     if url.find('*') < 0:
-                        self.matches.append(url)
+                        self.matches.add(url)
                     else:
                         if star_pos == len(url) - 1:
                             self.prefixes.append(url[:-1])
@@ -104,6 +128,22 @@ class SettingsDeflectAPI(object):
                     self.logger.info(f"  {i+1}. {host}")
                     self.logger.info(f"     sensitivity: {config['sensitivity']} (type: {type(config['sensitivity']).__name__})")
 
+                # Country blocking distribution
+                country_block_hosts = [(host, config['country_mode']) for host, config in self.config.items()
+                                       if config.get('country_mode') is not None]
+                if country_block_hosts:
+                    self.logger.info(f"\n=== Hosts with Country Blocking ({len(country_block_hosts)}) ===")
+                    for host, mode in country_block_hosts:
+                        cfg = self.config[host]
+                        action = cfg.get('country_action_type', 'challenge')
+                        ttl = cfg.get('ttl_ban_time', 300)
+                        if mode == 'whitelist':
+                            countries = cfg.get('country_whitelist', set())
+                            self.logger.info(f"  {host}: mode={mode}, allowed={countries}, action={action}, ttl={ttl}")
+                        elif mode == 'blacklist':
+                            countries = cfg.get('country_blacklist', set())
+                            self.logger.info(f"  {host}: mode={mode}, blocked={countries}, action={action}, ttl={ttl}")
+
                 # Show hosts with non-zero sensitivity
                 non_zero_sens = [(host, config['sensitivity']) for host, config in self.config.items()
                                  if config['sensitivity'] != 0]
@@ -125,7 +165,7 @@ class SettingsDeflectAPI(object):
 
                 if self.matches:
                     self.logger.info(f"\n=== Exact Matches (first 10 of {len(self.matches)}) ===")
-                    for match in self.matches[:10]:
+                    for match in list(self.matches)[:10]:
                         self.logger.info(f"  - {match}")
 
                 if self.stars:
@@ -193,3 +233,119 @@ class SettingsDeflectAPI(object):
         if not host_data:
             return 0
         return host_data.get('sensitivity', 0)
+
+    def _refresh_ip_whitelist(self):
+        if not self.ip_whitelist_reader:
+            return
+
+        data, fresh = self.ip_whitelist_reader.get()
+        if data and fresh:
+            self.ip_whitelist_data = data
+            self.ip_whitelist_parsed = {}
+
+            # Parse all IP addresses/networks for each host
+            for host, ip_list in data.items():
+                parsed_networks = []
+                for ip_entry in ip_list:
+                    try:
+                        # Skip non-IP entries (like URL paths)
+                        if ip_entry.startswith('/'):
+                            continue
+                        # Try to parse as network (handles both single IPs and CIDRs)
+                        network = ipaddress.ip_network(ip_entry, strict=False)
+                        parsed_networks.append(network)
+                    except ValueError as e:
+                        self.logger.warning(f"Invalid IP/CIDR entry for {host}: {ip_entry!r} - {e}")
+                self.ip_whitelist_parsed[host] = parsed_networks
+
+            self.logger.info(f"IP whitelist refreshed: {len(self.ip_whitelist_parsed)} hosts loaded")
+
+    def is_ip_whitelisted(self, host, ip):
+        """
+        Check if an IP address is whitelisted for a given host.
+
+        Args:
+            host: The hostname to check (e.g., 'kavkaz-uzel.eu')
+            ip: The IP address to check (e.g., '104.131.108.241')
+
+        Returns:
+            True if the IP is whitelisted for this host, False otherwise
+        """
+        self._refresh_ip_whitelist()
+
+        if not self.ip_whitelist_reader:
+            return False
+
+        # Check host-specific whitelist
+        host_networks = self.ip_whitelist_parsed.get(host, [])
+
+        # Also check global whitelist if present
+        global_networks = self.ip_whitelist_parsed.get('global', [])
+
+        all_networks = host_networks + global_networks
+
+        if not all_networks:
+            return False
+
+        try:
+            ip_addr = ipaddress.ip_address(ip)
+            for network in all_networks:
+                if ip_addr in network:
+                    return True
+        except ValueError as e:
+            self.logger.warning(f"Invalid IP address: {ip!r} - {e}")
+            return False
+
+        return False
+
+    def is_country_blocked(self, host, country):
+        """
+        Check if a country is blocked for a given host based on the
+        country_mode setting from the Deflect API.
+
+        Modes:
+          - None: no country blocking, returns False
+          - "whitelist": only countries in country_whitelist are allowed;
+                         everything else is blocked
+          - "blacklist": countries in country_blacklist are blocked;
+                         everything else is allowed
+
+        Args:
+            host: The hostname to check
+            country: ISO country code (e.g., 'US', 'RU')
+
+        Returns:
+            True if the country is blocked for this host, False otherwise
+        """
+        self._refresh()
+        host_data = self.config.get(host)
+        if not host_data:
+            return False
+
+        mode = host_data.get('country_mode')
+        if mode is None:
+            return False
+
+        if mode == 'whitelist':
+            return country not in host_data.get('country_whitelist', set())
+
+        if mode == 'blacklist':
+            return country in host_data.get('country_blacklist', set())
+
+        return False
+
+    def get_country_action_type(self, host):
+        """Get the country blocking action type for a host ('challenge' or 'block')."""
+        self._refresh()
+        host_data = self.config.get(host)
+        if not host_data:
+            return 'challenge'
+        return host_data.get('country_action_type', 'challenge')
+
+    def get_ttl_ban_time(self, host):
+        """Get the TTL ban time in seconds for country blocking for a host."""
+        self._refresh()
+        host_data = self.config.get(host)
+        if not host_data:
+            return 300
+        return host_data.get('ttl_ban_time', 300)

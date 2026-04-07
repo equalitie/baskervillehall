@@ -4,6 +4,8 @@ import multiprocessing as mp
 
 import os
 
+import json
+
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.storage_commands import StorageCommands
 from baskervillehall.storage_sessions import StorageSessions
@@ -58,6 +60,10 @@ def main():
         'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS')
     }
 
+    kafka_connection_output = {
+        'bootstrap_servers': os.environ.get('BOOTSTRAP_SERVERS_OUTPUT')
+    }
+
     debug_ip = os.environ.get('DEBUG_IP')
 
     postgres_connection = {
@@ -92,15 +98,19 @@ def main():
             'lag_emergency_threshold': int(os.environ.get('LAG_EMERGENCY_THRESHOLD', 8000)),
             'lag_critical_threshold': int(os.environ.get('LAG_CRITICAL_THRESHOLD', 6000)),
             'score_2_num_requests': int(os.environ.get('SCORE_2_NUM_REQUESTS', 5)),
+            'topic_commands': os.environ.get('TOPIC_COMMANDS'),
+            'dnet_partition_map': json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
         }
 
         logger.info("Starting session pipeline")
         sessionizer = BaskervillehallSession(
             **params,
             kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
             debug_ip=debug_ip,
             asn_database_path=os.environ.get('BAD_ASN_FILE', ''),  # Optional - will be empty
             asn_database2_path=os.environ.get('VPN_ASN_PATH', ''),  # Optional - will be empty
+            hostname=os.environ.get('MY_POD_NAME', 'SESSION_POD'),
             logger=logger
         )
 

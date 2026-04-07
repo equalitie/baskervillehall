@@ -26,9 +26,47 @@ from baskervillehall.baskerville_rules import detect_scraper, is_human
 from baskervillehall.model_storage import ModelStorage
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.settings_postgres import SettingsPostgres
-from baskervillehall.whitelist_ip import WhitelistIP
+from kafka.errors import NoBrokersAvailable
+from kafka.consumer.subscription_state import ConsumerRebalanceListener
 
+class RebalanceLogger(ConsumerRebalanceListener):
+    def __init__(self, logger, name="consumer"):
+        self.logger = logger
+        self.name = name
 
+    def on_partitions_revoked(self, revoked):
+        self.logger.warning("[%s] REVOKED: %s", self.name, sorted(revoked, key=lambda tp:(tp.topic,tp.partition)))
+
+    def on_partitions_assigned(self, assigned):
+        self.logger.warning("[%s] ASSIGNED: %s", self.name, sorted(assigned, key=lambda tp:(tp.topic,tp.partition)))
+
+def log_partition_assignment(consumer, logger):
+    """Logs current partitions, offsets and lag owned by this consumer."""
+    try:
+        assignment = consumer.assignment()  # set[TopicPartition]
+        subs = consumer.subscription()  # set[str] or None
+        if not assignment:
+            logger.info("Assignment: ∅ (no partitions yet) | subscription=%s", list(subs) if subs else "None")
+            return
+
+        tps = sorted(list(assignment), key=lambda tp: (tp.topic, tp.partition))
+        # Offsets
+        ends = consumer.end_offsets(tps)  # {TopicPartition: int}
+        begins = consumer.beginning_offsets(tps)  # {TopicPartition: int}
+        positions = {tp: consumer.position(tp) for tp in tps}  # {TopicPartition: int or None}
+
+        lines = []
+        for tp in tps:
+            pos = positions.get(tp) or 0
+            end = ends.get(tp) or 0
+            beg = begins.get(tp) or 0
+            lag = max(0, end - pos)
+            lines.append(f"{tp.topic}[{tp.partition}] pos={pos} begin={beg} end={end} lag={lag}")
+
+        logger.info("Assignment (%d): %s | subscription=%s",
+                    len(tps), "; ".join(lines), list(subs) if subs else "None")
+    except Exception as e:
+        logger.warning(f"Assignment logging failed: {e!r}")
 
 
 def is_static_session(session: Dict[str, Any]) -> bool:
@@ -69,6 +107,7 @@ def _shapley_report(shap_value, feature_names):
     shapley_report.sort(key=lambda x: abs(x["values"]["shapley"]), reverse=True)
     return shapley_feature, shapley_report
 
+
 def _shapley_report_classifier(shap_value, feature_names):
     """Extract top negative shapley contributions."""
     shapley_report = []
@@ -89,61 +128,64 @@ def _shapley_report_classifier(shap_value, feature_names):
     shapley_report.sort(key=lambda x: abs(x["values"]["shapley"]), reverse=True)
     return shapley_feature, shapley_report
 
+
 class BaskervillehallPredictor(object):
     def __init__(
-        self,
-        topic_sessions="BASKERVILLEHALL_SESSIONS",
-        group_id='predict_pipeline',
-        topic_commands="banjax_command_topic",
-        topic_commands_output="banjax_command_topic",
-        topic_reports="banjax_report_topic",
-        kafka_connection=None,
-        kafka_connection_output=None,
-        s3_connection=None,
-        s3_path="/",
-        datetime_format="%Y-%m-%d %H:%M:%S",
-        white_list_refresh_in_minutes=5,
-        model_reload_in_minutes=10,
-        max_models=10000,
-        min_session_duration=20,
-        min_number_of_requests=2,
-        num_offences_for_difficult_challenge=3,
-        batch_size=100,
-        worker_chunk_size=1000,
-        kafka_poll_timeout_ms=5000,
-        max_poll_interval_ms=600000,
-        fetch_max_wait_ms=2000,
-        fetch_min_bytes=1048576,
-        lag_high_threshold=10000,
-        lag_moderate_threshold=5000,
-        pending_ttl=30,
-        maxsize_pending=10000000,
-        n_jobs_predict=-1,
-        logger=None,
-        whitelist_ip=None,
-        deflect_config_url=None,
-        deflect_config_auth=None,
-        white_list_refresh_period=5,
-        bad_bot_challenge=True,
-        debug_ip=None,
-        use_shapley=True,
-        postgres_connection=None,
-        postgres_refresh_period_in_seconds=180,
-        sensitivity_factor=0.05,
-        max_sessions_for_ip=10,
-        maz_size_ip_sessions=100000,
-        ip_sessions_ttl_in_minutes=30,
-        max_requests_in_command=20,
-        bot_score_threshold=0.5,
-        challenge_scrapers=True,
-        rate_limit_hits=20,
-        rate_limit_interval=60,
-        rate_limit_expiration=300,
-        use_rate_limit=True,
-        dnet_partition_map = None,
-        print_log_in_command = True,
-        use_baskerville_score=True,
-        verbose_classifier=False
+            self,
+            topic_sessions="BASKERVILLEHALL_SESSIONS",
+            group_id='predict_pipeline',
+            topic_commands="banjax_command_topic",
+            topic_commands_output="banjax_command_topic",
+            topic_reports="banjax_report_topic",
+            kafka_connection=None,
+            kafka_connection_output=None,
+            s3_connection=None,
+            s3_path="/",
+            datetime_format="%Y-%m-%d %H:%M:%S",
+            white_list_refresh_in_minutes=5,
+            model_reload_in_minutes=10,
+            max_models=10000,
+            min_session_duration=20,
+            min_number_of_requests=2,
+            num_offences_for_difficult_challenge=3,
+            batch_size=100,
+            worker_chunk_size=1000,
+            kafka_poll_timeout_ms=5000,
+            max_poll_interval_ms=600000,
+            fetch_max_wait_ms=2000,
+            fetch_min_bytes=1048576,
+            lag_high_threshold=10000,
+            lag_moderate_threshold=5000,
+            pending_ttl=30,
+            maxsize_pending=10000000,
+            n_jobs_predict=-1,
+            logger=None,
+            deflect_config_url=None,
+            deflect_config_auth=None,
+            ip_whitelist_url=None,
+            ip_whitelist_auth=None,
+            white_list_refresh_period=5,
+            bad_bot_challenge=True,
+            debug_ip=None,
+            use_shapley=True,
+            postgres_connection=None,
+            postgres_refresh_period_in_seconds=180,
+            sensitivity_factor=0.05,
+            max_sessions_for_ip=10,
+            maz_size_ip_sessions=100000,
+            ip_sessions_ttl_in_minutes=30,
+            max_requests_in_command=20,
+            bot_score_threshold=0.5,
+            challenge_scrapers=True,
+            rate_limit_hits=20,
+            rate_limit_interval=60,
+            rate_limit_expiration=300,
+            use_rate_limit=True,
+            dnet_partition_map=None,
+            print_log_in_command=True,
+            use_baskerville_score=True,
+            verbose_classifier=False,
+            hostname='localhost',
     ):
         super().__init__()
 
@@ -164,11 +206,11 @@ class BaskervillehallPredictor(object):
         self.s3_connection = s3_connection
         self.postgres_connection = postgres_connection
         self.s3_path = s3_path
+        self.hostname = hostname
         self.min_session_duration = min_session_duration
         self.min_number_of_requests = min_number_of_requests
         self.white_list_refresh_in_minutes = white_list_refresh_in_minutes
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
-        self.whitelist_ip = whitelist_ip
         self.model_reload_in_minutes = model_reload_in_minutes
         self.max_models = max_models
         self.pending_ttl = pending_ttl
@@ -219,6 +261,8 @@ class BaskervillehallPredictor(object):
             self.settings = SettingsDeflectAPI(
                 url=self.deflect_config_url,
                 auth=self.deflect_config_auth,
+                ip_whitelist_url=ip_whitelist_url,
+                ip_whitelist_auth=ip_whitelist_auth,
                 logger=self.logger,
                 refresh_period_in_seconds=60 * self.white_list_refresh_period,
             )
@@ -268,25 +312,25 @@ class BaskervillehallPredictor(object):
         return shapley_feature, shapley_report_sorted
 
     def create_command(
-        self,
-        command_name,
-        session,
-        meta,
-        prediction_if,
-        score_if,
-        shapley_if,
-        shapley_feature_if,
-        prediction_ae,
-        score_ae,
-        shapley_ae,
-        shapley_feature_ae,
-        difficulty,
-        scraper_name,
-        threshold_ae,
-        rate_limit_hits=0,
-        rate_limit_interval=0,
-        rate_limit_expiration=0,
-        baskerville_score=0
+            self,
+            command_name,
+            session,
+            meta,
+            prediction_if,
+            score_if,
+            shapley_if,
+            shapley_feature_if,
+            prediction_ae,
+            score_ae,
+            shapley_ae,
+            shapley_feature_ae,
+            difficulty,
+            scraper_name,
+            threshold_ae,
+            rate_limit_hits=0,
+            rate_limit_interval=0,
+            rate_limit_expiration=0,
+            baskerville_score=0
     ):
         d = {
             "Name": command_name,
@@ -333,12 +377,12 @@ class BaskervillehallPredictor(object):
     def _process_batch_single_thread(self, args_list):
         """Process batch in single thread - simple and reliable"""
         results_flat = []
-        
+
         # Determine if we should skip AutoEncoder processing based on lag
         skip_ae = self.current_lag > self.lag_high_threshold
         if skip_ae:
             self.logger.info(f"High lag detected ({self.current_lag}), skipping AutoEncoder processing for performance")
-        
+
         # Process each (host, human) group
         for (host, human), sessions in args_list:
             try:
@@ -349,7 +393,7 @@ class BaskervillehallPredictor(object):
                 continue
 
         return results_flat
-    
+
     def _process_sessions_batch(self, host: str, human: bool, sessions: List[Dict], skip_ae: bool):
         for s in sessions:
             if "host" not in s or not s["host"]:
@@ -359,7 +403,7 @@ class BaskervillehallPredictor(object):
 
         """Process a batch of sessions for a specific host/human combination"""
         model_if = self.models_if.get_model(host, ModelType.HUMAN if human else ModelType.BOT)
-        
+
         # Adaptive Shapley processing: disable when heavily lagging to speed up processing
         use_shapley = self.use_shapley and len(sessions) < 50  # Skip Shapley for large batches
 
@@ -401,14 +445,16 @@ class BaskervillehallPredictor(object):
                         )
 
                         # Log feature values for this session
-                        self.logger.info(f"\n{'='*80}")
-                        self.logger.info(f"Session {i}: ip={sessions[i]['ip']}, session_id={sessions[i].get('session_id', 'N/A')}")
+                        self.logger.info(f"\n{'=' * 80}")
+                        self.logger.info(
+                            f"Session {i}: ip={sessions[i]['ip']}, session_id={sessions[i].get('session_id', 'N/A')}")
                         self.logger.info(f"  UA: {sessions[i].get('ua', 'N/A')[:100]}")
                         self.logger.info(f"  Ciphers: {sessions[i].get('ciphers', 'N/A')}")
                         self.logger.info(f"  Accept-Language: {sessions[i].get('accept_language', 'N/A')}")
                         self.logger.info(f"  num_languages: {sessions[i].get('num_languages', 'N/A')}")
                         self.logger.info(f"  cipher_type: {sessions[i].get('cipher_type', 'N/A')}")
-                        self.logger.info(f"Baskerville score: {scores_classifier[i]}, Baskerville_1: {sessions[i].get('baskerville_score_1', 'N/A')}, Cloudflare score: {sessions[i].get('cloudflare_score', 0)}, bot: {predictions_classifier[i]}")
+                        self.logger.info(
+                            f"Baskerville score: {scores_classifier[i]}, Baskerville_1: {sessions[i].get('baskerville_score_1', 'N/A')}, Cloudflare score: {sessions[i].get('cloudflare_score', 0)}, bot: {predictions_classifier[i]}")
 
                         # Log ALL features actually used by the model
                         if features_df is not None and i < len(features_df):
@@ -450,15 +496,17 @@ class BaskervillehallPredictor(object):
                         # In XGBoost binary classification:
                         # - Negative SHAP → pulls to class 0 (HUMAN)
                         # - Positive SHAP → pulls to class 1 (BOT)
-                        self.logger.info(f"\nSHAP contributors to HUMAN (negative, sum={sum([x['shapley'] for x in negative_shap]):.2f}):")
+                        self.logger.info(
+                            f"\nSHAP contributors to HUMAN (negative, sum={sum([x['shapley'] for x in negative_shap]):.2f}):")
                         for j, item in enumerate(negative_shap[:10]):  # Top 10
-                            self.logger.info(f"  {j+1}. {item['name']:35s} {item['shapley']:7.3f}")
+                            self.logger.info(f"  {j + 1}. {item['name']:35s} {item['shapley']:7.3f}")
 
-                        self.logger.info(f"\nSHAP contributors to BOT (positive, sum={sum([x['shapley'] for x in positive_shap]):.2f}):")
+                        self.logger.info(
+                            f"\nSHAP contributors to BOT (positive, sum={sum([x['shapley'] for x in positive_shap]):.2f}):")
                         for j, item in enumerate(positive_shap[:10]):  # Top 10
-                            self.logger.info(f"  {j+1}. {item['name']:35s} +{item['shapley']:6.3f}")
+                            self.logger.info(f"  {j + 1}. {item['name']:35s} +{item['shapley']:6.3f}")
 
-                        self.logger.info(f"{'='*80}\n")
+                        self.logger.info(f"{'=' * 80}\n")
 
         results = []
         for i, session in enumerate(sessions):
@@ -541,22 +589,22 @@ class BaskervillehallPredictor(object):
                 }
             )
         return results
-    
+
     def _process_results(
-        self, 
-        results_flat, 
-        producer, 
-        producer_output,
-        pending_challenge_ip,
-        pending_interactive_ip, 
-        pending_block_ip, 
-        host_ip_sessions, 
-        ip_with_sessions, 
-        pending_session
+            self,
+            results_flat,
+            producer,
+            producer_output,
+            pending_challenge_ip,
+            pending_interactive_ip,
+            pending_block_ip,
+            host_ip_sessions,
+            ip_with_sessions,
+            pending_session
     ):
         """Process results and apply decisions"""
         processed_count = 0
-        
+
         for r in results_flat:
             self._apply_decision_and_send(
                 producer=producer,
@@ -569,7 +617,7 @@ class BaskervillehallPredictor(object):
                 ip_with_sessions=ip_with_sessions,
                 pending_session=pending_session,
             )
-            
+
             processed_count += 1
 
         # # Flush Kafka producer periodically for large batches
@@ -631,7 +679,7 @@ class BaskervillehallPredictor(object):
                 "rate_limit_hits",
                 "rate_limit_interval",
                 "rate_limit_expiration"
-                ]:
+            ]:
                 output_payload[k] = payload[k]
 
             output_payload['print_log'] = self.print_log_in_command
@@ -649,19 +697,17 @@ class BaskervillehallPredictor(object):
                                      value=payload_encoded,
                                      partition=partition)
 
-
-
     def _apply_decision_and_send(
-        self,
-        producer: KafkaProducer,
-        producer_output: KafkaProducer,
-        r: dict,
-        pending_challenge_ip: TTLCache,
-        pending_interactive_ip: TTLCache,
-        pending_block_ip: TTLCache,
-        host_ip_sessions: dict,
-        ip_with_sessions: TTLCache,
-        pending_session: TTLCache,
+            self,
+            producer: KafkaProducer,
+            producer_output: KafkaProducer,
+            r: dict,
+            pending_challenge_ip: TTLCache,
+            pending_interactive_ip: TTLCache,
+            pending_block_ip: TTLCache,
+            host_ip_sessions: dict,
+            ip_with_sessions: TTLCache,
+            pending_session: TTLCache,
     ):
         host = r["host"]
         dnet = r["dnet"]
@@ -729,59 +775,65 @@ class BaskervillehallPredictor(object):
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
-
-        # High bot score -> block
-        bot_score = session.get("bot_score", 0.0)
-        bot_score_top_factor = session.get("bot_score_top_factor", "")
-        if (
-            human
-            and session.get("passed_challenge")
-            and bot_score > self.bot_score_threshold
-            and bot_score_top_factor != "no_payload"
-        ):
-            if ip in pending_block_ip:
-                return
-            pending_block_ip[ip] = True
-            command = "block_ip"
-            baskerville_score = 10
-            self.logger.info(
-                f"High bot score - {command} for ip={ip}, "
-                f"human={human}, command={command}, session_id={session_id}, host={host}, "
-                f"top_factor = {bot_score_top_factor}  "
-                f"baskerville_score={baskerville_score}  "
-                f"cloudflare_score={session.get('cloudflare_score', 0)}."
-            )
-            payload = self.create_command(
-                command_name=command,
-                session=session,
-                meta="high_bot_score",
-                prediction_if=prediction_if,
-                score_if=score_if,
-                shapley_if=shapley_if,
-                shapley_feature_if=shapley_feature_if,
-                prediction_ae=prediction_ae,
-                score_ae=score_ae,
-                shapley_ae=shapley_ae,
-                shapley_feature_ae=shapley_feature_ae,
-                difficulty=0,
-                scraper_name=scraper_name,
-                threshold_ae=threshold_ae,
-                rate_limit_hits=self.rate_limit_hits,
-                rate_limit_interval=self.rate_limit_interval,
-                rate_limit_expiration=self.rate_limit_expiration,
-                baskerville_score=baskerville_score,
-            )
-            self.send(producer, producer_output, payload, key=host, dnet=dnet)
-            return
+        # # High bot score -> block
+        # bot_score = session.get("bot_score", 0.0)
+        # bot_score_top_factor = session.get("bot_score_top_factor", "")
+        # if (
+        #         human
+        #         and session.get("passed_challenge")
+        #         and bot_score > self.bot_score_threshold
+        #         and bot_score_top_factor != "no_payload"
+        # ):
+        #     if ip in pending_block_ip:
+        #         return
+        #     pending_block_ip[ip] = True
+        #     command = "block_ip"
+        #     baskerville_score = 10
+        #     self.logger.info(
+        #         f"High bot score - {command} for ip={ip}, "
+        #         f"human={human}, command={command}, session_id={session_id}, host={host}, "
+        #         f"top_factor = {bot_score_top_factor}  "
+        #         f"baskerville_score={baskerville_score}  "
+        #         f"cloudflare_score={session.get('cloudflare_score', 0)}."
+        #     )
+        #     payload = self.create_command(
+        #         command_name=command,
+        #         session=session,
+        #         meta="high_bot_score",
+        #         prediction_if=prediction_if,
+        #         score_if=score_if,
+        #         shapley_if=shapley_if,
+        #         shapley_feature_if=shapley_feature_if,
+        #         prediction_ae=prediction_ae,
+        #         score_ae=score_ae,
+        #         shapley_ae=shapley_ae,
+        #         shapley_feature_ae=shapley_feature_ae,
+        #         difficulty=0,
+        #         scraper_name=scraper_name,
+        #         threshold_ae=threshold_ae,
+        #         rate_limit_hits=self.rate_limit_hits,
+        #         rate_limit_interval=self.rate_limit_interval,
+        #         rate_limit_expiration=self.rate_limit_expiration,
+        #         baskerville_score=baskerville_score,
+        #     )
+        #     self.send(producer, producer_output, payload, key=host, dnet=dnet)
+        #     return
 
         if self.bad_bot_challenge and session.get("bad_bot") and ip not in ip_with_sessions.keys():
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
-            if entropy == 0:
-                command = "block_ip"
-            else:
-                command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+
+            # if host == 'antijob.net':
+            #     command = "block_ip"
+            # else:
+            command = "challenge_ip"
+
+            # if entropy == 0:
+            #     command = "block_ip"
+            # else:
+            #     command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+
             baskerville_score = 1
             self.logger.info(f"Challenge ip (bad_bot),"
                              f"Baskerville score {baskerville_score}, "
@@ -807,7 +859,7 @@ class BaskervillehallPredictor(object):
                 rate_limit_hits=self.rate_limit_hits,
                 rate_limit_interval=self.rate_limit_interval,
                 rate_limit_expiration=self.rate_limit_expiration,
-                baskerville_score = baskerville_score,
+                baskerville_score=baskerville_score,
             )
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -828,7 +880,7 @@ class BaskervillehallPredictor(object):
             self.logger.info(
                 f"meta {meta} - {command} for ip={ip}, "
                 f"human={human}, command={command}, session_id={session_id}, host={host}, "
-                f"top_factor = {bot_score_top_factor} ua={session.get('ua')}  "
+                f"ua={session.get('ua')}  "
                 f"baskerville_score={baskerville_score}. "
                 f"cloudflare_score={session.get('cloudflare_score', 0)} end={session.get('end')}."
             )
@@ -906,6 +958,9 @@ class BaskervillehallPredictor(object):
                 if ip in pending_challenge_ip:
                     return
                 pending_challenge_ip[ip] = True
+                # if host == 'antijob.net':
+                #     command = 'block_ip'
+                # else:
                 command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             else:
                 if ip not in pending_session:
@@ -913,6 +968,9 @@ class BaskervillehallPredictor(object):
                 if session_id in pending_session[ip]:
                     return
                 pending_session[ip][session_id] = True
+                # if host == 'antijob.net':
+                #     command = 'block_ip'
+                # else:
                 if human:
                     command = "challenge_session"
                 else:
@@ -929,7 +987,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="",
+                meta="anomaly",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -949,34 +1007,34 @@ class BaskervillehallPredictor(object):
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
-        # send not positive prediction only to main storage producer(not producer_ouput)
-        self.logger.info(
-            f"No command for ip={ip}, human={human}, "
-            f"session_id={session_id}, host={host}, "
-            f"baskerville_score={baskerville_score}, baskerville_score_1={session.get('baskerville_score_1', 'N/A')}, "
-            f"cloudflare_score={session.get('cloudflare_score', 0)},  end={session.get('end')}."
-        )
-        payload = self.create_command(
-            command_name='no command',
-            session=session,
-            meta="",
-            prediction_if=prediction_if,
-            score_if=score_if,
-            shapley_if=shapley_if,
-            shapley_feature_if=shapley_feature_if,
-            prediction_ae=prediction_ae,
-            score_ae=score_ae,
-            shapley_ae=shapley_ae,
-            shapley_feature_ae=shapley_feature_ae,
-            difficulty=0,
-            scraper_name=scraper_name,
-            threshold_ae=threshold_ae,
-            rate_limit_hits=self.rate_limit_hits,
-            rate_limit_interval=self.rate_limit_interval,
-            rate_limit_expiration=self.rate_limit_expiration,
-            baskerville_score=baskerville_score,
-        )
-        self.send(producer, None, payload, key=host, dnet=dnet)
+        # # send not positive prediction only to main storage producer(not producer_ouput)
+        # self.logger.info(
+        #     f"No command for ip={ip}, human={human}, "
+        #     f"session_id={session_id}, host={host}, "
+        #     f"baskerville_score={baskerville_score}, baskerville_score_1={session.get('baskerville_score_1', 'N/A')}, "
+        #     f"cloudflare_score={session.get('cloudflare_score', 0)},  end={session.get('end')}."
+        # )
+        # payload = self.create_command(
+        #     command_name='no command',
+        #     session=session,
+        #     meta="",
+        #     prediction_if=prediction_if,
+        #     score_if=score_if,
+        #     shapley_if=shapley_if,
+        #     shapley_feature_if=shapley_feature_if,
+        #     prediction_ae=prediction_ae,
+        #     score_ae=score_ae,
+        #     shapley_ae=shapley_ae,
+        #     shapley_feature_ae=shapley_feature_ae,
+        #     difficulty=0,
+        #     scraper_name=scraper_name,
+        #     threshold_ae=threshold_ae,
+        #     rate_limit_hits=self.rate_limit_hits,
+        #     rate_limit_interval=self.rate_limit_interval,
+        #     rate_limit_expiration=self.rate_limit_expiration,
+        #     baskerville_score=baskerville_score,
+        # )
+        # self.send(producer, None, payload, key=host, dnet=dnet)
 
     def process_immature_session(self, session):
         self.logger.info(f"Immature session is_human={is_human(session)}, "
@@ -986,8 +1044,82 @@ class BaskervillehallPredictor(object):
                          f"ip={session['ip']}, "
                          f"session_id={session['session_id']} ")
 
+    def create_kafka_connections(self, max_retries=10, initial_delay=5):
+        consumer = None
+        producer = None
+        producer_output = None
 
+        for attempt in range(max_retries):
+            try:
+                self.logger.info(f"Attempting to connect to Kafka (attempt {attempt + 1}/{max_retries})...")
+                consumer = KafkaConsumer(
+                    **self.kafka_connection,
+                    group_id=self.group_id,
+                    max_poll_records=self.batch_size,
+                    fetch_max_bytes=52428800 * 5,
+                    max_partition_fetch_bytes=1048576 * 10,
+                    max_poll_interval_ms=self.max_poll_interval_ms,
+                    fetch_max_wait_ms=self.fetch_max_wait_ms,
+                    fetch_min_bytes=self.fetch_min_bytes,
+                    session_timeout_ms=45000,  # 1 minutes
+                    enable_auto_commit=True,
+                    auto_offset_reset='latest',
+                )
+                listener = RebalanceLogger(self.logger, name=self.hostname)
+                consumer.subscribe([self.topic_sessions], listener=listener)
 
+                # wait (up to ~30s) for a real assignment
+                start = time_module.time()
+                while not consumer.assignment():
+                    consumer.poll(timeout_ms=1000)
+                    if time_module.time() - start > 30:
+                        break
+                self.logger.info(f"Assigned: {consumer.assignment()}")
+
+                producer = KafkaProducer(
+                    **self.kafka_connection
+                )
+
+                producer_output = KafkaProducer(
+                    **self.kafka_connection_output
+                )
+                return consumer, producer, producer_output
+
+            except NoBrokersAvailable as e:
+                delay = initial_delay * (2 ** attempt)
+                self.logger.warning(
+                    f"No Kafka brokers available (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s... Error: {e}")
+                time_module.sleep(delay)
+                if consumer:
+                    try:
+                        consumer.close()
+                    except:
+                        pass
+                if producer:
+                    try:
+                        producer.close()
+                    except:
+                        pass
+            except Exception as e:
+                delay = initial_delay * (2 ** attempt)
+                self.logger.error(f"Unexpected Kafka error (attempt {attempt + 1}/{max_retries}): {e}")
+                time_module.sleep(delay)
+                if consumer:
+                    try:
+                        consumer.close()
+                    except:
+                        pass
+                if producer:
+                    try:
+                        producer.close()
+                    except:
+                        pass
+                if producer_output:
+                    try:
+                        producer_output.close()
+                    except:
+                        pass
+        raise Exception(f"Failed to connect to Kafka after {max_retries} attempts")
 
     def run(self):
         pending_challenge_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
@@ -1000,133 +1132,105 @@ class BaskervillehallPredictor(object):
         ip_with_sessions = TTLCache(maxsize=100000, ttl=60 * 60)
 
         self.logger.info("Starting predictor...")
+        try:
 
-        consumer = KafkaConsumer(
-            **self.kafka_connection,
-            group_id=self.group_id,
-            max_poll_records=self.batch_size,
-            fetch_max_bytes=52428800 * 5,
-            max_partition_fetch_bytes=1048576 * 10,
-            max_poll_interval_ms=self.max_poll_interval_ms,
-            fetch_max_wait_ms=self.fetch_max_wait_ms,
-            fetch_min_bytes=self.fetch_min_bytes,
-            session_timeout_ms=45000,  # 1 minutes
-            enable_auto_commit=True,
-            auto_offset_reset='latest',
-        )
-        consumer.subscribe([self.topic_sessions])
+            consumer, producer, producer_output = self.create_kafka_connections()
 
-        # wait (up to ~30s) for a real assignment
-        start = time_module.time()
-        while not consumer.assignment():
-            consumer.poll(timeout_ms=1000)
-            if time_module.time() - start > 30:
-                break
-        self.logger.info(f"Assigned: {consumer.assignment()}")
+            self.logger.info(
+                f"Starting predicting on topic {self.topic_sessions}"
+            )
+            self.logger.info(f"debug_ip={self.debug_ip}")
+            ts_lag_report = datetime.now()
+            ts_assign_report = datetime.utcnow()
 
-        producer = KafkaProducer(
-            **self.kafka_connection
-        )
+            while True:
+                if (datetime.utcnow() - ts_assign_report).total_seconds() > 30:
+                    log_partition_assignment(consumer, self.logger)
+                    ts_assign_report = datetime.utcnow()
 
-        producer_output = KafkaProducer(
-            **self.kafka_connection_output
-        )
+                raw_messages = consumer.poll(timeout_ms=self.kafka_poll_timeout_ms, max_records=self.batch_size)
+                for topic_partition, messages in raw_messages.items():
+                    batch: Dict[Tuple[str, bool], List[dict]] = defaultdict(list)
+                    self.logger.info(f"Batch size {len(messages)}")
+                    predicting_total = 0
+                    ip_whitelisted = 0
 
-        self.logger.info(
-            f"Starting predicting on topic {self.topic_sessions}"
-        )
-        self.logger.info(f"debug_ip={self.debug_ip}")
-        whitelist_ip = WhitelistIP(
-            self.whitelist_ip,
-            logger=self.logger,
-            refresh_period_in_seconds=60 * self.white_list_refresh_in_minutes,
-        )
+                    for message in messages:
+                        if (datetime.now() - ts_lag_report).total_seconds() > 5:
+                            try:
+                                end = consumer.end_offsets([topic_partition]).get(
+                                    topic_partition)  # end offset (next to be written)
+                            except Exception:
+                                end = None
 
-        ts_lag_report = datetime.now()
+                            last_off = messages[-1].offset if messages else None
+                            if end is not None and last_off is not None:
+                                # messages remaining after the last one we just processed
+                                lag = max(0, end - (last_off + 1))
+                            else:
+                                lag = 0
+                            self.current_lag = lag
+                            self.logger.info(f"Lag = {lag} (adaptive processing: {self.adaptive_processing})")
+                            ts_lag_report = datetime.now()
 
-        while True:
-            raw_messages = consumer.poll(timeout_ms=self.kafka_poll_timeout_ms, max_records=self.batch_size)
-            for topic_partition, messages in raw_messages.items():
-                batch: Dict[Tuple[str, bool], List[dict]] = defaultdict(list)
-                self.logger.info(f"Batch size {len(messages)}")
-                predicting_total = 0
-                ip_whitelisted = 0
+                        if not message.value:
+                            continue
 
-                for message in messages:
-                    if (datetime.now() - ts_lag_report).total_seconds() > 5:
-                        try:
-                            end = consumer.end_offsets([topic_partition]).get(
-                                topic_partition)  # end offset (next to be written)
-                        except Exception:
-                            end = None
+                        session = json.loads(message.value.decode("utf-8"))
+                        human = session.get("human", False)
+                        ip = session["ip"]
+                        host = message.key.decode("utf-8")
 
-                        last_off = messages[-1].offset if messages else None
-                        if end is not None and last_off is not None:
-                            # messages remaining after the last one we just processed
-                            lag = max(0, end - (last_off + 1))
-                        else:
-                            lag = 0
-                        self.current_lag = lag
-                        self.logger.info(f"Lag = {lag} (adaptive processing: {self.adaptive_processing})")
-                        ts_lag_report = datetime.now()
+                        if self.settings.is_ip_whitelisted(host, session["ip"]):
+                            ip_whitelisted += 1
+                            continue
 
-                    if not message.value:
+                        if host == 'report.if.ua' and session.get('ai_bot_ua', False):
+                            continue
+
+                        if session.get("deflect_password", False):
+                            continue
+
+                        if session.get('immature_session', False):
+                            self.process_immature_session(session)
+                            continue
+
+                        if not session.get("primary_session", False):
+                            ip_with_sessions[session["ip"]] = True
+
+                        session["host"] = host
+                        batch[(host, human)].append(session)
+                        predicting_total += 1
+
+                    args_list = list(batch.items())
+                    if not args_list:
+                        self.logger.info(
+                            f"batch={len(messages)}, predicting_total = {predicting_total}, whitelisted = {ip_whitelisted}"
+                        )
                         continue
 
-                    session = json.loads(message.value.decode("utf-8"))
-                    human = session.get("human", False)
-                    ip = session["ip"]
-                    host = message.key.decode("utf-8")
+                    # Single-threaded batch processing
+                    results_flat = self._process_batch_single_thread(args_list)
 
-                    if whitelist_ip.is_in_whitelist(host, session["ip"]):
-                        ip_whitelisted += 1
-                        continue
+                    # Apply decisions and send commands
+                    self._process_results(
+                        results_flat=results_flat,
+                        producer=producer,
+                        producer_output=producer_output,
+                        pending_challenge_ip=pending_challenge_ip,
+                        pending_interactive_ip=pending_interactive_ip,
+                        pending_block_ip=pending_block_ip,
+                        host_ip_sessions=host_ip_sessions,
+                        ip_with_sessions=ip_with_sessions,
+                        pending_session=pending_session,
+                    )
 
-                    if host == 'report.if.ua' and session.get('ai_bot_ua', False):
-                        continue
-
-                    if session.get("deflect_password", False):
-                        continue
-
-                    if session.get('immature_session', False):
-                        self.process_immature_session(session)
-                        continue
-
-                    if not session.get("primary_session", False):
-                        ip_with_sessions[session["ip"]] = True
-
-                    session["host"] = host
-                    batch[(host, human)].append(session)
-                    predicting_total += 1
-
-                args_list = list(batch.items())
-                if not args_list:
                     self.logger.info(
                         f"batch={len(messages)}, predicting_total = {predicting_total}, whitelisted = {ip_whitelisted}"
                     )
-                    continue
-
-                # Single-threaded batch processing
-                results_flat = self._process_batch_single_thread(args_list)
-
-                # Apply decisions and send commands
-                self._process_results(
-                    results_flat=results_flat,
-                    producer=producer,
-                    producer_output=producer_output,
-                    pending_challenge_ip=pending_challenge_ip,
-                    pending_interactive_ip=pending_interactive_ip,
-                    pending_block_ip=pending_block_ip,
-                    host_ip_sessions=host_ip_sessions,
-                    ip_with_sessions=ip_with_sessions,
-                    pending_session=pending_session,
-                )
-
-                self.logger.info(
-                    f"batch={len(messages)}, predicting_total = {predicting_total}, whitelisted = {ip_whitelisted}"
-                )
-                producer.flush()
-                producer_output.flush()
+                    producer.flush()
+                    producer_output.flush()
+        except Exception as ex:
+            self.logger.exception(f'Exception in consumer loop:{ex}')
 
         self.logger.info("Predictor finished")
-
