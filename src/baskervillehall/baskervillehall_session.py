@@ -525,7 +525,8 @@ class BaskervillehallSession(object):
             'time_now': datetime.utcnow(),
             'cipher': cipher,
             'ciphers': ciphers,
-            'requests': [request] if request else [],
+            'requests': [request] if request and not request.get('static', False) else [],
+            'static_count': 1 if request and request.get('static', False) else 0,
             'asn': asn,
             'asn_name': asn_name,
             'num_languages': num_languages,
@@ -550,7 +551,10 @@ class BaskervillehallSession(object):
 
         session['end'] = cur
         session['duration'] = (session['end'] - session['start']).total_seconds()
-        session['requests'].append(request)
+        if request.get('static', False):
+            session['static_count'] = session.get('static_count', 0) + 1
+        else:
+            session['requests'].append(request)
 
     def is_session_expired(self, session, ts):
         if (ts - session['end']).total_seconds() > self.session_inactivity * 60:
@@ -564,7 +568,7 @@ class BaskervillehallSession(object):
 
     def check_and_send_session(self, session):
         if session['duration'] < self.max_session_duration:
-            size = len(session['requests'])
+            size = len(session['requests']) + session.get('static_count', 0)
             immature_session = self.score_2_num_requests <= size < self.min_number_of_requests
             session['immature_session'] = immature_session
             if (immature_session and not session.get('immature_session_flushed', False) ) or \
@@ -590,7 +594,8 @@ class BaskervillehallSession(object):
         else:
             requests_sorted = sorted(requests, key=lambda x: x['ts'])
 
-        duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds()
+        duration = (requests_sorted[-1]['ts'] - requests_sorted[0]['ts']).total_seconds() \
+            if requests_sorted else session['duration']
 
         self._acc('send_format_requests', t_fmt)
         t_ser = self._t()
@@ -641,8 +646,8 @@ class BaskervillehallSession(object):
             'datacenter_code': session['datacenter_code'],
             'session_id': session['session_id'],
             'ip': session['ip'],
-            'start': requests_formatted[0]['ts'],
-            'end': requests_formatted[-1]['ts'],
+            'start': requests_formatted[0]['ts'] if requests_formatted else session['start'].strftime(self.date_time_format),
+            'end': requests_formatted[-1]['ts'] if requests_formatted else session['end'].strftime(self.date_time_format),
             'duration': duration,
             'primary_session': session.get('primary_session', False),
             'requests': requests_formatted,
@@ -682,7 +687,8 @@ class BaskervillehallSession(object):
         else:
             fingerprints = SessionFingerprints.get_fingerprints(session)
             self.fingerprints_analyzer.process(
-                host=session['host'], key=fingerprints, timestamp=requests_sorted[0]['ts'])
+                host=session['host'], key=fingerprints,
+                timestamp=requests_sorted[0]['ts'] if requests_sorted else session['start'])
             session_final['fingerprints'] = fingerprints
             session_final['fingerprints_score'] = self.fingerprints_analyzer.get_key_zscore(
                 host=session['host'], key=fingerprints)
@@ -761,17 +767,21 @@ class BaskervillehallSession(object):
             if h is None:
                 h = {
                     'reqs': [],
+                    'static_count': 0,
                     'min_ts': s['start'],
                     'max_ts': s['end'],
                     'meta': s,
                 }
                 hosts[host] = h
-            r0 = s['requests'][0]
-            h['reqs'].append(r0)
+            h['static_count'] += s.get('static_count', 0)
             if s['start'] < h['min_ts']:
                 h['min_ts'] = s['start']
             if s['end'] > h['max_ts']:
                 h['max_ts'] = s['end']
+            if not s['requests']:
+                continue
+            r0 = s['requests'][0]
+            h['reqs'].append(r0)
 
         now = datetime.utcnow()
         to_delete_by_host = {}
@@ -779,14 +789,16 @@ class BaskervillehallSession(object):
         t0 = self._t()
         for host, h in hosts.items():
             reqs = h['reqs']
-            if not reqs:
+            total_static = h.get('static_count', 0)
+            # Skip if no requests at all (neither non-static nor static)
+            if not reqs and total_static == 0:
                 continue
 
             start_ts = h['min_ts']
             end_ts = h['max_ts']
             duration = (end_ts - start_ts).total_seconds()
             age = (now - start_ts).total_seconds()
-            request_count = len(reqs)
+            request_count = len(reqs) + total_static
             meta = h['meta']
 
             send_threshold = self.min_number_of_requests
@@ -808,19 +820,20 @@ class BaskervillehallSession(object):
                 session = {
                     'ua': meta['ua'],
                     'host': host,
-                    'dnet': reqs[0]['dnet'],
+                    'dnet': reqs[0]['dnet'] if reqs else meta.get('dnet', '-'),
                     'country': meta['country'],
                     'continent': meta['continent'],
                     'datacenter_code': meta['datacenter_code'],
                     'verified_bot': meta['verified_bot'],
                     'ip': ip,
                     'session_id': '-',
-                    'start': reqs[0]['ts'].strftime(self.date_time_format),
-                    'end': reqs[-1]['ts'].strftime(self.date_time_format),
+                    'start': start_ts,
+                    'end': end_ts,
                     'cipher': meta['cipher'],
                     'ciphers': meta['ciphers'],
-                    'duration': (reqs[-1]['ts'] - reqs[0]['ts']).total_seconds(),
+                    'duration': duration if duration > 0 else 1.0,
                     'requests': reqs,
+                    'static_count': total_static,
                     'primary_session': True,
                     'asn': meta['asn'],
                     'asn_name': meta['asn_name'],
@@ -906,12 +919,14 @@ class BaskervillehallSession(object):
                     if h is None:
                         h = {
                             'requests': [],
+                            'static_count': 0,
                             'oldest_ts': datetime.max,
                             'latest_ts': datetime.min,
                             'first_session_data': s_data
                         }
                         hosts_data[host] = h
                     h['requests'].extend(s_data['requests'])
+                    h['static_count'] += s_data.get('static_count', 0)
                     if s_data['start'] < h['oldest_ts']:
                         h['oldest_ts'] = s_data['start']
                     if s_data['end'] > h['latest_ts']:
@@ -919,30 +934,36 @@ class BaskervillehallSession(object):
 
                 for host, h in hosts_data.items():
                     reqs_sorted = sorted(h['requests'], key=lambda x: x['ts'])
-                    if not reqs_sorted:
+                    total_static = h.get('static_count', 0)
+                    total_count = len(reqs_sorted) + total_static
+                    if total_count == 0:
                         continue
                     current_aggregated_duration = (h['latest_ts'] - h['oldest_ts']).total_seconds()
                     oldest_age = (current_event_ts_horizon - h['oldest_ts']).total_seconds()
                     should_flush = (current_aggregated_duration > self.max_session_duration) or (
                                 oldest_age > self.primary_session_expiration * 60)
-                    if should_flush and len(reqs_sorted) >= self.min_number_of_requests:
+                    if should_flush and total_count >= self.min_number_of_requests:
                         meta = h['first_session_data']
+                        start_ts = h['oldest_ts']
+                        end_ts = h['latest_ts']
+                        duration = (end_ts - start_ts).total_seconds()
                         summary = {
                             'ua': meta['ua'],
                             'host': host,
-                            'dnet': reqs_sorted[0]['dnet'],
+                            'dnet': reqs_sorted[0]['dnet'] if reqs_sorted else meta.get('dnet', '-'),
                             'country': meta['country'],
                             'continent': meta['continent'],
                             'datacenter_code': meta['datacenter_code'],
                             'verified_bot': meta['verified_bot'],
                             'ip': ip,
                             'session_id': '-',
-                            'start': reqs_sorted[0]['ts'].strftime(self.date_time_format),
-                            'end': reqs_sorted[-1]['ts'].strftime(self.date_time_format),
+                            'start': start_ts,
+                            'end': end_ts,
                             'cipher': meta['cipher'],
                             'ciphers': meta['ciphers'],
-                            'duration': (reqs_sorted[-1]['ts'] - reqs_sorted[0]['ts']).total_seconds(),
+                            'duration': duration if duration > 0 else 1.0,
                             'requests': reqs_sorted,
+                            'static_count': total_static,
                             'primary_session': True,
                             'asn': meta['asn'],
                             'asn_name': meta['asn_name'],
@@ -1152,10 +1173,6 @@ class BaskervillehallSession(object):
                             self.logger.info(f' {host} country {country} ip {ip} is not blocked')
                             self.logger.info(data)
                         if len(session_id) < 5:
-                            if data.get('loc_in', '') == 'static_file':
-                                self.profile_stats['message_processing'] += (time_module.time() - msg_start)
-                                self.profile_stats['message_count'] += 1
-                                continue
                             session_id = '-' + ''.join(
                                 random.choice(string.ascii_uppercase + string.digits) for _ in range(7))
 

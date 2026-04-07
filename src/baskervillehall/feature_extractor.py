@@ -31,7 +31,6 @@ class FeatureExtractor(object):
             'response5xx_to_request_ratio', 'top_page_to_request_ratio',
             'unique_path_rate', 'unique_path_to_request_ratio',
             'unique_query_rate', 'unique_query_to_unique_path_ratio',
-            'image_to_html_ratio', 'js_to_html_ratio', 'css_to_html_ratio',
             'path_depth_average', 'path_depth_std', 'payload_size_log_average',
             'entropy', 'num_requests', 'duration', 'edge_count', 'static_ratio',
             'ua_count', 'api_ratio', 'num_ciphers', 'num_languages',
@@ -100,7 +99,6 @@ class FeatureExtractor(object):
                 'query': r.get('query', ''),
                 'type': r.get('type', 'text/html'),
                 'method': r.get('method', 'GET'),
-                'static': r.get('static', False),
             })
         return sorted(processed, key=lambda x: x['ts'])
 
@@ -158,14 +156,9 @@ class FeatureExtractor(object):
         edge_map = defaultdict(int)
         ua_map = defaultdict(int)
         query_map = defaultdict(int)
-        num_html = 0
-        num_image = 0
-        num_js = 0
-        num_css = 0
         slash_counts = []
         payloads = []
         num_post = 0
-        num_static = 0
         api_count = 0
 
         for i in range(len(requests)):
@@ -197,23 +190,8 @@ class FeatureExtractor(object):
             edge_map[r.get('edge', '')] += 1
             ua_map[r.get('ua', '')] += 1
             query_map[query] += 1
-            content_type = r.get('type', 'text/html')
-            if content_type == 'text/html' or \
-               content_type == 'text/html; charset=UTF-8' or \
-               content_type == 'text/html; charset=utf-8':
-                num_html += 1
-            elif 'image' in content_type:
-                num_image += 1
-            elif 'javascript' in content_type:
-                num_js += 1
-            elif content_type == 'text/css' or \
-                 content_type == 'text/css; charset=UTF-8' or \
-                 content_type == 'text/css; charset=utf-8':
-                num_css += 1
             if r.get('method', 'GET') == 'POST':
                 num_post += 1
-            if r.get('static', False):
-                num_static += 1
             if self.is_api_request(r):
                 api_count += 1
 
@@ -227,41 +205,58 @@ class FeatureExtractor(object):
         if session_duration == 0.0:
             session_duration = 1.0
 
-        request_rate = hits / session_duration * 60
-        entropy = entropy_from_counts(url_map)
+        static_count = float(session.get('static_count', 0))
+        total_count = hits + static_count
 
         features['num_requests'] = len(requests)
         features['duration'] = session_duration
-        features['request_rate'] = request_rate
+        features['static_ratio'] = static_count / total_count if total_count > 0 else 0.0
 
-        # Removed threshold features (circular reasoning in training data):
-        # features['high_request_rate'] = int(request_rate > 150)
-        # features['extreme_request_rate'] = int(request_rate > 300)
-        # WordPress sites have high rate due to HTTP/2 multiplexing - can't distinguish from bots by rate alone
+        if hits == 0:
+            # Static-only session: use static_count for rate, zero everything else
+            features['request_rate'] = static_count / session_duration * 60
+            features['post_rate'] = 0.0
+            features['request_interval_average'] = 0.0
+            features['request_interval_std'] = 0.0
+            features['response4xx_to_request_ratio'] = 0.0
+            features['response5xx_to_request_ratio'] = 0.0
+            features['rate_499'] = 0.0
+            features['top_page_to_request_ratio'] = 0.0
+            features['unique_path_rate'] = 0.0
+            features['unique_path_to_request_ratio'] = 0.0
+            features['unique_query_rate'] = 0.0
+            features['unique_query_to_unique_path_ratio'] = 0.0
+            features['path_depth_average'] = 0.0
+            features['path_depth_std'] = 0.0
+            features['payload_size_log_average'] = 0.0
+            features['entropy'] = 0.0
+            features['edge_count'] = 0
+            features['ua_count'] = len(ua_map.keys())
+            features['api_ratio'] = 0.0
+        else:
+            request_rate = hits / session_duration * 60
+            entropy = entropy_from_counts(url_map)
 
-        features['post_rate'] = num_post / hits
-        features['request_interval_average'] = float(mean_iv)
-        features['request_interval_std'] = std_iv if len(intervals) > 1 else 0
-        features['response4xx_to_request_ratio'] = num_4xx / hits
-        features['response5xx_to_request_ratio'] = num_5xx / hits
-        features['rate_499'] = num_499 / hits
-        features['top_page_to_request_ratio'] = max(url_map.values()) / hits
-        features['unique_path_rate'] = unique_path / session_duration * 60
-        features['unique_path_to_request_ratio'] = unique_path / hits
-        features['unique_query_rate'] = unique_query / session_duration * 60
-        features['unique_query_to_unique_path_ratio'] = unique_query / unique_path if unique_path > 0 else 0
-        features['image_to_html_ratio'] = float(num_image) / num_html if num_html > 0 else 10.0
-        features['js_to_html_ratio'] = float(num_js) / num_html if num_html > 0 else 10.0
-        features['css_to_html_ratio'] = float(num_css) / num_html if num_html > 0 else 10.0
-        mean_depth = np.mean(slash_counts)
-        features['path_depth_average'] = mean_depth
-        features['path_depth_std'] = np.std(slash_counts) if len(slash_counts) > 1 else 0
-        features['payload_size_log_average'] = np.mean(np.log(payloads))
-        features['entropy'] = entropy
-        features['edge_count'] = len(edge_map.keys())
-        features['ua_count'] = len(ua_map.keys())
-        features['static_ratio'] = float(num_static) / hits
-        features['api_ratio'] = float(api_count) / hits
+            features['request_rate'] = request_rate
+            features['post_rate'] = num_post / hits
+            features['request_interval_average'] = float(mean_iv)
+            features['request_interval_std'] = std_iv if len(intervals) > 1 else 0
+            features['response4xx_to_request_ratio'] = num_4xx / hits
+            features['response5xx_to_request_ratio'] = num_5xx / hits
+            features['rate_499'] = num_499 / hits
+            features['top_page_to_request_ratio'] = max(url_map.values()) / hits
+            features['unique_path_rate'] = unique_path / session_duration * 60
+            features['unique_path_to_request_ratio'] = unique_path / hits
+            features['unique_query_rate'] = unique_query / session_duration * 60
+            features['unique_query_to_unique_path_ratio'] = unique_query / unique_path if unique_path > 0 else 0
+            mean_depth = np.mean(slash_counts)
+            features['path_depth_average'] = mean_depth
+            features['path_depth_std'] = np.std(slash_counts) if len(slash_counts) > 1 else 0
+            features['payload_size_log_average'] = np.mean(np.log(payloads))
+            features['entropy'] = entropy
+            features['edge_count'] = len(edge_map.keys())
+            features['ua_count'] = len(ua_map.keys())
+            features['api_ratio'] = float(api_count) / hits
         features['num_ciphers'] = len(session.get('ciphers', []))
         features['num_languages'] = session['num_languages']
         features['ua_score'] = float(session.get('ua_score', 0.0))
