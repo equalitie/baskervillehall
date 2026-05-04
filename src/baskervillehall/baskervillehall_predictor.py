@@ -371,6 +371,7 @@ class BaskervillehallPredictor(object):
             "rate_limit_expiration": rate_limit_expiration,
             "baskerville_score": int(baskerville_score),
             "cloudflare_score": session.get("cloudflare_score", 0),
+            "survey_country": session.get("survey_country", ""),
         }
         return d
 
@@ -678,7 +679,8 @@ class BaskervillehallPredictor(object):
                 "threshold_ae",
                 "rate_limit_hits",
                 "rate_limit_interval",
-                "rate_limit_expiration"
+                "rate_limit_expiration",
+                "survey_country"
             ]:
                 output_payload[k] = payload[k]
 
@@ -731,7 +733,18 @@ class BaskervillehallPredictor(object):
         ip = session["ip"]
         primary_session = session.get("primary_session", False)
         verified_bot = session.get("verified_bot", False)
-        if verified_bot or session.get("asset_only", False):
+        verified_ai_bot = session.get("verified_ai_bot", False)
+        if verified_bot or session.get("asset_only", False) or verified_ai_bot:
+            if verified_bot:
+                self.logger.info(
+                    f"Skipping verified_bot ip={ip} host={host} "
+                    f"bot={session.get('verified_bot_name', '')} session_id={session_id}"
+                )
+            elif verified_ai_bot:
+                self.logger.info(
+                    f"Skipping verified_ai_bot ip={ip} host={host} "
+                    f"bot={session.get('verified_ai_bot_name', '')} session_id={session_id}"
+                )
             return
 
         if not session.get("primary_session", False):
@@ -775,67 +788,68 @@ class BaskervillehallPredictor(object):
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
-        # # High bot score -> block
-        # bot_score = session.get("bot_score", 0.0)
-        # bot_score_top_factor = session.get("bot_score_top_factor", "")
-        # if (
-        #         human
-        #         and session.get("passed_challenge")
-        #         and bot_score > self.bot_score_threshold
-        #         and bot_score_top_factor != "no_payload"
-        # ):
-        #     if ip in pending_block_ip:
-        #         return
-        #     pending_block_ip[ip] = True
-        #     command = "block_ip"
-        #     baskerville_score = 10
-        #     self.logger.info(
-        #         f"High bot score - {command} for ip={ip}, "
-        #         f"human={human}, command={command}, session_id={session_id}, host={host}, "
-        #         f"top_factor = {bot_score_top_factor}  "
-        #         f"baskerville_score={baskerville_score}  "
-        #         f"cloudflare_score={session.get('cloudflare_score', 0)}."
-        #     )
-        #     payload = self.create_command(
-        #         command_name=command,
-        #         session=session,
-        #         meta="high_bot_score",
-        #         prediction_if=prediction_if,
-        #         score_if=score_if,
-        #         shapley_if=shapley_if,
-        #         shapley_feature_if=shapley_feature_if,
-        #         prediction_ae=prediction_ae,
-        #         score_ae=score_ae,
-        #         shapley_ae=shapley_ae,
-        #         shapley_feature_ae=shapley_feature_ae,
-        #         difficulty=0,
-        #         scraper_name=scraper_name,
-        #         threshold_ae=threshold_ae,
-        #         rate_limit_hits=self.rate_limit_hits,
-        #         rate_limit_interval=self.rate_limit_interval,
-        #         rate_limit_expiration=self.rate_limit_expiration,
-        #         baskerville_score=baskerville_score,
-        #     )
-        #     self.send(producer, producer_output, payload, key=host, dnet=dnet)
-        #     return
+        # High bot score -> block
+        bot_score = session.get("bot_score", 0.0)
+        bot_score_top_factor = session.get("bot_score_top_factor", "")
+        if (
+                human
+                and session.get("passed_challenge")
+                and bot_score > self.bot_score_threshold
+                and bot_score_top_factor != "no_payload"
+        ):
+            if ip in pending_block_ip:
+                return
+            pending_block_ip[ip] = True
+            command = "block_ip"
+            baskerville_score = 10
+            self.logger.info(
+                f"High bot score - {command} for ip={ip}, "
+                f"human={human}, command={command}, session_id={session_id}, host={host}, "
+                f"top_factor = {bot_score_top_factor}  "
+                f"baskerville_score={baskerville_score}  "
+                f"cloudflare_score={session.get('cloudflare_score', 0)}."
+            )
+            payload = self.create_command(
+                command_name=command,
+                session=session,
+                meta="high_bot_score",
+                prediction_if=prediction_if,
+                score_if=score_if,
+                shapley_if=shapley_if,
+                shapley_feature_if=shapley_feature_if,
+                prediction_ae=prediction_ae,
+                score_ae=score_ae,
+                shapley_ae=shapley_ae,
+                shapley_feature_ae=shapley_feature_ae,
+                difficulty=0,
+                scraper_name=scraper_name,
+                threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration,
+                baskerville_score=baskerville_score,
+            )
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
 
         if self.bad_bot_challenge and session.get("bad_bot") and ip not in ip_with_sessions.keys():
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
 
-            # if host == 'antijob.net':
-            #     command = "block_ip"
-            # else:
             command = "challenge_ip"
 
-            # if entropy == 0:
-            #     command = "block_ip"
+            num_non_static = len(session.get("requests", []))
+            if entropy == 0 and num_non_static > 1:
+                command = "block_ip"
+
+            if host == 'antijob.net':
+                command = "block_ip"
             # else:
             #     command = "rate_limit" if self.use_rate_limit else "challenge_ip"
 
             baskerville_score = 1
-            self.logger.info(f"Challenge ip (bad_bot),"
+            self.logger.info(f"{command} ip (bad_bot),"
                              f"Baskerville score {baskerville_score}, "
                              f"Cloudflare score {session.get('cloudflare_score', 0)}, "
                              f"ip = {ip} host={host}  "

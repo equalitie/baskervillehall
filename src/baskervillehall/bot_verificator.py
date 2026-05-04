@@ -67,7 +67,7 @@ class BotVerificator:
             except Exception as e:
                 self.logger.exception(f"{name} refresh failed: {e!r}")
         self.ts_refresh = datetime.now()
-        # очистим кэш результатов после обновления списков
+        self.get_bot_name.cache_clear()
         self.is_verified_bot.cache_clear()
 
     def _in_any(self, ip_obj, nets):
@@ -75,19 +75,23 @@ class BotVerificator:
         return any(ip_obj in net for net in nets)
 
     @lru_cache(maxsize=10000)
-    def is_verified_bot(self, ip: str) -> bool:
-        # refresh() дешёвый (порог по времени), но защищает от устаревания
-        self.refresh()
-
-        ip_obj = ipa.ip_address(ip)
-
-        # порядок: самые частые для твоего трафика — первыми
+    def get_bot_name(self, ip: str) -> str:
+        """Returns bot name ('Googlebot', 'Bingbot', 'DuckDuckBot') or '' if not a verified bot.
+        Call refresh() separately on a timer — not here, to avoid it being
+        suppressed by the cache hit path.
+        """
+        try:
+            ip_obj = ipa.ip_address(ip)
+        except ValueError:
+            return ""
         if self._in_any(ip_obj, self.google_nets):
-            return True
+            return "Googlebot"
         if self._in_any(ip_obj, self.bing_nets):
-            return True
-        # duckduckgo публикует одиночные IP — простая проверка в множестве строк
+            return "Bingbot"
         if ip_obj.version == 4 and ip_obj.exploded in self.duck_ips:
-            return True
+            return "DuckDuckBot"
+        return ""
 
-        return False
+    @lru_cache(maxsize=10000)
+    def is_verified_bot(self, ip: str) -> bool:
+        return bool(self.get_bot_name(ip))

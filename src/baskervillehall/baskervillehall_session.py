@@ -18,6 +18,7 @@ from baskervillehall.asn_database import ASNDatabase
 from baskervillehall.asn_database2 import ASNDatabase2
 from baskervillehall import baskerville_rules
 from baskervillehall.bot_verificator import BotVerificator
+from baskervillehall.ai_bot_verificator import AiBotVerificator
 from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
@@ -235,6 +236,7 @@ class BaskervillehallSession(object):
         self.debugging = False
 
         self.bot_verificator = BotVerificator(logger=self.logger)
+        self.ai_bot_verificator = AiBotVerificator(logger=self.logger)
         self.asn_database = ASNDatabase(asn_database_path)
         self.asn_database2 = ASNDatabase2(asn_database2_path)
         self.tor_exit_scnaner = TorExitScanner()
@@ -506,15 +508,20 @@ class BaskervillehallSession(object):
             return None, None
 
     @staticmethod
-    def create_session(ua, host, country, continent, datacenter_code, ip, session_id, verified_bot, ts,
-                       cipher, ciphers, request, asn, asn_name, num_languages, accept_language, timezone_str,
-                       dnet, cloudflare_score):
+    def create_session(ua, host, country, continent, datacenter_code, ip, session_id,
+                       verified_bot, verified_bot_name, verified_ai_bot, verified_ai_bot_name,
+                       ts, cipher, ciphers, request, asn, asn_name, num_languages, accept_language,
+                       timezone_str, dnet, cloudflare_score, survey_country=''):
         return {
             'ua': ua,
             'host': host,
             'dnet': dnet,
             'verified_bot': verified_bot,
+            'verified_bot_name': verified_bot_name,
+            'verified_ai_bot': verified_ai_bot,
+            'verified_ai_bot_name': verified_ai_bot_name,
             'country': country,
+            'survey_country': survey_country,
             'continent': continent,
             'datacenter_code': datacenter_code,
             'ip': ip,
@@ -642,6 +649,7 @@ class BaskervillehallSession(object):
             'dnet': session['dnet'],
             'ua': session['ua'],
             'country': session['country'],
+            'survey_country': session.get('survey_country', ''),
             'continent': session['continent'],
             'datacenter_code': session['datacenter_code'],
             'session_id': session['session_id'],
@@ -656,6 +664,9 @@ class BaskervillehallSession(object):
             'bot_score_top_factor': bot_score_top_factor,
             'deflect_password': deflect_password,
             'verified_bot': session['verified_bot'],
+            'verified_bot_name': session.get('verified_bot_name', ''),
+            'verified_ai_bot': session.get('verified_ai_bot', False),
+            'verified_ai_bot_name': session.get('verified_ai_bot_name', ''),
             'cipher': session.get('cipher', ''),
             'ciphers': session.get('ciphers', ''),
             'cipher_type': baskerville_rules.normalize_cipher(session.get('cipher', '')),
@@ -713,6 +724,8 @@ class BaskervillehallSession(object):
             session_final['class'] = 'human'
         elif session_final['verified_bot']:
             session_final['class'] = 'verified_bot'
+        elif session_final['verified_ai_bot']:
+            session_final['class'] = 'verified_ai_bot'
         elif session_final['ai_bot_ua']:
             session_final['class'] = 'ai_bot'
         elif session_final['bad_bot']:
@@ -822,9 +835,13 @@ class BaskervillehallSession(object):
                     'host': host,
                     'dnet': reqs[0]['dnet'] if reqs else meta.get('dnet', '-'),
                     'country': meta['country'],
+                    'survey_country': meta.get('survey_country', ''),
                     'continent': meta['continent'],
                     'datacenter_code': meta['datacenter_code'],
                     'verified_bot': meta['verified_bot'],
+                    'verified_bot_name': meta.get('verified_bot_name', ''),
+                    'verified_ai_bot': meta.get('verified_ai_bot', False),
+                    'verified_ai_bot_name': meta.get('verified_ai_bot_name', ''),
                     'ip': ip,
                     'session_id': '-',
                     'start': start_ts,
@@ -952,9 +969,13 @@ class BaskervillehallSession(object):
                             'host': host,
                             'dnet': reqs_sorted[0]['dnet'] if reqs_sorted else meta.get('dnet', '-'),
                             'country': meta['country'],
+                            'survey_country': meta.get('survey_country', ''),
                             'continent': meta['continent'],
                             'datacenter_code': meta['datacenter_code'],
                             'verified_bot': meta['verified_bot'],
+                            'verified_bot_name': meta.get('verified_bot_name', ''),
+                            'verified_ai_bot': meta.get('verified_ai_bot', False),
+                            'verified_ai_bot_name': meta.get('verified_ai_bot_name', ''),
                             'ip': ip,
                             'session_id': '-',
                             'start': start_ts,
@@ -1069,6 +1090,10 @@ class BaskervillehallSession(object):
                     if poll_time > 5.0:
                         self.logger.warning(f'Slow Kafka poll: {poll_time:.1f}s returned {msg_count} messages')
 
+                # Refresh bot IP ranges once per poll batch (TTL-gated, cheap when within interval)
+                self.bot_verificator.refresh()
+                self.ai_bot_verificator.refresh()
+
                 for topic_partition, messages in raw_messages.items():
                     if (datetime.utcnow() - ts_lag_report).total_seconds() > 5:
 
@@ -1128,20 +1153,31 @@ class BaskervillehallSession(object):
                         if 'cloudflareProperties' in data:
                             prop = data['cloudflareProperties']
                             verified_bot = prop.get('botManagement', {}).get('verifiedBot', False)
+                            verified_bot_name = 'Cloudflare' if verified_bot else ''
                             continent = prop.get('continent', '')
                             datacenter_code = prop.get('cloudflare_datacenter_code', '')
                         else:
                             if data.get('banjax_decision') == 'GlobalAccessGranted':
                                 verified_bot = True
+                                verified_bot_name = 'GlobalAccessGranted'
                             else:
                                 if self.skip_expensive_ops:
                                     verified_bot = False
+                                    verified_bot_name = ''
                                 else:
                                     t_bv = self._t()
-                                    verified_bot = self.bot_verificator.is_verified_bot(ip)
+                                    verified_bot_name = self.bot_verificator.get_bot_name(ip)
+                                    verified_bot = bool(verified_bot_name)
                                     self._acc('msg_bot_verif', t_bv)
                             continent = ''
                             datacenter_code = ''
+
+                        if verified_bot or self.skip_expensive_ops:
+                            verified_ai_bot = False
+                            verified_ai_bot_name = ''
+                        else:
+                            verified_ai_bot_name = self.ai_bot_verificator.get_bot_name(ip)
+                            verified_ai_bot = bool(verified_ai_bot_name)
                         self.debugging = self.is_debugging_mode(data)
                         host = message.key.decode('utf-8', errors='replace')
 
@@ -1159,6 +1195,7 @@ class BaskervillehallSession(object):
                         ua = data.get('client_ua', data.get('client_user_agent', ''))
                         geoip = data.get('geoip', {})
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
+                        survey_country = data.get('survey_country', '')
                         dnet = data.get('dnet', '-')
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
 
@@ -1178,7 +1215,7 @@ class BaskervillehallSession(object):
 
                         # Whitelist with TTL cache
                         t_wl = self._t()
-                        k1 = ('hip', host, ip)
+                        k1 = ('h', host)
                         cached = self._wl_get(k1)
                         if cached is None:
                             allowed = self.settings.is_host_whitelisted(host)
@@ -1289,10 +1326,11 @@ class BaskervillehallSession(object):
                             if self.is_session_expired(session, ts_event):
                                 t_cr = self._t()
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
-                                                              verified_bot, ts_event, cipher, ciphers, request,
+                                                              verified_bot, verified_bot_name,
+                                                              verified_ai_bot, verified_ai_bot_name,
+                                                              ts_event, cipher, ciphers, request,
                                                               asn, asn_name, num_languages, accept_language,
-                                                              timezone_str,
-                                                              dnet, cloudflare_score)
+                                                              timezone_str, dnet, cloudflare_score, survey_country)
                                 self._acc('session_creation', t_cr)
                                 self.ips[ip][session_id] = session
                             else:
@@ -1332,9 +1370,11 @@ class BaskervillehallSession(object):
                         else:
                             t_cr = self._t()
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
-                                                          verified_bot, ts_event, cipher, ciphers, request,
+                                                          verified_bot, verified_bot_name,
+                                                          verified_ai_bot, verified_ai_bot_name,
+                                                          ts_event, cipher, ciphers, request,
                                                           asn, asn_name, num_languages, accept_language, timezone_str,
-                                                          dnet, cloudflare_score)
+                                                          dnet, cloudflare_score, survey_country)
                             self._acc('session_creation', t_cr)
                             if ip not in self.ips_primary:
                                 self.ips_primary[ip] = {}
@@ -1405,9 +1445,13 @@ class BaskervillehallSession(object):
                             'host': first_session['host'],
                             'dnet': first_session['dnet'],
                             'country': first_session['country'],
+                            'survey_country': first_session.get('survey_country', ''),
                             'continent': first_session['continent'],
                             'datacenter_code': first_session['datacenter_code'],
                             'verified_bot': first_session['verified_bot'],
+                            'verified_bot_name': first_session.get('verified_bot_name', ''),
+                            'verified_ai_bot': first_session.get('verified_ai_bot', False),
+                            'verified_ai_bot_name': first_session.get('verified_ai_bot_name', ''),
                             'ip': ip,
                             'session_id': 'emergency_flush',
                             'start': all_requests[0]['ts'].strftime(self.date_time_format),

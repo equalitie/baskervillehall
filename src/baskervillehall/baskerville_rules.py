@@ -452,7 +452,7 @@ def is_ai_bot_user_agent(user_agent: str) -> bool:
 
 
 def is_bad_bot(session):
-    if session['verified_bot']:
+    if session['verified_bot'] or session.get('verified_ai_bot', False):
         return False
 
     if not session['primary_session']:
@@ -948,4 +948,6 @@ def is_human(session):
         (bool):
           - bool: True if score > 30 (considered human)
     """
+    if session.get('verified_bot') or session.get('verified_ai_bot'):
+        return False
     return get_score(session) > 30
