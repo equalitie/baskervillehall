@@ -9,27 +9,55 @@ logger = logging.getLogger(__name__)
 
 # Fake responses keyed by URL — injected into tests that mock HTTP
 FAKE_RESPONSES = {
+    # Anthropic
     "https://claude.com/crawling/bots.json": {
-        "creationTime": "2026-01-01T00:00:00",
-        "prefixes": [
-            {"ipv4Prefix": "10.0.1.0/24"},
-            {"ipv6Prefix": "2001:db8:1::/48"},
-        ],
+        "prefixes": [{"ipv4Prefix": "10.0.1.0/24"}, {"ipv6Prefix": "2001:db8:1::/48"}],
     },
+    # OpenAI
     "https://openai.com/gptbot.json": {
-        "creationTime": "2026-01-01T00:00:00",
         "prefixes": ["10.0.2.0/24", "10.0.3.0/28"],
     },
     "https://openai.com/searchbot.json": {
-        "creationTime": "2026-01-01T00:00:00",
         "prefixes": ["10.0.4.0/24"],
     },
-    "https://developers.google.com/static/crawling/ipranges/common-crawlers.json": {
-        "creationTime": "2026-01-01T00:00:00",
-        "prefixes": [
-            {"ipv4Prefix": "10.0.5.0/24"},
-            {"ipv6Prefix": "2001:db8:5::/48"},
-        ],
+    "https://openai.com/chatgpt-user.json": {
+        "prefixes": ["10.0.9.0/24"],
+    },
+    # Google
+    "https://developers.google.com/crawling/ipranges/common-crawlers.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.5.0/24"}, {"ipv6Prefix": "2001:db8:5::/48"}],
+    },
+    "https://developers.google.com/crawling/ipranges/special-crawlers.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.10.0/24"}],
+    },
+    "https://developers.google.com/crawling/ipranges/user-triggered-fetchers.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.11.0/24"}],
+    },
+    # Perplexity
+    "https://www.perplexity.ai/perplexitybot.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.6.0/24"}],
+    },
+    "https://www.perplexity.ai/perplexity-user.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.12.0/24"}],
+    },
+    # Mistral
+    "https://mistral.ai/mistralai-index-ips.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.7.0/24"}],
+    },
+    "https://mistral.ai/mistralai-user-ips.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.13.0/24"}],
+    },
+    # DuckDuckGo
+    "https://duckduckgo.com/duckduckbot.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.14.0/24"}],
+    },
+    # Microsoft / Bing
+    "https://www.bing.com/toolbox/bingbot.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.15.0/24"}],
+    },
+    # Common Crawl
+    "https://index.commoncrawl.org/ccbot.json": {
+        "prefixes": [{"ipv4Prefix": "10.0.16.0/24"}],
     },
 }
 
@@ -104,6 +132,30 @@ class TestAiBotVerificatorWithMocks(unittest.TestCase):
     def test_google_extended_ip_in_range(self):
         self.assertEqual(self.v.get_bot_name("10.0.5.200"), "GoogleExtended")
 
+    def test_chatgpt_user_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.9.1"), "ChatGPT-User")
+
+    def test_google_special_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.10.1"), "GoogleSpecial")
+
+    def test_google_user_triggered_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.11.1"), "GoogleUserTriggered")
+
+    def test_perplexity_user_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.12.1"), "Perplexity-User")
+
+    def test_mistralai_user_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.13.1"), "MistralAI-User")
+
+    def test_duckassistbot_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.14.1"), "DuckAssistBot")
+
+    def test_bingbot_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.15.1"), "Bingbot")
+
+    def test_ccbot_ip_in_range(self):
+        self.assertEqual(self.v.get_bot_name("10.0.16.1"), "CCBot")
+
     def test_unknown_ip_returns_empty(self):
         self.assertEqual(self.v.get_bot_name("1.2.3.4"), "")
 
@@ -112,6 +164,18 @@ class TestAiBotVerificatorWithMocks(unittest.TestCase):
 
     def test_ipv6_google_extended(self):
         self.assertEqual(self.v.get_bot_name("2001:db8:5::ff"), "GoogleExtended")
+
+    def test_ipv6_full_form_matches_compressed(self):
+        # "2001:0db8:0001:0000:0000:0000:0000:0001" == "2001:db8:1::1" (ClaudeBot)
+        self.assertEqual(self.v.get_bot_name("2001:0db8:0001:0000:0000:0000:0000:0001"), "ClaudeBot")
+
+    def test_ipv4_does_not_raise_against_ipv6_nets(self):
+        # ClaudeBot has both IPv4 and IPv6 prefixes — IPv4 lookup must not raise TypeError
+        self.assertEqual(self.v.get_bot_name("10.0.1.5"), "ClaudeBot")
+
+    def test_ipv6_does_not_raise_against_ipv4_nets(self):
+        # GPTBot has only IPv4 prefixes — IPv6 lookup must return "" without TypeError
+        self.assertEqual(self.v.get_bot_name("2001:db8::dead"), "")
 
     def test_invalid_ip_returns_empty(self):
         self.assertEqual(self.v.get_bot_name("not-an-ip"), "")
@@ -172,6 +236,79 @@ class TestAiBotVerificatorWithMocks(unittest.TestCase):
         self.assertEqual(self.v.get_bot_name("10.0.1.1"), "ClaudeBot")
         # Other bots refreshed successfully
         self.assertEqual(self.v.get_bot_name("10.0.2.1"), "GPTBot")
+
+
+class TestFCrDNS(unittest.TestCase):
+    """Unit tests for _verify_fcrdns — mocked socket, no network."""
+
+    def setUp(self):
+        self.v = _make_verificator()
+
+    def _patch_socket(self, reverse_hostname, forward_ips):
+        """
+        Helper: patches gethostbyaddr and getaddrinfo.
+        forward_ips: list of IP strings returned by getaddrinfo.
+        """
+        def fake_gethostbyaddr(ip):
+            return (reverse_hostname, [], [ip])
+
+        def fake_getaddrinfo(host, port):
+            return [(None, None, None, None, (ip,)) for ip in forward_ips]
+
+        return patch.multiple(
+            "baskervillehall.ai_bot_verificator.socket",
+            gethostbyaddr=fake_gethostbyaddr,
+            getaddrinfo=fake_getaddrinfo,
+        )
+
+    # Meta
+    def test_meta_ipv4_verified(self):
+        ip = "69.171.250.1"
+        suffixes = (".crawl.facebook.com", ".crawl.fbsearch.com")
+        with self._patch_socket("spider-69-171-250-1.crawl.facebook.com", [ip]):
+            self.assertTrue(self.v._verify_fcrdns(ip, suffixes))
+
+    def test_meta_ipv6_verified(self):
+        ip = "2a03:2880:f003::1"
+        full_form = "2a03:2880:f003:0000:0000:0000:0000:0001"
+        suffixes = (".crawl.facebook.com", ".crawl.fbsearch.com")
+        with self._patch_socket("spider-1.crawl.facebook.com", [full_form]):
+            self.assertTrue(self.v._verify_fcrdns(ip, suffixes))
+
+    # Amazon
+    def test_amazon_ipv4_verified(self):
+        ip = "18.232.36.1"
+        suffixes = (".crawl.amazonbot.amazon",)
+        with self._patch_socket("18-232-36-1.crawl.amazonbot.amazon", [ip]):
+            self.assertTrue(self.v._verify_fcrdns(ip, suffixes))
+
+    def test_amazon_via_get_bot_name(self):
+        ip = "18.232.36.1"
+        suffixes = (".crawl.amazonbot.amazon",)
+        with self._patch_socket("18-232-36-1.crawl.amazonbot.amazon", [ip]):
+            self.assertEqual(self.v.get_bot_name(ip, check_fcrdns=True), "Amazonbot")
+
+    # Security checks
+    def test_wrong_hostname_suffix_rejected(self):
+        suffixes = (".crawl.facebook.com",)
+        with self._patch_socket("spider.evil.com", ["1.2.3.4"]):
+            self.assertFalse(self.v._verify_fcrdns("1.2.3.4", suffixes))
+
+    def test_forward_ip_mismatch_rejected(self):
+        suffixes = (".crawl.facebook.com",)
+        with self._patch_socket("spider.crawl.facebook.com", ["9.9.9.9"]):
+            self.assertFalse(self.v._verify_fcrdns("1.2.3.4", suffixes))
+
+    def test_reverse_dns_failure_returns_false(self):
+        import socket as sock
+        suffixes = (".crawl.facebook.com",)
+        with patch("baskervillehall.ai_bot_verificator.socket.gethostbyaddr",
+                   side_effect=sock.herror):
+            self.assertFalse(self.v._verify_fcrdns("1.2.3.4", suffixes))
+
+    def test_ipv6_compressed_vs_full_form(self):
+        import ipaddress
+        self.assertEqual(ipaddress.ip_address("::1"), ipaddress.ip_address("0:0:0:0:0:0:0:1"))
 
 
 class TestAiBotVerificatorLive(unittest.TestCase):

@@ -510,6 +510,7 @@ class BaskervillehallSession(object):
     @staticmethod
     def create_session(ua, host, country, continent, datacenter_code, ip, session_id,
                        verified_bot, verified_bot_name, verified_ai_bot, verified_ai_bot_name,
+                       ai_spoofer,
                        ts, cipher, ciphers, request, asn, asn_name, num_languages, accept_language,
                        timezone_str, dnet, cloudflare_score, survey_country=''):
         return {
@@ -520,6 +521,7 @@ class BaskervillehallSession(object):
             'verified_bot_name': verified_bot_name,
             'verified_ai_bot': verified_ai_bot,
             'verified_ai_bot_name': verified_ai_bot_name,
+            'ai_spoofer': ai_spoofer,
             'country': country,
             'survey_country': survey_country,
             'continent': continent,
@@ -667,6 +669,7 @@ class BaskervillehallSession(object):
             'verified_bot_name': session.get('verified_bot_name', ''),
             'verified_ai_bot': session.get('verified_ai_bot', False),
             'verified_ai_bot_name': session.get('verified_ai_bot_name', ''),
+            'ai_spoofer': session.get('ai_spoofer', False),
             'cipher': session.get('cipher', ''),
             'ciphers': session.get('ciphers', ''),
             'cipher_type': baskerville_rules.normalize_cipher(session.get('cipher', '')),
@@ -842,6 +845,7 @@ class BaskervillehallSession(object):
                     'verified_bot_name': meta.get('verified_bot_name', ''),
                     'verified_ai_bot': meta.get('verified_ai_bot', False),
                     'verified_ai_bot_name': meta.get('verified_ai_bot_name', ''),
+                    'ai_spoofer': meta.get('ai_spoofer', False),
                     'ip': ip,
                     'session_id': '-',
                     'start': start_ts,
@@ -976,6 +980,7 @@ class BaskervillehallSession(object):
                             'verified_bot_name': meta.get('verified_bot_name', ''),
                             'verified_ai_bot': meta.get('verified_ai_bot', False),
                             'verified_ai_bot_name': meta.get('verified_ai_bot_name', ''),
+                            'ai_spoofer': meta.get('ai_spoofer', False),
                             'ip': ip,
                             'session_id': '-',
                             'start': start_ts,
@@ -1150,6 +1155,7 @@ class BaskervillehallSession(object):
 
                         t_ext = self._t()
                         ip = data['client_ip']
+                        ua = data.get('client_ua', data.get('client_user_agent', ''))
                         if 'cloudflareProperties' in data:
                             prop = data['cloudflareProperties']
                             verified_bot = prop.get('botManagement', {}).get('verifiedBot', False)
@@ -1172,17 +1178,36 @@ class BaskervillehallSession(object):
                             continent = ''
                             datacenter_code = ''
 
-                        if verified_bot or self.skip_expensive_ops:
+                        asn = data.get('geoip_asn', {}).get('as', {}).get('number', '0')
+                        asn_name = data.get('geoip_asn', {}).get('as', {}).get('organization', {}).get('name', '')
+
+                        if verified_bot or self.skip_expensive_ops or not baskerville_rules.is_ai_bot_user_agent(ua):
                             verified_ai_bot = False
                             verified_ai_bot_name = ''
                         else:
-                            verified_ai_bot_name = self.ai_bot_verificator.get_bot_name(ip)
+                            check_fcrdns = baskerville_rules.is_fcrdns_bot_user_agent(ua)
+                            verified_ai_bot_name = self.ai_bot_verificator.get_bot_name(ip, check_fcrdns=check_fcrdns)
+                            verified_ai_bot_method = 'ip' if not check_fcrdns else 'fcrdns'
+                            if not verified_ai_bot_name and check_fcrdns:
+                                verified_ai_bot_name = self.ai_bot_verificator.get_bot_name_by_asn(asn_name)
+                                if verified_ai_bot_name:
+                                    verified_ai_bot_method = 'asn'
                             verified_ai_bot = bool(verified_ai_bot_name)
+                            if verified_ai_bot:
+                                self.logger.info(
+                                    f'[AI] verified({verified_ai_bot_method}) ip={ip} bot={verified_ai_bot_name} asn="{asn_name}" ua="{ua}"'
+                                )
+                            elif baskerville_rules.is_verifiable_ai_bot_user_agent(ua):
+                                self.logger.warning(
+                                    f'[AI] unverified ip={ip} asn="{asn_name}" ua="{ua}"'
+                                )
+                            else:
+                                self.logger.info(
+                                    f'[AI] unsupported ip={ip} asn="{asn_name}" ua="{ua}"'
+                                )
+                        ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
                         self.debugging = self.is_debugging_mode(data)
                         host = message.key.decode('utf-8', errors='replace')
-
-                        asn = data.get('geoip_asn', {}).get('as', {}).get('number', '0')
-                        asn_name = data.get('geoip_asn', {}).get('as', {}).get('organization', {}).get('name', '')
                         session_id = self.get_session_cookie(data)
                         self._acc('data_extraction', t_ext)
 
@@ -1192,7 +1217,6 @@ class BaskervillehallSession(object):
                                 asn_number=asn, asn_name=asn_name, timestamp=ts_event
                             )
 
-                        ua = data.get('client_ua', data.get('client_user_agent', ''))
                         geoip = data.get('geoip', {})
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
                         survey_country = data.get('survey_country', '')
@@ -1200,15 +1224,11 @@ class BaskervillehallSession(object):
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
 
                         if self.country_blocker.process(host, ip, country, dnet):
-                            if host == 'farmal.in':
-                                self.logger.info(f'{host} country {country} blocked ip{ip}')
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                             self.profile_stats['message_count'] += 1
                             continue
 
-                        if host == 'farmal.in':
-                            self.logger.info(f' {host} country {country} ip {ip} is not blocked')
-                            self.logger.info(data)
+
                         if len(session_id) < 5:
                             session_id = '-' + ''.join(
                                 random.choice(string.ascii_uppercase + string.digits) for _ in range(7))
@@ -1328,6 +1348,7 @@ class BaskervillehallSession(object):
                                 session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                               verified_bot, verified_bot_name,
                                                               verified_ai_bot, verified_ai_bot_name,
+                                                              ai_spoofer,
                                                               ts_event, cipher, ciphers, request,
                                                               asn, asn_name, num_languages, accept_language,
                                                               timezone_str, dnet, cloudflare_score, survey_country)
@@ -1372,6 +1393,7 @@ class BaskervillehallSession(object):
                             session = self.create_session(ua, host, country, '', datacenter_code, ip, session_id,
                                                           verified_bot, verified_bot_name,
                                                           verified_ai_bot, verified_ai_bot_name,
+                                                          ai_spoofer,
                                                           ts_event, cipher, ciphers, request,
                                                           asn, asn_name, num_languages, accept_language, timezone_str,
                                                           dnet, cloudflare_score, survey_country)

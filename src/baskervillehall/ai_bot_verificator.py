@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import ipaddress as ipa
+import socket
 import requests
 from functools import lru_cache
 
@@ -26,29 +27,60 @@ class AiBotVerificator:
     Companies publish their crawler IP ranges as JSON; we download and cache them.
 
     Supported bots:
-      - ClaudeBot  (Anthropic)   https://claude.com/crawling/bots.json
-      - GPTBot     (OpenAI)      https://openai.com/gptbot.json
-      - SearchBot  (OpenAI)      https://openai.com/searchbot.json
-      - GoogleExtended (Google)  https://developers.google.com/static/crawling/ipranges/common-crawlers.json
+      - ClaudeBot           (Anthropic)   https://claude.com/crawling/bots.json
+      - GPTBot              (OpenAI)      https://openai.com/gptbot.json
+      - OAISearchBot        (OpenAI)      https://openai.com/searchbot.json
+      - ChatGPT-User        (OpenAI)      https://openai.com/chatgpt-user.json
+      - GoogleExtended      (Google)      https://developers.google.com/crawling/ipranges/common-crawlers.json
+      - GoogleSpecial       (Google)      https://developers.google.com/crawling/ipranges/special-crawlers.json
+      - GoogleUserTriggered (Google)      https://developers.google.com/crawling/ipranges/user-triggered-fetchers.json
+      - PerplexityBot       (Perplexity)  https://www.perplexity.ai/perplexitybot.json
+      - Perplexity-User     (Perplexity)  https://www.perplexity.ai/perplexity-user.json
+      - MistralBot          (Mistral)     https://mistral.ai/mistralai-index-ips.json
+      - MistralAI-User      (Mistral)     https://mistral.ai/mistralai-user-ips.json
+      - DuckAssistBot       (DuckDuckGo)  https://duckduckgo.com/duckduckbot.json
+      - Bingbot             (Microsoft)   https://www.bing.com/toolbox/bingbot.json
+      - CCBot               (CommonCrawl) https://index.commoncrawl.org/ccbot.json
+      - Meta-ExternalAgent  (Meta)        FCrDNS: hostname must end with .crawl.facebook.com or .crawl.fbsearch.com
     """
 
+    # Bots verified via FCrDNS (no public IP prefix list).
+    # Each entry: (bot_name, valid_hostname_suffixes)
+    _FCRDNS_BOTS = [
+        ("Meta-ExternalAgent", (".crawl.facebook.com", ".crawl.fbsearch.com")),
+        ("Amazonbot",          (".crawl.amazonbot.amazon",)),
+    ]
+
+    # ASN fallback for bots that don't consistently set PTR records.
+    # Used only when FCrDNS fails. Each entry: (bot_name, asn_name_keywords).
+    # Keywords matched case-insensitively against the GeoIP ASN org name.
+    _ASN_FALLBACK_BOTS = [
+        ("Meta-ExternalAgent", ("meta platforms", "facebook")),
+    ]
+
     _SOURCES = [
-        {
-            "name": "ClaudeBot",
-            "url": "https://claude.com/crawling/bots.json",
-        },
-        {
-            "name": "GPTBot",
-            "url": "https://openai.com/gptbot.json",
-        },
-        {
-            "name": "OAISearchBot",
-            "url": "https://openai.com/searchbot.json",
-        },
-        {
-            "name": "GoogleExtended",
-            "url": "https://developers.google.com/static/crawling/ipranges/common-crawlers.json",
-        },
+        # Anthropic
+        {"name": "ClaudeBot", "url": "https://claude.com/crawling/bots.json"},
+        # OpenAI
+        {"name": "GPTBot", "url": "https://openai.com/gptbot.json"},
+        {"name": "OAISearchBot", "url": "https://openai.com/searchbot.json"},
+        {"name": "ChatGPT-User", "url": "https://openai.com/chatgpt-user.json"},
+        # Google
+        {"name": "GoogleExtended", "url": "https://developers.google.com/crawling/ipranges/common-crawlers.json"},
+        {"name": "GoogleSpecial", "url": "https://developers.google.com/crawling/ipranges/special-crawlers.json"},
+        {"name": "GoogleUserTriggered", "url": "https://developers.google.com/crawling/ipranges/user-triggered-fetchers.json"},
+        # Perplexity
+        {"name": "PerplexityBot", "url": "https://www.perplexity.ai/perplexitybot.json"},
+        {"name": "Perplexity-User", "url": "https://www.perplexity.ai/perplexity-user.json"},
+        # Mistral
+        {"name": "MistralBot", "url": "https://mistral.ai/mistralai-index-ips.json"},
+        {"name": "MistralAI-User", "url": "https://mistral.ai/mistralai-user-ips.json"},
+        # DuckDuckGo
+        {"name": "DuckAssistBot", "url": "https://duckduckgo.com/duckduckbot.json"},
+        # Microsoft / Bing
+        {"name": "Bingbot", "url": "https://www.bing.com/toolbox/bingbot.json"},
+        # Common Crawl (major LLM training data source)
+        {"name": "CCBot", "url": "https://index.commoncrawl.org/ccbot.json"},
     ]
 
     def __init__(self, logger, refresh_interval_hours=1):
@@ -88,11 +120,43 @@ class AiBotVerificator:
         self.ts_refresh = datetime.now()
         self.get_bot_name.cache_clear()
 
+    def _verify_fcrdns(self, ip: str, valid_suffixes: tuple) -> bool:
+        """
+        Forward-confirmed reverse DNS check.
+        1. Reverse DNS: ip -> hostname
+        2. Check hostname ends with one of valid_suffixes.
+        3. Forward DNS: hostname -> IPs, confirm original IP is among them.
+        IPv6 addresses are compared as ipa.ip_address objects to handle
+        multiple canonical representations (e.g. "::1" vs "0:0:0:0:0:0:0:1").
+        """
+        try:
+            hostname = socket.gethostbyaddr(ip)[0]
+        except (socket.herror, socket.gaierror):
+            return False
+        if not any(hostname.endswith(suffix) for suffix in valid_suffixes):
+            return False
+        try:
+            forward_ips = set()
+            for r in socket.getaddrinfo(hostname, None):
+                try:
+                    forward_ips.add(ipa.ip_address(r[4][0]))
+                except ValueError:
+                    pass
+        except socket.gaierror:
+            return False
+        try:
+            return ipa.ip_address(ip) in forward_ips
+        except ValueError:
+            return False
+
     @lru_cache(maxsize=10000)
-    def get_bot_name(self, ip: str) -> str:
+    def get_bot_name(self, ip: str, check_fcrdns: bool = False) -> str:
         """
         Returns the name of the verified AI bot (e.g. "ClaudeBot") if the IP
         belongs to a known AI crawler's published range, or "" otherwise.
+        FCrDNS bots (Meta, Amazon) are checked only when check_fcrdns=True
+        to avoid DNS lookups on every request — pass True only when the UA
+        suggests one of these crawlers.
         Call refresh() separately on a timer — not here, to avoid it being
         suppressed by the cache hit path.
         """
@@ -101,6 +165,25 @@ class AiBotVerificator:
         except ValueError:
             return ""
         for name, nets in self._nets.items():
-            if any(ip_obj in net for net in nets):
+            if any(ip_obj in net for net in nets if net.version == ip_obj.version):
                 return name
+        if check_fcrdns:
+            for bot_name, suffixes in self._FCRDNS_BOTS:
+                if self._verify_fcrdns(ip, suffixes):
+                    return bot_name
+        return ""
+
+    def get_bot_name_by_asn(self, asn_name: str) -> str:
+        """
+        ASN-based fallback verification for bots that don't consistently publish
+        PTR records (e.g. Meta). Called only when FCrDNS fails and the UA suggests
+        an FCrDNS bot. Weaker than FCrDNS/prefix-list — use only as last resort.
+        Returns bot name if asn_name matches a known company, "" otherwise.
+        """
+        if not asn_name:
+            return ""
+        asn_lower = asn_name.lower()
+        for bot_name, keywords in self._ASN_FALLBACK_BOTS:
+            if any(kw in asn_lower for kw in keywords):
+                return bot_name
         return ""

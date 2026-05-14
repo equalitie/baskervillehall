@@ -420,35 +420,139 @@ def is_ai_bot_user_agent(user_agent: str) -> bool:
     ua = user_agent.lower()
 
     known_ai_crawlers = [
-        r"gptbot",  # OpenAI
-        r"openai.*crawler",  # OpenAI legacy
-        r"openai-httplib",  # Python OpenAI lib
-        r"chatgpt",  # Any generic ChatGPT client
+        # OpenAI
+        r"gptbot",           # GPTBot - training crawler
+        r"oai-searchbot",    # OAI-SearchBot - ChatGPT search
+        r"chatgpt-user",     # ChatGPT-User - user-triggered browsing
+        r"chatgpt",          # generic ChatGPT client
 
-        r"anthropic",  # Claude / Anthropic
-        r"claudebot",  # ClaudeBot
+        # Anthropic / Claude
+        r"claudebot",        # ClaudeBot - training crawler
+        r"claude-user",      # Claude-User - user-triggered
+        r"claude-web",       # Claude-Web
+        r"anthropic",        # anthropic-ai and others
 
-        r"google-extended",  # Google's opt-out agent
-        r"ai crawler",  # Generic
+        # Google
+        r"google-extended",         # Gemini training opt-out agent
+        r"google-cloudvertexbot",   # Vertex AI
+        r"gemini",                  # Gemini-AI / Gemini-Deep-Research
 
-        r"bytespider",  # ByteDance
-        r"yisouspider",  # Baidu affiliate
-        r"youdao",  # NetEase AI
+        # Microsoft / Bing
+        r"bingbot",          # Bing (used for Copilot)
 
-        r"ccbot",  # Common Crawl (training source)
-        r"petalbot",  # Huawei
+        # Meta / Facebook
+        r"meta-externalagent",   # Meta LLM training (Llama)
+        r"meta-webindexer",      # Meta web indexer
+        r"facebookbot",          # Facebook AI research
+        r"facebot",              # Meta legacy
 
-        r"facebookbot",  # Facebook/Meta AI research
-        r"facebot",  # Meta
-        r"amazonbot",  # Amazon AI research
-        r"yandexbot",  # Russia's search/LLM training
-        r"cohere",  # Cohere.ai
-        r"perplexity",  # Perplexity AI
-        r"ai\scrawler",  # catch-all
-        r"meta-externalagent",  # ← facebook training
+        # Perplexity
+        r"perplexitybot",    # PerplexityBot
+        r"perplexity-user",  # user-triggered
+
+        # Apple
+        r"applebot-extended",  # Siri / Apple Intelligence
+
+        # Amazon
+        r"amazonbot",        # Amazon AI research
+
+        # DuckDuckGo
+        r"duckassistbot",    # DuckAssistBot
+
+        # ByteDance
+        r"bytespider",       # ByteDance LLM training
+
+        # Mistral
+        r"mistralai",        # MistralAI-User
+
+        # Cohere
+        r"cohere",           # Cohere.ai
+
+        # Common Crawl (major training data source)
+        r"ccbot",
+
+        # Baidu affiliate
+        r"yisouspider",
+
+        # Huawei / Petal
+        r"petalbot",
+
+        # Yandex (search + LLM training)
+        r"yandexbot",
+
+        # NetEase AI
+        r"youdao",
+
+        # Timpi (decentralized AI training)
+        r"timpibot",
+
+        # Catch-all patterns
+        r"ai[\s\-]crawler",
     ]
 
     return any(re.search(pattern, ua) for pattern in known_ai_crawlers)
+
+
+def is_fcrdns_bot_user_agent(user_agent: str) -> bool:
+    """Returns True if the UA suggests a crawler verified via FCrDNS (Meta or Amazon).
+    Note: facebookbot/facebot are Facebook link-preview crawlers, NOT the Meta AI training
+    crawler — they don't use .crawl.facebook.com hostnames and can't be FCrDNS-verified.
+    """
+    if not user_agent:
+        return False
+    ua = user_agent.lower()
+    return any(kw in ua for kw in ("meta-externalagent", "meta-webindexer", "amazonbot"))
+
+
+def is_verifiable_ai_bot_user_agent(user_agent: str) -> bool:
+    """
+    Returns True if the UA matches a bot we can actually verify (IP prefix list or FCrDNS).
+    Use this to distinguish 'unverified' (failed our check → possible spoofer) from
+    'unsupported' (no verification method exists for this company).
+
+    Verifiable via IP prefix list:
+      ClaudeBot, GPTBot, OAISearchBot, ChatGPT-User, Google*, Perplexity*,
+      Mistral*, DuckAssistBot, Bingbot, CCBot
+    Verifiable via FCrDNS:
+      Meta-ExternalAgent, Amazonbot
+    """
+    if not user_agent:
+        return False
+    ua = user_agent.lower()
+    verifiable_keywords = [
+        # Anthropic
+        "claudebot", "claude-user", "claude-web", "anthropic",
+        # OpenAI
+        "gptbot", "oai-searchbot", "chatgpt-user", "chatgpt",
+        # Google
+        "google-extended", "google-cloudvertexbot", "gemini",
+        # Perplexity
+        "perplexitybot", "perplexity-user", "perplexity",
+        # Mistral
+        "mistralai", "mistralbot",
+        # DuckDuckGo
+        "duckassistbot",
+        # Microsoft
+        "bingbot",
+        # Common Crawl
+        "ccbot",
+        # Meta AI training (FCrDNS) — NOT facebookbot/facebot which are link-preview crawlers
+        "meta-externalagent", "meta-webindexer",
+        # Amazon (FCrDNS)
+        "amazonbot",
+    ]
+    return any(kw in ua for kw in verifiable_keywords)
+
+
+def is_ai_spoofer(user_agent: str, verified_ai_bot: bool) -> bool:
+    """
+    Returns True if the UA claims to be a verifiable AI bot but IP verification failed.
+    Legitimate bots (OpenAI, Anthropic, Google, etc.) always use their published IP ranges —
+    if the IP isn't in those ranges, it's a spoofer and should be blocked immediately.
+    """
+    if verified_ai_bot:
+        return False
+    return is_verifiable_ai_bot_user_agent(user_agent)
 
 
 def is_bad_bot(session):

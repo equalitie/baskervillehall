@@ -747,6 +747,37 @@ class BaskervillehallPredictor(object):
                 )
             return
 
+        if session.get("ai_spoofer", False):
+            if ip in pending_block_ip:
+                return
+            pending_block_ip[ip] = True
+            self.logger.warning(
+                f"AI bot spoofer block_ip ip={ip} host={host} "
+                f"asn={session.get('asn_name', '')} ua={session.get('ua', '')} session_id={session_id}"
+            )
+            payload = self.create_command(
+                command_name="block_ip",
+                session=session,
+                meta="ai_spoofer",
+                prediction_if=prediction_if,
+                score_if=score_if,
+                shapley_if=shapley_if,
+                shapley_feature_if=shapley_feature_if,
+                prediction_ae=prediction_ae,
+                score_ae=score_ae,
+                shapley_ae=shapley_ae,
+                shapley_feature_ae=shapley_feature_ae,
+                difficulty=0,
+                scraper_name=scraper_name,
+                threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration,
+                baskerville_score=baskerville_score,
+            )
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
         if not session.get("primary_session", False):
             ip_with_sessions[session["ip"]] = True
 
@@ -969,13 +1000,17 @@ class BaskervillehallPredictor(object):
                 return
 
             if primary_session:
-                if ip in pending_challenge_ip:
-                    return
-                pending_challenge_ip[ip] = True
-                # if host == 'antijob.net':
-                #     command = 'block_ip'
-                # else:
-                command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+                if not human:
+                    # Bot anomaly with no cookies: can't solve JS challenge, block immediately
+                    if ip in pending_block_ip:
+                        return
+                    pending_block_ip[ip] = True
+                    command = "block_ip"
+                else:
+                    if ip in pending_challenge_ip:
+                        return
+                    pending_challenge_ip[ip] = True
+                    command = "rate_limit" if self.use_rate_limit else "challenge_ip"
             else:
                 if ip not in pending_session:
                     pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
