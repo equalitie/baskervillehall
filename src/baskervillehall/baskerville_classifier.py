@@ -86,30 +86,21 @@ class BaskervilleClassifier(object):
                 'ua_score', 'hour_bucket', 'odd_hour', 'fingerprints_score',
                 'interval_cv', 'interval_consistency',
                 'rate_499',
-                # 'high_request_rate', 'extreme_request_rate'  # Removed: circular reasoning in training data
-                # These features don't work because:
-                # - WordPress sites have high rate due to parallel resource loading (HTTP/2 multiplexing)
-                # - Old labeling logic used "rate > 100" rule, contaminating training data
-                # - Model learned: high rate → HUMAN (opposite of intended!)
-                # - Use request_rate directly instead, model will learn non-linear relationship
+                # Binary browser-fingerprint features — numeric (0/1), NOT categorical.
+                # headless_ua, bot_ua, ai_bot_ua: excluded — they ARE the training labels
+                # (label leakage). The model learns behavioral correlates of these instead.
+                # verified_bot: excluded — always 0 in training (pre-filtered).
+                'valid_browser_ciphers', 'weak_cipher', 'short_ua',
+                # entropy is already listed above (line 80). No duplicate needed.
             ]
 
-        # Default categorical features if not provided
+        # Default categorical features if not provided.
+        # FeatureExtractor only supports: country, cipher, cipher_type, datacenter_asn, timezone.
+        # Binary flags (headless_ua, bot_ua, etc.) are numeric features above, not categorical.
         if categorical_features is None:
             categorical_features = [
-                # 'country',
-                # 'primary_session',  # Rule-based, не нужно ML
-                # 'bad_bot',
-                # 'human',
-                'cipher_type',  # Normalized cipher family instead of exact cipher
-                'valid_browser_ciphers',
-                'weak_cipher',
-                'headless_ua',
-                'bot_ua',
-                'ai_bot_ua',
-                'verified_bot',
-                'datacenter_asn',
-                'short_ua'
+                'cipher_type',    # Normalized cipher family
+                'datacenter_asn', # ASN of the datacenter
             ]
 
         # Feature extractor (numeric + categorical)
@@ -155,6 +146,12 @@ class BaskervilleClassifier(object):
     def get_all_features(self):
         """Return the full list of feature names (numeric + categorical + optional PCA)."""
         return self.feature_extractor.get_all_features()
+
+    def predict_proba(self, sessions):
+        """Return raw bot probability scores (0..1) for a list of sessions."""
+        X_np = self.feature_extractor.transform(sessions)
+        dX = xgb.DMatrix(X_np, feature_names=self.get_all_features())
+        return self.model.predict(dX)
 
     def fit(self, sessions, y):
         """

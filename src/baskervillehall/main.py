@@ -9,6 +9,7 @@ from baskervillehall.storage_commands import StorageCommands
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
+from baskervillehall.baskervillehall_classifier_trainer import BaskervillehallClassifierTrainer
 from baskervillehall.storage_sessions import StorageSessions
 
 logger = None
@@ -113,6 +114,25 @@ def main():
             'n_jobs': int(os.environ.get('N_JOBS'))
         }
         trainer = BaskervillehallTrainer(
+            **params,
+            kafka_connection=kafka_connection,
+            s3_connection=s3_connection,
+            logger=logger
+        )
+        trainer.run()
+    elif args.pipeline == 'classifier_train':
+        params = {
+            'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
+            'group_id': os.environ.get('GROUP_ID_CLASSIFIER_TRAIN', 'classifier_train_pipeline'),
+            'num_sessions': int(os.environ.get('CLASSIFIER_NUM_SESSIONS', 50000)),
+            'min_dataset_size': int(os.environ.get('CLASSIFIER_MIN_DATASET_SIZE', 1000)),
+            'dataset_delay_from_now_in_minutes': int(os.environ.get('CLASSIFIER_DATASET_DELAY_MINUTES', 2)),
+            'model_ttl_in_minutes': int(os.environ.get('CLASSIFIER_MODEL_TTL_MINUTES', 240)),
+            'wait_time_minutes': int(os.environ.get('CLASSIFIER_WAIT_TIME_MINUTES', 5)),
+            'n_estimators': int(os.environ.get('CLASSIFIER_N_ESTIMATORS', 1000)),
+            's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
+        }
+        trainer = BaskervillehallClassifierTrainer(
             **params,
             kafka_connection=kafka_connection,
             s3_connection=s3_connection,
