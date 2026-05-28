@@ -12,6 +12,10 @@ class SettingsDeflectAPI(object):
             auth,
             ip_whitelist_url=None,
             ip_whitelist_auth=None,
+            global_allowlist_url=None,
+            global_allowlist_auth=None,
+            origin_ips_url=None,
+            origin_ips_auth=None,
             whitelist_default=[],
             whitelist_default_block_session=[],
             logger=None,
@@ -22,7 +26,7 @@ class SettingsDeflectAPI(object):
                                     headers={'Authorization': f'Bearer {auth}'},
                                     logger=self.logger, refresh_period_in_seconds=refresh_period_in_seconds)
 
-        # IP whitelist reader (optional)
+        # IP whitelist reader (optional) — /banjax_global_per_site_allowlist
         self.ip_whitelist_reader = None
         if ip_whitelist_url and ip_whitelist_auth:
             self.ip_whitelist_reader = JsonUrlReader(
@@ -33,6 +37,30 @@ class SettingsDeflectAPI(object):
             )
         self.ip_whitelist_data = {}
         self.ip_whitelist_parsed = {}  # Cache of parsed IP networks per host
+
+        # Global allowlist reader (optional) — /global_allowlist
+        # Contains verified bot IPs and custom globally-allowlisted IPs.
+        self.global_allowlist_reader = None
+        if global_allowlist_url and global_allowlist_auth:
+            self.global_allowlist_reader = JsonUrlReader(
+                url=global_allowlist_url,
+                headers={'Authorization': f'Bearer {global_allowlist_auth}'},
+                logger=logger,
+                refresh_period_in_seconds=refresh_period_in_seconds
+            )
+        self.global_allowlist_networks = []  # list[ip_network]
+
+        # Origin IPs reader (optional) — /origin_ips
+        # Contains per-site origin IPs that must never be challenged.
+        self.origin_ips_reader = None
+        if origin_ips_url and origin_ips_auth:
+            self.origin_ips_reader = JsonUrlReader(
+                url=origin_ips_url,
+                headers={'Authorization': f'Bearer {origin_ips_auth}'},
+                logger=logger,
+                refresh_period_in_seconds=refresh_period_in_seconds
+            )
+        self.origin_ips_parsed = {}  # host -> list[ip_network]
         self.domains = []
         self.prefixes = []
         self.matches = set()
@@ -234,6 +262,18 @@ class SettingsDeflectAPI(object):
             return 0
         return host_data.get('sensitivity', 0)
 
+    def _parse_ip_list(self, ip_list, context):
+        """Parse a list of IP/CIDR strings into ip_network objects, skipping invalid entries."""
+        networks = []
+        for ip_entry in ip_list:
+            try:
+                if ip_entry.startswith('/'):
+                    continue
+                networks.append(ipaddress.ip_network(ip_entry, strict=False))
+            except ValueError as e:
+                self.logger.warning(f"Invalid IP/CIDR in {context}: {ip_entry!r} - {e}")
+        return networks
+
     def _refresh_ip_whitelist(self):
         if not self.ip_whitelist_reader:
             return
@@ -243,26 +283,65 @@ class SettingsDeflectAPI(object):
             self.ip_whitelist_data = data
             self.ip_whitelist_parsed = {}
 
-            # Parse all IP addresses/networks for each host
             for host, ip_list in data.items():
-                parsed_networks = []
-                for ip_entry in ip_list:
-                    try:
-                        # Skip non-IP entries (like URL paths)
-                        if ip_entry.startswith('/'):
-                            continue
-                        # Try to parse as network (handles both single IPs and CIDRs)
-                        network = ipaddress.ip_network(ip_entry, strict=False)
-                        parsed_networks.append(network)
-                    except ValueError as e:
-                        self.logger.warning(f"Invalid IP/CIDR entry for {host}: {ip_entry!r} - {e}")
-                self.ip_whitelist_parsed[host] = parsed_networks
+                self.ip_whitelist_parsed[host] = self._parse_ip_list(ip_list, f"banjax_global_per_site_allowlist/{host}")
 
             self.logger.info(f"IP whitelist refreshed: {len(self.ip_whitelist_parsed)} hosts loaded")
+
+    def _refresh_global_allowlist(self):
+        """Refresh /global_allowlist — globally whitelisted IPs (bots + custom)."""
+        if not self.global_allowlist_reader:
+            return
+
+        data, fresh = self.global_allowlist_reader.get()
+        if data and fresh:
+            # API may return a list of IPs or a dict with an 'ips'/'allowlist' key
+            if isinstance(data, list):
+                ip_list = data
+            elif isinstance(data, dict):
+                # Real API returns {"global_allowlist": [...], "global_updated_at": "..."}
+                ip_list = (
+                    data.get('global_allowlist')
+                    or data.get('ips')
+                    or data.get('allowlist')
+                    or []
+                )
+                if not ip_list:
+                    # fallback: flatten all list values
+                    for v in data.values():
+                        if isinstance(v, list):
+                            ip_list.extend(v)
+            else:
+                ip_list = []
+            self.global_allowlist_networks = self._parse_ip_list(ip_list, "global_allowlist")
+            self.logger.info(f"Global allowlist refreshed: {len(self.global_allowlist_networks)} IPs/CIDRs loaded")
+
+    def _refresh_origin_ips(self):
+        """Refresh /origin_ips — per-site origin IPs that must never be challenged."""
+        if not self.origin_ips_reader:
+            return
+
+        data, fresh = self.origin_ips_reader.get()
+        if data and fresh:
+            self.origin_ips_parsed = {}
+            if isinstance(data, dict):
+                for host, ip_list in data.items():
+                    if isinstance(ip_list, list):
+                        self.origin_ips_parsed[host] = self._parse_ip_list(ip_list, f"origin_ips/{host}")
+                    elif isinstance(ip_list, str):
+                        # Some APIs return a single IP as a string
+                        self.origin_ips_parsed[host] = self._parse_ip_list([ip_list], f"origin_ips/{host}")
+            total = sum(len(v) for v in self.origin_ips_parsed.values())
+            self.logger.info(f"Origin IPs refreshed: {len(self.origin_ips_parsed)} hosts, {total} IPs loaded")
 
     def is_ip_whitelisted(self, host, ip):
         """
         Check if an IP address is whitelisted for a given host.
+
+        Checks (in order):
+          1. /banjax_global_per_site_allowlist  — per-site + 'global' key
+          2. /global_allowlist                  — globally whitelisted IPs (bots, custom)
+          3. /origin_ips                        — per-site origin IPs
 
         Args:
             host: The hostname to check (e.g., 'kavkaz-uzel.eu')
@@ -272,29 +351,29 @@ class SettingsDeflectAPI(object):
             True if the IP is whitelisted for this host, False otherwise
         """
         self._refresh_ip_whitelist()
-
-        if not self.ip_whitelist_reader:
-            return False
-
-        # Check host-specific whitelist
-        host_networks = self.ip_whitelist_parsed.get(host, [])
-
-        # Also check global whitelist if present
-        global_networks = self.ip_whitelist_parsed.get('global', [])
-
-        all_networks = host_networks + global_networks
-
-        if not all_networks:
-            return False
+        self._refresh_global_allowlist()
+        self._refresh_origin_ips()
 
         try:
             ip_addr = ipaddress.ip_address(ip)
-            for network in all_networks:
-                if ip_addr in network:
-                    return True
         except ValueError as e:
             self.logger.warning(f"Invalid IP address: {ip!r} - {e}")
             return False
+
+        # 1. Per-site allowlist + 'global' key from /banjax_global_per_site_allowlist
+        for network in self.ip_whitelist_parsed.get(host, []) + self.ip_whitelist_parsed.get('global', []):
+            if ip_addr in network:
+                return True
+
+        # 2. Global allowlist — /global_allowlist
+        for network in self.global_allowlist_networks:
+            if ip_addr in network:
+                return True
+
+        # 3. Origin IPs — /origin_ips
+        for network in self.origin_ips_parsed.get(host, []):
+            if ip_addr in network:
+                return True
 
         return False
 
