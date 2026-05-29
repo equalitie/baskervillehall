@@ -9,6 +9,7 @@ from baskervillehall.storage_commands import StorageCommands
 from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
 from baskervillehall.baskervillehall_session import BaskervillehallSession
 from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
+from baskervillehall.baskervillehall_classifier_trainer import BaskervillehallClassifierTrainer
 from baskervillehall.storage_sessions import StorageSessions
 
 logger = None
@@ -119,6 +120,25 @@ def main():
             logger=logger
         )
         trainer.run()
+    elif args.pipeline == 'classifier_train':
+        params = {
+            'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
+            'group_id': os.environ.get('GROUP_ID_CLASSIFIER_TRAIN', 'classifier_train_pipeline'),
+            'num_sessions': int(os.environ.get('CLASSIFIER_NUM_SESSIONS', 50000)),
+            'min_dataset_size': int(os.environ.get('CLASSIFIER_MIN_DATASET_SIZE', 1000)),
+            'dataset_delay_from_now_in_minutes': int(os.environ.get('CLASSIFIER_DATASET_DELAY_MINUTES', 2)),
+            'model_ttl_in_minutes': int(os.environ.get('CLASSIFIER_MODEL_TTL_MINUTES', 240)),
+            'wait_time_minutes': int(os.environ.get('CLASSIFIER_WAIT_TIME_MINUTES', 5)),
+            'n_estimators': int(os.environ.get('CLASSIFIER_N_ESTIMATORS', 1000)),
+            's3_path': os.environ.get('S3_MODEL_STORAGE_PATH'),
+        }
+        trainer = BaskervillehallClassifierTrainer(
+            **params,
+            kafka_connection=kafka_connection,
+            s3_connection=s3_connection,
+            logger=logger
+        )
+        trainer.run()
     elif args.pipeline == 'predict':
         params = {
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
@@ -147,7 +167,7 @@ def main():
             'origin_ips_auth': os.environ.get('DEFLECT_CONFIG_AUTH_ORIGIN_IPS', None),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
-            'postgres_connection': None, #postgres_connection,
+            'postgres_connection': postgres_connection,
             'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
@@ -168,6 +188,11 @@ def main():
             'print_log_in_command': os.environ.get('PRINT_LOG_IN_COMMAND') == 'True',
             'use_baskerville_score': os.environ.get('USE_BASKERVILLE_SCORE', 'False') == 'True',
             'verbose_classifier': os.environ.get('VERBOSE_CLASSIFIER', 'False') == 'True',
+            'attack_response_mode': os.environ.get('ATTACK_RESPONSE_MODE', 'True') == 'True',
+            'attack_min_challenge_count': int(os.environ.get('ATTACK_MIN_CHALLENGE_COUNT', 50)),
+            'attack_min_spike_ratio': float(os.environ.get('ATTACK_MIN_SPIKE_RATIO', 4.0)),
+            'attack_aggressive_spike_ratio': float(os.environ.get('ATTACK_AGGRESSIVE_SPIKE_RATIO', 6.0)),
+            'attack_extreme_spike_ratio': float(os.environ.get('ATTACK_EXTREME_SPIKE_RATIO', 15.0)),
         }
 
         predictor = BaskervillehallPredictor(

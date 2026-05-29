@@ -708,11 +708,12 @@ class BaskervillehallSession(object):
                 host=session['host'], key=fingerprints)
 
         asn = session['asn']
+        asn_name = session.get('asn_name', '')
         vps_asn = self.asn_database2.is_vps_asn(asn)
         malicious_asn = self.asn_database2.is_malicious_asn(asn)
         vpn_asn = self.asn_database2.is_vpn_asn(asn)
         session_final['datacenter_asn'] = self.asn_database.is_datacenter_asn(
-            asn) or vps_asn or malicious_asn or vpn_asn
+            asn, asn_name) or vps_asn or malicious_asn or vpn_asn
         session_final['vpn_asn'] = vpn_asn
         session_final['malicious_asn'] = malicious_asn
         session_final['vps_asn'] = vps_asn
