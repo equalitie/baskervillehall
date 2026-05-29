@@ -48,6 +48,8 @@ class StorageSessions(StorageBase):
         asn_name = s.get('asn_name', '').replace("\'", "")
         ciphers = ','.join(s["ciphers"])
 
+        survey_country = s.get('survey_country', '') or ''
+
         return f'insert into {self.table} (\n'\
             f'hostname_id, host_name, ip, session_cookie, ip_cookie, '\
             f'primary_session, human, class, vpn, user_agent, country, continent, '\
@@ -55,7 +57,7 @@ class StorageSessions(StorageBase):
             f'hit_rate, num_user_agent, passed_challenge, bot_score,bot_score_top_factor,'\
             f'duration, session_start, session_end, requests, fingerprints,scraper_name,'\
             f'ua_score,verified_bot,num_languages,valid_browser_ciphers,cipher,ciphers,'\
-            f'asn,asn_name,is_scraper'\
+            f'asn,asn_name,is_scraper,survey_country'\
             f')\n'\
             f'values (\'{host_id}\', \'{host}\', \'{s["ip"]}\', \'{s["session_id"]}\',\n'\
             f'\'{s["ip"]}_{s["session_id"]}\',{int(s["primary_session"])},\n'\
@@ -70,5 +72,5 @@ class StorageSessions(StorageBase):
             f'{s.get("ua_score"):2f},{int(s["verified_bot"])},'\
             f'{int(s["num_languages"])},{int(s["valid_browser_ciphers"])},'\
             f'\'{s["cipher"]}\',\'{ciphers}\','\
-            f'{int(s["asn"])},\'{asn_name}\',{int(s["is_scraper"])}'\
+            f'{int(s["asn"])},\'{asn_name}\',{int(s["is_scraper"])},\'{survey_country}\''\
             f');'

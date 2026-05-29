@@ -167,7 +167,7 @@ def main():
             'origin_ips_auth': os.environ.get('DEFLECT_CONFIG_AUTH_ORIGIN_IPS', None),
             'bad_bot_challenge': os.environ.get('BAD_BOT_CHALLENGE') == 'True',
             'use_shapley': os.environ.get('USE_SHAPLEY') == 'True',
-            'postgres_connection': None, #postgres_connection,
+            'postgres_connection': postgres_connection,
             'postgres_refresh_period_in_seconds': int(os.environ.get('POSTGRES_REFRESH_PERIOD_IN_SECONDS')),
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
@@ -188,6 +188,11 @@ def main():
             'print_log_in_command': os.environ.get('PRINT_LOG_IN_COMMAND') == 'True',
             'use_baskerville_score': os.environ.get('USE_BASKERVILLE_SCORE', 'False') == 'True',
             'verbose_classifier': os.environ.get('VERBOSE_CLASSIFIER', 'False') == 'True',
+            'attack_response_mode': os.environ.get('ATTACK_RESPONSE_MODE', 'True') == 'True',
+            'attack_min_challenge_count': int(os.environ.get('ATTACK_MIN_CHALLENGE_COUNT', 50)),
+            'attack_min_spike_ratio': float(os.environ.get('ATTACK_MIN_SPIKE_RATIO', 4.0)),
+            'attack_aggressive_spike_ratio': float(os.environ.get('ATTACK_AGGRESSIVE_SPIKE_RATIO', 6.0)),
+            'attack_extreme_spike_ratio': float(os.environ.get('ATTACK_EXTREME_SPIKE_RATIO', 15.0)),
         }
 
         predictor = BaskervillehallPredictor(

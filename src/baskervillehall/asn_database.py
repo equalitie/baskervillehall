@@ -37,17 +37,45 @@ class ASNDatabase:
                 self.datacenter_asns.add(asn)
                 self.asn_entities[asn] = entity
 
-    def is_datacenter_asn(self, asn: Union[str, int]) -> bool:
+    # Keywords that strongly indicate a datacenter/hosting ASN when found in entity name.
+    # Intentionally excludes generic terms ('network', 'telecom', 'internet') that
+    # also appear in residential ISP names and would cause false positives.
+    DATACENTER_KEYWORDS = [
+        'hosting', 'hoster',
+        'colo', 'colocation',
+        'datacenter', 'data center', 'data centre',
+        'cloud', 'cloudhosting',
+        'vps', 'virtual private server',
+        'dedicated server', 'dedicated hosting',
+        'server farm',
+        'hetzner', 'ovh', 'digitalocean', 'linode', 'vultr',
+        'amazon', 'google cloud', 'microsoft azure', 'alibaba cloud',
+        'leaseweb', 'serverius', 'psychz', 'tzulo', 'nocser',
+    ]
+
+    def is_datacenter_asn(self, asn: Union[str, int], asn_name: str = '') -> bool:
         """
-        Check if an ASN is in the known datacenter/VPN ASN list or contains datacenter-related keywords.
+        Check if an ASN is a datacenter/hosting ASN by:
+        1. CSV list lookup (bad-asn-list.csv)
+        2. Keyword match against asn_name from GeoLite2 (primary — covers ASNs not in CSV)
+        3. Keyword match against entity from CSV (fallback)
         """
         normalized_asn = self._normalize_asn(asn)
         if normalized_asn in self.datacenter_asns:
             return True
-            
-        normalized_asn = normalized_asn.lower()
-        keywords = ['hosting', 'colo', 'cloud']
-        return any(keyword in normalized_asn for keyword in keywords)
+
+        # Check the live ASN name from GeoLite2 (most accurate, covers unlisted ASNs)
+        if asn_name:
+            name_lower = asn_name.lower()
+            if any(keyword in name_lower for keyword in self.DATACENTER_KEYWORDS):
+                return True
+
+        # Fallback: check entity name from CSV for ASNs that have it
+        entity = self.asn_entities.get(normalized_asn, '').lower()
+        if entity:
+            return any(keyword in entity for keyword in self.DATACENTER_KEYWORDS)
+
+        return False
 
     def get_entity(self, asn: Union[str, int]) -> Union[str, None]:
         """

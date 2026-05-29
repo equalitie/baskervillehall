@@ -55,6 +55,7 @@ CREATE TABLE public.sessions (
 	bot_score_top_factor text NULL,
 
 	scraper_name text,
+	survey_country text,
 	created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	CONSTRAINT sessions_key PRIMARY KEY (session_id)
 );

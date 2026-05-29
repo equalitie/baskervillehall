@@ -15,6 +15,8 @@ from collections import defaultdict
 from datetime import datetime
 from typing import List, Tuple, Dict, Any
 
+import psycopg2
+
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
@@ -190,6 +192,11 @@ class BaskervillehallPredictor(object):
             use_baskerville_score=True,
             verbose_classifier=False,
             hostname='localhost',
+            attack_min_challenge_count=50,
+            attack_min_spike_ratio=4.0,
+            attack_aggressive_spike_ratio=6.0,
+            attack_extreme_spike_ratio=15.0,
+            attack_response_mode=True,
     ):
         super().__init__()
 
@@ -296,6 +303,58 @@ class BaskervillehallPredictor(object):
             logger=self.logger,
         )
 
+        self._attack_response_mode: bool = attack_response_mode
+        self._attack_response_hosts: dict = {}  # host → spike_ratio
+        self._last_incident_check: float = 0.0
+        self._incident_check_interval: int = 30  # seconds
+        self._attack_min_challenge_count: int = attack_min_challenge_count
+        self._attack_min_spike_ratio: float = attack_min_spike_ratio
+        self._attack_aggressive_spike_ratio: float = attack_aggressive_spike_ratio
+        self._attack_extreme_spike_ratio: float = attack_extreme_spike_ratio
+
+    def _refresh_attack_response(self):
+        """Poll Postgres incidents table to discover hosts currently under DDoS attack."""
+        if not self._attack_response_mode:
+            return
+        if not self.postgres_connection:
+            return
+        now = time_module.time()
+        if now - self._last_incident_check < self._incident_check_interval:
+            return
+        self._last_incident_check = now
+        try:
+            conn = psycopg2.connect(**self.postgres_connection)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT host, MAX(spike_ratio) FROM incidents "
+                    "WHERE ended_at IS NULL "
+                    "AND started_at > NOW() - INTERVAL '30 minutes' "
+                    "AND challenge_count >= %s "
+                    "AND spike_ratio >= %s "
+                    "GROUP BY host",
+                    (self._attack_min_challenge_count, self._attack_min_spike_ratio),
+                )
+                rows = cur.fetchall()
+            conn.close()
+            new_hosts = {row[0]: float(row[1]) for row in rows}
+            if new_hosts != self._attack_response_hosts:
+                if new_hosts:
+                    for h, ratio in new_hosts.items():
+                        if ratio >= self._attack_extreme_spike_ratio:
+                            level = "EXTREME"
+                        elif ratio >= self._attack_aggressive_spike_ratio:
+                            level = "AGGRESSIVE"
+                        else:
+                            level = "MODERATE"
+                        self.logger.warning(
+                            f"AttackResponse mode [{level}] host={h} spike_ratio={ratio:.1f}"
+                        )
+                else:
+                    self.logger.info("AttackResponse mode: no active incidents")
+            self._attack_response_hosts = new_hosts
+        except Exception:
+            self.logger.exception("Failed to refresh incident state from Postgres (non-fatal)")
+
     def get_shapley_report(self, shap_value, feature_names):
         """Legacy method for compatibility."""
         shapley_report = []
@@ -370,7 +429,8 @@ class BaskervillehallPredictor(object):
             "num_requests": len(session.get("requests", [])),
             "user_agent": session.get("ua"),
             "human": session.get("human", ""),
-            "datacenter_asn": session.get("datacenter_asn", ""),
+            "datacenter_asn": session.get("datacenter_asn", False),
+            "asn_name": session.get("asn_name", ""),
             "session": session,
             "scraper_name": scraper_name,
             "threshold_ae": float(threshold_ae),
@@ -683,6 +743,7 @@ class BaskervillehallPredictor(object):
                 "user_agent",
                 "human",
                 "datacenter_asn",
+                "asn_name",
                 "scraper_name",
                 "threshold_ae",
                 "rate_limit_hits",
@@ -798,8 +859,52 @@ class BaskervillehallPredictor(object):
         if not session.get("primary_session", False):
             ip_with_sessions[session["ip"]] = True
 
-        # High baskerville_score
-        if human and baskerville_score < 30 and baskerville_score > 0:
+        spike_ratio = self._attack_response_hosts.get(host, 0.0)
+        attack_response = spike_ratio >= self._attack_min_spike_ratio          # 4.0+: classifier threshold 50
+        attack_response_aggressive = spike_ratio >= self._attack_aggressive_spike_ratio   # 6.0+: bad_bot → block
+        attack_response_extreme = spike_ratio >= self._attack_extreme_spike_ratio         # 15.0+: datacenter_asn → block
+
+        # Protect the site's primary target audience from being blocked during attack response.
+        # If session country matches survey_country, downgrade block_ip → challenge_ip.
+        survey_country = session.get("survey_country", "")
+        session_country = session.get("country", "")
+        protected_country = bool(
+            survey_country and session_country and session_country == survey_country
+        )
+
+        # DDoS attack mode EXTREME: block datacenter ASN immediately
+        if attack_response_extreme and session.get("datacenter_asn", False):
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                extreme_command = "challenge_ip" if protected_country else "block_ip"
+                self.logger.warning(
+                    f"datacenter_asn {extreme_command} [attack_response] ip={ip} host={host} "
+                    f"session_id={session_id} human={human}"
+                    + (" [survey_country protected]" if protected_country else "")
+                )
+                payload = self.create_command(
+                    command_name=extreme_command,
+                    session=session,
+                    meta="datacenter_asn [attack_response]",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    baskerville_score=1,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
+        # High baskerville_score — threshold raised to 50 under DDoS attack
+        classifier_threshold = 50 if attack_response else 30
+        if human and 0 < baskerville_score < classifier_threshold:
             if ip not in pending_session:
                 pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
             if session_id in pending_session[ip]:
@@ -816,7 +921,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="",
+                meta="classifier [attack_response]" if attack_response else "classifier",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -891,7 +996,7 @@ class BaskervillehallPredictor(object):
             if entropy == 0 and num_non_static > 1:
                 command = "block_ip"
 
-            if host == 'antijob.net':
+            if host == 'antijob.net' or (attack_response_aggressive and not protected_country):
                 command = "block_ip"
             # else:
             #     command = "rate_limit" if self.use_rate_limit else "challenge_ip"
@@ -906,7 +1011,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="Bad bot rule",
+                meta="Bad bot rule [attack_response]" if attack_response else "Bad bot rule",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -1019,15 +1124,7 @@ class BaskervillehallPredictor(object):
             duration = session.get("duration", 0)
             if primary_session:
                 if not human:
-                    command = "challenge_ip"
-                    # # Bot anomaly with no cookies: can't solve JS challenge, block immediately
-                    # if ip in pending_block_ip:
-                    #     return
-                    # pending_block_ip[ip] = True
-                    # if num_non_static > 3 and duration > 10 and ip not in ip_with_sessions.keys():
-                    #     command = "block_ip"
-                    # else:
-                    #     command = "challenge_ip"
+                    command = "block_ip" if (attack_response_aggressive and not protected_country) else "challenge_ip"
                 else:
                     if ip in pending_challenge_ip:
                         return
@@ -1039,13 +1136,10 @@ class BaskervillehallPredictor(object):
                 if session_id in pending_session[ip]:
                     return
                 pending_session[ip][session_id] = True
-                # if host == 'antijob.net':
-                #     command = 'block_ip'
-                # else:
                 if human:
                     command = "challenge_session"
                 else:
-                    command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+                    command = "block_ip" if (attack_response_aggressive and not protected_country) else ("rate_limit" if self.use_rate_limit else "challenge_ip")
 
             baskerville_score = baskerville_score if not human else 25
             self.logger.info(
@@ -1058,7 +1152,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="anomaly",
+                meta="anomaly [attack_response]" if attack_response else "anomaly",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -1218,6 +1312,8 @@ class BaskervillehallPredictor(object):
                 if (datetime.utcnow() - ts_assign_report).total_seconds() > 30:
                     log_partition_assignment(consumer, self.logger)
                     ts_assign_report = datetime.utcnow()
+
+                self._refresh_attack_response()
 
                 raw_messages = consumer.poll(timeout_ms=self.kafka_poll_timeout_ms, max_records=self.batch_size)
                 for topic_partition, messages in raw_messages.items():
