@@ -1,16 +1,7 @@
 import argparse
 import logging
-
 import os
 import json
-
-from baskervillehall.alert_challenge_rate import AlertChallengeRate
-from baskervillehall.storage_commands import StorageCommands
-from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
-from baskervillehall.baskervillehall_session import BaskervillehallSession
-from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
-from baskervillehall.baskervillehall_classifier_trainer import BaskervillehallClassifierTrainer
-from baskervillehall.storage_sessions import StorageSessions
 
 logger = None
 
@@ -85,6 +76,7 @@ def main():
     }
 
     if args.pipeline == 'train':
+        from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
         params = {
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'features': os.environ.get('FEATURES').split(','),
@@ -121,6 +113,7 @@ def main():
         )
         trainer.run()
     elif args.pipeline == 'classifier_train':
+        from baskervillehall.baskervillehall_classifier_trainer import BaskervillehallClassifierTrainer
         params = {
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'group_id': os.environ.get('GROUP_ID_CLASSIFIER_TRAIN', 'classifier_train_pipeline'),
@@ -140,6 +133,7 @@ def main():
         )
         trainer.run()
     elif args.pipeline == 'predict':
+        from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
         params = {
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'group_id': os.environ.get('GROUP_ID_PREDICTOR', 'predict_pipeline'),
@@ -205,6 +199,18 @@ def main():
             logger=logger
         )
         predictor.run()
+    elif args.pipeline == 'respond':
+        from baskervillehall.incident_first_responder import IncidentFirstResponder
+        IncidentFirstResponder(
+            postgres_connection=postgres_connection,
+            ollama_url=os.environ.get('OLLAMA_URL', 'http://localhost:11434'),
+            llm_model=os.environ.get('LLM_MODEL', 'qwen2.5:7b'),
+            check_interval=int(os.environ.get('FIRST_RESPONDER_CHECK_INTERVAL', '30')),
+            min_attack_pct=float(os.environ.get('FIRST_RESPONDER_MIN_ATTACK_PCT', '50.0')),
+            max_normal_pct=float(os.environ.get('FIRST_RESPONDER_MAX_NORMAL_PCT', '20.0')),
+            ttl_minutes=int(os.environ.get('FIRST_RESPONDER_TTL_MINUTES', '30')),
+            logger=logger,
+        ).run()
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 

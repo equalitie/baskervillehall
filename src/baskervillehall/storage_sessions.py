@@ -1,4 +1,25 @@
+import time as _time
+
+import psycopg2
+
 from baskervillehall.storage_base import StorageBase
+
+_HOST_COUNTRY_STATS_REFRESH_SQL = """
+INSERT INTO host_country_stats (host, country, pct, updated_at)
+SELECT host_name,
+       country,
+       ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY host_name), 1),
+       NOW()
+FROM sessions
+WHERE session_end > NOW() - INTERVAL '3 days'
+  AND country != ''
+GROUP BY host_name, country
+ON CONFLICT (host, country) DO UPDATE
+    SET pct = EXCLUDED.pct,
+        updated_at = EXCLUDED.updated_at;
+
+DELETE FROM host_country_stats WHERE updated_at < NOW() - INTERVAL '4 hours';
+"""
 
 
 class StorageSessions(StorageBase):
@@ -29,6 +50,27 @@ class StorageSessions(StorageBase):
             autocreate_hostname_id=autocreate_hostname_id
         )
         self.num_requests = num_requests
+        self._country_stats_refresh_ts = 0  # epoch; 0 → refresh immediately on first loop
+
+    def periodic_tasks(self):
+        now = _time.monotonic()
+        if now - self._country_stats_refresh_ts < 3600:
+            return
+        self._country_stats_refresh_ts = now
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.postgres_connection)
+            with conn.cursor() as cur:
+                cur.execute(_HOST_COUNTRY_STATS_REFRESH_SQL)
+            conn.commit()
+            self.logger.info("host_country_stats refreshed")
+        except psycopg2.DatabaseError as e:
+            self.logger.error(f"host_country_stats refresh failed: {e}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                conn.close()
 
     def get_sql(self, record):
         s = record

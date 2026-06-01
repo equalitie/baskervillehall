@@ -305,6 +305,7 @@ class BaskervillehallPredictor(object):
 
         self._attack_response_mode: bool = attack_response_mode
         self._attack_response_hosts: dict = {}  # host → spike_ratio
+        self._first_responder_actions: dict = {}  # host → {'action': str, 'target': set[str]}
         self._last_incident_check: float = 0.0
         self._incident_check_interval: int = 30  # seconds
         self._attack_min_challenge_count: int = attack_min_challenge_count
@@ -335,7 +336,6 @@ class BaskervillehallPredictor(object):
                     (self._attack_min_challenge_count, self._attack_min_spike_ratio),
                 )
                 rows = cur.fetchall()
-            conn.close()
             new_hosts = {row[0]: float(row[1]) for row in rows}
             if new_hosts != self._attack_response_hosts:
                 if new_hosts:
@@ -352,6 +352,38 @@ class BaskervillehallPredictor(object):
                 else:
                     self.logger.info("AttackResponse mode: no active incidents")
             self._attack_response_hosts = new_hosts
+
+            # Poll first_responder_actions for active LLM-issued blocks
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT host, action, target FROM first_responder_actions "
+                    "WHERE expires_at > NOW() "
+                    "ORDER BY created_at DESC"
+                )
+                action_rows = cur.fetchall()
+                cur.execute(
+                    "UPDATE first_responder_actions SET applied = TRUE "
+                    "WHERE expires_at > NOW() AND applied = FALSE"
+                )
+            conn.close()
+
+            new_responder = {}
+            for host, action, target_str in action_rows:
+                if host not in new_responder:  # keep most recent per host
+                    targets = {t.strip() for t in target_str.split(',') if t.strip()}
+                    new_responder[host] = {'action': action, 'target': targets}
+
+            if new_responder != self._first_responder_actions:
+                if new_responder:
+                    for h, ra in new_responder.items():
+                        self.logger.warning(
+                            f"FirstResponder action active: host={h} "
+                            f"action={ra['action']} target={ra['target']}"
+                        )
+                else:
+                    self.logger.info("FirstResponder: no active actions")
+            self._first_responder_actions = new_responder
+
         except Exception:
             self.logger.exception("Failed to refresh incident state from Postgres (non-fatal)")
 
@@ -859,18 +891,61 @@ class BaskervillehallPredictor(object):
         if not session.get("primary_session", False):
             ip_with_sessions[session["ip"]] = True
 
-        spike_ratio = self._attack_response_hosts.get(host, 0.0)
-        attack_response = spike_ratio >= self._attack_min_spike_ratio          # 4.0+: classifier threshold 50
-        attack_response_aggressive = spike_ratio >= self._attack_aggressive_spike_ratio   # 6.0+: bad_bot → block
-        attack_response_extreme = spike_ratio >= self._attack_extreme_spike_ratio         # 15.0+: datacenter_asn → block
-
-        # Protect the site's primary target audience from being blocked during attack response.
-        # If session country matches survey_country, downgrade block_ip → challenge_ip.
+        # Survey country protection — computed early, used in both responder and attack response blocks
         survey_country = session.get("survey_country", "")
         session_country = session.get("country", "")
         protected_country = bool(
             survey_country and session_country and session_country == survey_country
         )
+
+        # Responder actions: LLM-issued targeted blocks by country or ASN
+        responder = self._first_responder_actions.get(host)
+        if responder:
+            ra_action = responder['action']
+            ra_target = responder['target']
+            ra_hit = False
+            ra_meta = ''
+            if ra_action == 'block_country' and session_country and session_country in ra_target:
+                ra_hit = True
+                ra_meta = 'first_responder [block_country] [block_ip]'
+            elif ra_action == 'block_asn':
+                asn_name = session.get('asn_name', '')
+                if asn_name and asn_name in ra_target:
+                    ra_hit = True
+                    ra_meta = 'first_responder [block_asn] [block_ip]'
+
+            if ra_hit and not protected_country:
+                if ip not in pending_block_ip:
+                    pending_block_ip[ip] = True
+                    self.logger.warning(
+                        f"{ra_meta} block_ip ip={ip} host={host} "
+                        f"country={session_country} asn={session.get('asn_name', '')} "
+                        f"session_id={session_id}"
+                    )
+                    payload = self.create_command(
+                        command_name="block_ip",
+                        session=session,
+                        meta=ra_meta,
+                        prediction_if=prediction_if,
+                        score_if=score_if,
+                        shapley_if=shapley_if,
+                        shapley_feature_if=shapley_feature_if,
+                        prediction_ae=prediction_ae,
+                        score_ae=score_ae,
+                        shapley_ae=shapley_ae,
+                        shapley_feature_ae=shapley_feature_ae,
+                        difficulty=0,
+                        scraper_name=scraper_name,
+                        threshold_ae=threshold_ae,
+                        baskerville_score=1,
+                    )
+                    self.send(producer, producer_output, payload, key=host, dnet=dnet)
+                return
+
+        spike_ratio = self._attack_response_hosts.get(host, 0.0)
+        attack_response = spike_ratio >= self._attack_min_spike_ratio          # 4.0+: classifier threshold 50
+        attack_response_aggressive = spike_ratio >= self._attack_aggressive_spike_ratio   # 6.0+: bad_bot → block
+        attack_response_extreme = spike_ratio >= self._attack_extreme_spike_ratio         # 15.0+: datacenter_asn → block
 
         # DDoS attack mode EXTREME: block datacenter ASN immediately
         if attack_response_extreme and session.get("datacenter_asn", False):
@@ -885,7 +960,7 @@ class BaskervillehallPredictor(object):
                 payload = self.create_command(
                     command_name=extreme_command,
                     session=session,
-                    meta="datacenter_asn [attack_response]",
+                    meta=f"datacenter_asn [attack_response] [{extreme_command}]",
                     prediction_if=prediction_if,
                     score_if=score_if,
                     shapley_if=shapley_if,
@@ -921,7 +996,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="classifier [attack_response]" if attack_response else "classifier",
+                meta="classifier [attack_response] [challenge_session]" if attack_response else "classifier [challenge_session]",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -965,7 +1040,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="high_bot_score",
+                meta="high_bot_score [block_ip]",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -1011,7 +1086,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="Bad bot rule [attack_response]" if attack_response else "Bad bot rule",
+                meta=f"Bad bot rule{' [attack_response]' if attack_response else ''} [{command}]",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,
@@ -1042,6 +1117,7 @@ class BaskervillehallPredictor(object):
                 return
             pending_challenge_ip[ip] = True
             command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+            meta = f"{meta} [{command}]"
 
             baskerville_score = 20
             self.logger.info(
@@ -1099,7 +1175,7 @@ class BaskervillehallPredictor(object):
                 payload = self.create_command(
                     command_name="challenge_ip",
                     session=session,
-                    meta="Too many sessions.",
+                    meta="Too many sessions. [challenge_ip]",
                     prediction_if=prediction_if,
                     score_if=score_if,
                     shapley_if=shapley_if,
@@ -1152,7 +1228,7 @@ class BaskervillehallPredictor(object):
             payload = self.create_command(
                 command_name=command,
                 session=session,
-                meta="anomaly [attack_response]" if attack_response else "anomaly",
+                meta=f"anomaly{' [attack_response]' if attack_response else ''} [{command}]",
                 prediction_if=prediction_if,
                 score_if=score_if,
                 shapley_if=shapley_if,

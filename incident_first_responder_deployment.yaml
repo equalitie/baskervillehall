@@ -1,0 +1,47 @@
+---
+apiVersion: "apps/v1"
+kind: "Deployment"
+metadata:
+  name: "incident-first-responder"
+  namespace: "default"
+  labels:
+    app: "incident-first-responder"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "incident-first-responder"
+  template:
+    metadata:
+      labels:
+        app: "incident-first-responder"
+    spec:
+      restartPolicy: Always
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nodepool
+                    operator: In
+                    values:
+                      - postgres
+      containers:
+      - name: "incident-first-responder"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        command:
+          - python
+        args:
+          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - respond
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "2Gi"
+          limits:
+            cpu: "500m"
+            memory: "4Gi"

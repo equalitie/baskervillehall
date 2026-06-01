@@ -111,6 +111,10 @@ class StorageBase(object):
                 if conn:
                     conn.close()
 
+    def periodic_tasks(self):
+        """Called on every poll loop iteration. Override in subclasses for periodic work."""
+        pass
+
     def get_sql(self, record):
         return None
 
@@ -161,6 +165,7 @@ class StorageBase(object):
         ts_lag_report = datetime.now()
         while True:
             # self.delete_old_records()
+            self.periodic_tasks()
             raw_messages = consumer.poll(timeout_ms=1000, max_records=self.batch_size)
             for topic_partition, messages in raw_messages.items():
                 records = []
