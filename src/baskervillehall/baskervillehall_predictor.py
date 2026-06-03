@@ -365,12 +365,13 @@ class BaskervillehallPredictor(object):
                     "UPDATE first_responder_actions SET applied = TRUE "
                     "WHERE expires_at > NOW() AND applied = FALSE"
                 )
+            conn.commit()
             conn.close()
 
             new_responder = {}
             for host, action, target_str in action_rows:
                 if host not in new_responder:  # keep most recent per host
-                    targets = {t.strip() for t in target_str.split(',') if t.strip()}
+                    targets = {t.strip() for t in target_str.split('|') if t.strip()}
                     new_responder[host] = {'action': action, 'target': targets}
 
             if new_responder != self._first_responder_actions:

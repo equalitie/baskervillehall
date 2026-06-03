@@ -52,6 +52,10 @@ Decision rules (apply in order):
 6. Use raise_threshold as a fallback when the attack is diffuse across many sources.
 7. Set confidence=high only when a single pattern dominates (>70% of attack).
 8. ttl_minutes should be 30 unless there is a strong reason to differ.
+9. NEVER block these ASNs regardless of attack share — they are critical internet infrastructure:
+   Google LLC, Cloudflare Inc., Amazon.com Inc., Microsoft Corporation, Akamai Technologies,
+   Fastly Inc., Meta Platforms Inc., Apple Inc., Twitter Inc., Wikimedia Foundation.
+   If these dominate the attack, use raise_threshold or monitor_only instead.
 """
 
 
@@ -91,15 +95,20 @@ class IncidentFirstResponder:
         self.logger.info("first_responder_actions table ready")
 
     def _get_unprocessed_incidents(self, conn):
-        """Return incidents that are active and not yet processed by the responder."""
+        """Return incidents to process:
+        - Active (ended_at IS NULL): always re-analyze every cycle to pick up fresh stats.
+        - Recently closed (ended_at within 60 min): process once if not yet processed.
+        """
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, host, challenge_count, baseline_avg, spike_ratio,
-                       started_at, survey_country, botnet_info
+                       started_at, survey_country, botnet_info, ended_at
                 FROM incidents
-                WHERE first_responder_processed = FALSE
-                  AND ended_at IS NULL
-                  AND started_at > NOW() - INTERVAL '60 minutes'
+                WHERE started_at > NOW() - INTERVAL '24 hours'
+                  AND (
+                      ended_at IS NULL
+                      OR (first_responder_processed = FALSE AND ended_at > NOW() - INTERVAL '60 minutes')
+                  )
                 ORDER BY started_at DESC
             """)
             rows = cur.fetchall()
@@ -113,6 +122,7 @@ class IncidentFirstResponder:
                 'started_at': r[5],
                 'survey_country': r[6] or '',
                 'botnet_info': r[7] or '',
+                'ended_at': r[8],
             }
             for r in rows
         ]
@@ -170,7 +180,7 @@ class IncidentFirstResponder:
     def _save_action(self, conn, incident_id, host, rec):
         ttl = rec.get('ttl_minutes', self.ttl_minutes)
         target_list = rec.get('target', [])
-        target_str = ','.join(str(t) for t in target_list)
+        target_str = '|'.join(str(t) for t in target_list)
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO first_responder_actions
@@ -301,6 +311,19 @@ class IncidentFirstResponder:
         incident_id = incident['id']
         host = incident['host']
 
+        # For active incidents: re-analyze only every 10 minutes
+        if incident['ended_at'] is None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(created_at) FROM first_responder_actions WHERE incident_id = %s",
+                    (incident_id,)
+                )
+                last_action_at = cur.fetchone()[0]
+            if last_action_at is not None:
+                age_minutes = (datetime.now(timezone.utc) - last_action_at).total_seconds() / 60
+                if age_minutes < 10:
+                    return
+
         self.logger.info(
             f"[FIRST_RESPONDER] Analyzing incident_id={incident_id} host={host} "
             f"spike_ratio={incident['spike_ratio']:.1f}x"
@@ -311,10 +334,17 @@ class IncidentFirstResponder:
         normal_traffic = self._get_normal_traffic(conn, host)
 
         if not country_stats and not asn_stats:
-            self.logger.info(
-                f"[FIRST_RESPONDER] incident_id={incident_id}: no stats yet, skipping"
-            )
-            return  # Don't mark processed — retry next cycle when data arrives
+            age_minutes = (datetime.now(timezone.utc) - incident['started_at']).total_seconds() / 60
+            if age_minutes > 30:
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] incident_id={incident_id}: no stats after {age_minutes:.0f}min, giving up"
+                )
+                self._mark_processed(conn, incident_id)
+            else:
+                self.logger.info(
+                    f"[FIRST_RESPONDER] incident_id={incident_id}: no stats yet, skipping"
+                )
+            return
 
         prompt = self._build_prompt(incident, country_stats, asn_stats, normal_traffic)
         self.logger.info(f"[FIRST_RESPONDER] Calling LLM for incident_id={incident_id}")
@@ -335,7 +365,9 @@ class IncidentFirstResponder:
             return
 
         self._save_action(conn, incident_id, host, rec)
-        self._mark_processed(conn, incident_id)
+        # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
+        if incident.get('ended_at') is not None:
+            self._mark_processed(conn, incident_id)
 
     def run(self):
         self.logger.info(

@@ -20,6 +20,7 @@ from baskervillehall import baskerville_rules
 from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.ai_bot_verificator import AiBotVerificator
 from baskervillehall.country_blocker import CountryBlocker
+from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -262,6 +263,17 @@ class BaskervillehallSession(object):
             topic_commands=topic_commands or 'banjax_command_topic',
             dnet_partition_map=self.dnet_partition_map,
             deflect_api_setting=self.settings,
+            logger=self.logger,
+        )
+
+        self.first_responder_blocker = FirstResponderBlocker(
+            postgres_connection=postgres_connection,
+            kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
+            topic_commands=topic_commands or 'banjax_command_topic',
+            dnet_partition_map=self.dnet_partition_map,
+            check_interval=60,
+            block_ttl=300,
             logger=self.logger,
         )
 
@@ -1099,6 +1111,7 @@ class BaskervillehallSession(object):
                 # Refresh bot IP ranges once per poll batch (TTL-gated, cheap when within interval)
                 self.bot_verificator.refresh()
                 self.ai_bot_verificator.refresh()
+                self.first_responder_blocker.refresh()
 
                 for topic_partition, messages in raw_messages.items():
                     if (datetime.utcnow() - ts_lag_report).total_seconds() > 5:
@@ -1225,6 +1238,11 @@ class BaskervillehallSession(object):
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
 
                         if self.country_blocker.process(host, ip, country, dnet):
+                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                            self.profile_stats['message_count'] += 1
+                            continue
+
+                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country, dnet):
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                             self.profile_stats['message_count'] += 1
                             continue
