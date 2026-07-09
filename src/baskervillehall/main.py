@@ -209,6 +209,14 @@ def main():
             min_attack_pct=float(os.environ.get('FIRST_RESPONDER_MIN_ATTACK_PCT', '50.0')),
             max_normal_pct=float(os.environ.get('FIRST_RESPONDER_MAX_NORMAL_PCT', '20.0')),
             ttl_minutes=int(os.environ.get('FIRST_RESPONDER_TTL_MINUTES', '30')),
+            min_spike_ratio=float(os.environ.get('FIRST_RESPONDER_MIN_SPIKE_RATIO', '3.0')),
+            min_challenge_count=int(os.environ.get('FIRST_RESPONDER_MIN_CHALLENGE_COUNT', '50')),
+            kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
+            topic_commands=os.environ.get('TOPIC_COMMANDS', 'banjax_command_topic'),
+            dnet_partition_map=json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
+            fingerprint_min_pct=float(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MIN_PCT', '40.0')),
+            fingerprint_max_ips=int(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MAX_IPS', '500')),
             logger=logger,
         ).run()
     else:

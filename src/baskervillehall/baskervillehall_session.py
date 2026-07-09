@@ -1242,7 +1242,7 @@ class BaskervillehallSession(object):
                             self.profile_stats['message_count'] += 1
                             continue
 
-                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country, dnet):
+                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country, dnet, ua):
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                             self.profile_stats['message_count'] += 1
                             continue

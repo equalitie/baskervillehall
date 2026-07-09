@@ -1,6 +1,18 @@
 import hashlib
 
 
+def _extract_tls_version(cipher):
+    """Infer TLS version from cipher name when no explicit field is available."""
+    if not cipher:
+        return 'unknown'
+    c = str(cipher).upper()
+    if c.startswith('TLS_') or c.startswith('AEAD-'):
+        return 'tls13'
+    if 'ECDHE' in c or 'DHE' in c:
+        return 'tls12'
+    return 'legacy'
+
+
 class SessionFingerprints(object):
 
     def __init__(self):
@@ -9,53 +21,40 @@ class SessionFingerprints(object):
     @staticmethod
     def get_fingerprints(session):
         """
-        Collects specified parameters from a session and generates a hash.
+        Generates a fingerprint hash from device/tool characteristics.
+
+        Captures: TLS cipher suite list (ordered — JA3-like), negotiated cipher,
+        inferred TLS version, User-Agent, and Accept-Language.
+
+        Country is intentionally excluded: it is a network property (IP geolocation),
+        not a device characteristic. Including it would produce different hashes for
+        the same bot tool routing through different countries.
+
+        Cipher suite order is preserved (not sorted): the order in which a TLS client
+        advertises ciphers is a strong fingerprint signal and differs between
+        implementations (Chrome, curl, python-requests, etc.).
         """
-        params_to_hash = [
-            session.get('ua'),  # User-Agent
-            session.get('country'),
-            session.get('cipher'),  # Specific cipher used for the connection
-            session.get('ciphers'),  # List of ciphers supported by the client
-            session.get('accept_language'),
+        cipher = session.get('cipher')
+        ciphers = session.get('ciphers') or []
+
+        # accept_language order is not meaningful — sort for stability
+        accept_language = sorted(session.get('accept_language') or [])
+
+        params = [
+            session.get('ua'),
+            cipher,
+            # ciphers joined in original order (not sorted) — order is the fingerprint
+            ','.join(str(c) for c in ciphers),
+            '|'.join(accept_language),
+            _extract_tls_version(cipher),
         ]
 
-        # Generate the hash from the collected parameters
-        fingerprint_hash = SessionFingerprints.generate_hash(params_to_hash)
-        return fingerprint_hash
-
-    @staticmethod
-    def generate_hash(params_list):
-        """
-        Generates a SHA256 hash from a list of parameters.
-        """
-        # Convert all parameters to strings and handle None values
-        # Join them with a consistent separator to avoid ambiguities
-        # (e.g., ['ab', 'c'] vs ['a', 'bc'])
-        stringified_params = []
-        for p in params_list:
-            if p is None:
-                stringified_params.append("None")  # Or "" if you prefer
-            elif isinstance(p, list) or isinstance(p, tuple) or isinstance(p, set):
-                # Sort lists/tuples/sets to ensure consistent order for hashing
-                stringified_params.append(",".join(sorted([str(item) for item in p])))
-            else:
-                stringified_params.append(str(p))
-
-        combined_string = "|".join(stringified_params)
-
-        # Create a new SHA256 hash object
-        sha256_hash = hashlib.sha256()
-
-        # Update the hash object with the bytes of the combined string
-        sha256_hash.update(combined_string.encode('utf-8'))
-
-        # Get the hexadecimal representation of the hash
-        return sha256_hash.hexdigest()[:16]
+        combined = '||'.join(p if p is not None else 'None' for p in params)
+        return hashlib.sha256(combined.encode('utf-8')).hexdigest()[:16]
 
 
-# Example Usage (assuming you have a session dictionary):
+# Example Usage:
 if __name__ == '__main__':
-    # Example session data
     session_data_1 = {
         'ua': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36',
         'country': 'US',
@@ -64,16 +63,26 @@ if __name__ == '__main__':
         'accept_language': ['en-US', 'en;q=0.9']
     }
 
+    # Same device, different country — must be same fingerprint
     session_data_2 = {
+        'ua': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36',
+        'country': 'DE',
+        'cipher': 'AEAD-AES128-GCM-SHA256',
+        'ciphers': ['AEAD-AES128-GCM-SHA256', 'AEAD-CHACHA20-POLY1305-SHA256', 'AEAD-AES256-GCM-SHA384'],
+        'accept_language': ['en-US', 'en;q=0.9']
+    }
+
+    # Same ciphers, different order — must be different fingerprint (different TLS implementation)
+    session_data_3 = {
         'ua': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36',
         'country': 'US',
         'cipher': 'AEAD-AES128-GCM-SHA256',
         'ciphers': ['AEAD-AES256-GCM-SHA384', 'AEAD-CHACHA20-POLY1305-SHA256', 'AEAD-AES128-GCM-SHA256'],
-        # Order changed
         'accept_language': ['en-US', 'en;q=0.9']
     }
 
-    session_data_3 = {
+    # Different browser, TLS 1.3
+    session_data_4 = {
         'ua': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:88.0) Gecko/20100101 Firefox/88.0',
         'country': 'CA',
         'cipher': 'TLS_AES_256_GCM_SHA384',
@@ -81,24 +90,29 @@ if __name__ == '__main__':
         'accept_language': ['en-CA', 'en;q=0.8']
     }
 
-    session_data_4 = {  # Missing a parameter
+    # Missing cipher
+    session_data_5 = {
         'ua': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:88.0) Gecko/20100101 Firefox/88.0',
         'country': 'CA',
-        'cipher': None,  # Cipher is None
+        'cipher': None,
         'ciphers': ['TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256'],
         'accept_language': ['en-CA', 'en;q=0.8']
     }
 
-    fingerprint1 = SessionFingerprints.get_fingerprints(session_data_1)
-    fingerprint2 = SessionFingerprints.get_fingerprints(session_data_2)  # Should be same as 1 due to sorting
-    fingerprint3 = SessionFingerprints.get_fingerprints(session_data_3)
-    fingerprint4 = SessionFingerprints.get_fingerprints(session_data_4)
+    fp1 = SessionFingerprints.get_fingerprints(session_data_1)
+    fp2 = SessionFingerprints.get_fingerprints(session_data_2)
+    fp3 = SessionFingerprints.get_fingerprints(session_data_3)
+    fp4 = SessionFingerprints.get_fingerprints(session_data_4)
+    fp5 = SessionFingerprints.get_fingerprints(session_data_5)
 
-    print(f"Fingerprint 1: {fingerprint1}")
-    print(f"Fingerprint 2: {fingerprint2}")
-    print(f"Fingerprint 3: {fingerprint3}")
-    print(f"Fingerprint 4: {fingerprint4}")
+    print(f"Fingerprint 1 (Chrome/US):           {fp1}")
+    print(f"Fingerprint 2 (Chrome/DE same tool): {fp2}")
+    print(f"Fingerprint 3 (Chrome diff order):   {fp3}")
+    print(f"Fingerprint 4 (Firefox TLS1.3):      {fp4}")
+    print(f"Fingerprint 5 (Firefox no cipher):   {fp5}")
 
-    assert fingerprint1 == fingerprint2, "Fingerprints for session 1 and 2 should be the same due to sorting of 'ciphers' list."
-    assert fingerprint1 != fingerprint3, "Fingerprints for session 1 and 3 should be different."
-    assert fingerprint3 != fingerprint4, "Fingerprints for session 3 and 4 should be different."
+    assert fp1 == fp2, "Same tool, different country must produce same fingerprint"
+    assert fp1 != fp3, "Different cipher order must produce different fingerprint"
+    assert fp1 != fp4, "Different browser must produce different fingerprint"
+    assert fp4 != fp5, "Missing cipher must produce different fingerprint"
+    print("\nAll assertions passed.")

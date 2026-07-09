@@ -6,6 +6,35 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 import requests
+from kafka import KafkaProducer
+
+# Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
+PROTECTED_ASNS = {
+    "Google LLC",
+    "Cloudflare, Inc.",
+    "Cloudflare Inc.",
+    "Amazon.com, Inc.",
+    "Amazon Technologies Inc.",
+    "Microsoft Corporation",
+    "Akamai Technologies",
+    "Akamai Connected Cloud",
+    "Fastly, Inc.",
+    "Fastly Inc.",
+    "Meta Platforms, Inc.",
+    "Apple Inc.",
+    "Twitter Inc.",
+    "Oracle Corporation",
+    "Wikimedia Foundation",
+    "AT&T Enterprises, LLC",
+    "Charter Communications Inc",
+    "Charter Communications LLC",
+    "Comcast Cable Communications, LLC",
+    "Verizon Business",
+    "Deutsche Telekom AG",
+    "Space Exploration Technologies Corporation",
+    "Space Exploration Technologies Corp.",
+    "Space Exploration Technologies Corporati",
+}
 
 CREATE_FIRST_RESPONDER_TABLES_SQL = """
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS first_responder_processed BOOLEAN DEFAULT FALSE;
@@ -34,8 +63,8 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "raise_threshold" | "monitor_only",
-  "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | [],
+  "action": "block_country" | "block_asn" | "block_ua" | "raise_threshold" | "monitor_only",
+  "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 30,
   "reasoning": "brief explanation"
@@ -46,16 +75,55 @@ Decision rules (apply in order):
 2. Use block_asn if datacenter ASNs account for the majority of the attack.
 3. Use block_country if a country accounts for >{min_attack_pct}% of the attack AND
    represents <{max_normal_pct}% of the site's normal traffic.
-4. Never include survey_country in the block target — it is the site's primary audience.
+   Never include more than 3 countries in a single block_country action.
+   If more than 3 countries would need to be blocked to cover the attack, use raise_threshold instead —
+   blocking many countries causes excessive collateral damage and is a sign of a diffuse attack.
+4. *** ABSOLUTE HARD RULE — NO EXCEPTIONS WHATSOEVER ***
+   NEVER include survey_country in "target", under ANY circumstances.
+   survey_country is the site's PRIMARY AUDIENCE — the real users you are protecting.
+   If the attack appears to come from survey_country, it means attackers are SPOOFING or
+   ROUTING THROUGH that country, not that the country should be blocked.
+   Blocking survey_country would take the site offline for its intended users — this is
+   WORSE than the attack itself. If survey_country dominates the attack, use raise_threshold
+   or monitor_only instead. There are NO exceptions to this rule.
 5. Use monitor_only if blocking would affect >{max_normal_pct}% of normal traffic
    (collateral damage too high).
 6. Use raise_threshold as a fallback when the attack is diffuse across many sources.
 7. Set confidence=high only when a single pattern dominates (>70% of attack).
 8. ttl_minutes should be 30 unless there is a strong reason to differ.
-9. NEVER block these ASNs regardless of attack share — they are critical internet infrastructure:
-   Google LLC, Cloudflare Inc., Amazon.com Inc., Microsoft Corporation, Akamai Technologies,
-   Fastly Inc., Meta Platforms Inc., Apple Inc., Twitter Inc., Wikimedia Foundation.
-   If these dominate the attack, use raise_threshold or monitor_only instead.
+9. *** ABSOLUTE HARD RULE — NO EXCEPTIONS WHATSOEVER ***
+   NEVER put any of the following ASNs in "target", under any circumstances,
+   regardless of their attack share percentage:
+     "Google LLC", "Cloudflare, Inc.", "Cloudflare Inc.", "Amazon.com, Inc.",
+     "Amazon Technologies Inc.", "Microsoft Corporation", "Akamai Technologies",
+     "Akamai Connected Cloud", "Fastly, Inc.", "Fastly Inc.",
+     "Meta Platforms, Inc.", "Apple Inc.", "Twitter Inc.", "Oracle Corporation",
+     "Wikimedia Foundation", "AT&T Enterprises, LLC", "Charter Communications Inc",
+     "Charter Communications LLC", "Comcast Cable Communications, LLC",
+     "Verizon Business", "Deutsche Telekom AG",
+     "Space Exploration Technologies Corporation", "Space Exploration Technologies Corp.".
+   These are major internet infrastructure providers. Their IPs appear in attack
+   traffic because attackers ROUTE THROUGH them, not because they are attackers.
+   Blocking them would break the internet for millions of legitimate users.
+   If these ASNs dominate the attack and no other clear target exists,
+   use raise_threshold or monitor_only — NEVER block them.
+10. If the attack is spread across more than 10 distinct ASNs with no single ASN exceeding
+    {min_attack_pct}% of the attack, use raise_threshold — targeted blocking is ineffective
+    and causes excessive collateral damage. Do NOT switch to block_country as a workaround
+    when ASN blocking fails — a diffuse ASN attack is also a diffuse country attack.
+11. For block_asn: only include ASNs that appear in the attack AND have <{max_normal_pct}%
+    in the normal traffic baseline. If an ASN has significant normal traffic, skip it.
+    Never include more than 3 ASNs in a single block_asn action.
+12. Use block_ua when one or more User Agents account for a large share of the attack AND
+    have <1% in normal traffic. Put the exact UA strings in "target". This works for any UA —
+    scripted (python-requests, curl) or disguised (fake browser strings unique to the attack).
+    Set confidence=high if the top UA alone exceeds {min_attack_pct}% of attack traffic.
+13. If the attack concentrates on URLs that are NOT in the site's normal top URLs (0% normal
+    traffic) — especially /wp-admin/, /xmlrpc.php, /api/ endpoints — this strengthens
+    confidence in the block recommendation.
+14. URL and UA data is from sessions only (static-file-only bots are not included).
+    Do not use absence of URL/UA data as a reason to downgrade confidence if ASN/country
+    data is already conclusive.
 """
 
 
@@ -69,6 +137,14 @@ class IncidentFirstResponder:
             min_attack_pct=50.0,
             max_normal_pct=20.0,
             ttl_minutes=30,
+            min_spike_ratio=3.0,
+            min_challenge_count=50,
+            kafka_connection=None,
+            kafka_connection_output=None,
+            topic_commands='banjax_command_topic',
+            dnet_partition_map=None,
+            fingerprint_min_pct=40.0,
+            fingerprint_max_ips=500,
             logger=None,
     ):
         self.postgres_connection = postgres_connection or {}
@@ -78,7 +154,15 @@ class IncidentFirstResponder:
         self.min_attack_pct = min_attack_pct
         self.max_normal_pct = max_normal_pct
         self.ttl_minutes = ttl_minutes
+        self.min_spike_ratio = min_spike_ratio
+        self.min_challenge_count = min_challenge_count
+        self.topic_commands = topic_commands
+        self.dnet_partition_map = dnet_partition_map or {}
+        self.fingerprint_min_pct = fingerprint_min_pct
+        self.fingerprint_max_ips = fingerprint_max_ips
         self.logger = logger or logging.getLogger(self.__class__.__name__)
+        self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
+        self._producer_output = KafkaProducer(**kafka_connection_output) if kafka_connection_output else None
 
     # ------------------------------------------------------------------
     # Postgres helpers
@@ -102,7 +186,8 @@ class IncidentFirstResponder:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, host, challenge_count, baseline_avg, spike_ratio,
-                       started_at, survey_country, botnet_info, ended_at
+                       started_at, survey_country, botnet_info, ended_at,
+                       avg_api_ratio, avg_path_diversity, behavior_samples
                 FROM incidents
                 WHERE started_at > NOW() - INTERVAL '24 hours'
                   AND (
@@ -123,6 +208,9 @@ class IncidentFirstResponder:
                 'survey_country': r[6] or '',
                 'botnet_info': r[7] or '',
                 'ended_at': r[8],
+                'avg_api_ratio': float(r[9] or 0.0),
+                'avg_path_diversity': float(r[10] or 1.0),
+                'behavior_samples': int(r[11] or 0),
             }
             for r in rows
         ]
@@ -170,6 +258,142 @@ class IncidentFirstResponder:
             rows = cur.fetchall()
         return {r[0]: float(r[1]) for r in rows}
 
+    def _get_normal_asn_traffic(self, conn, host):
+        """Pre-aggregated 3-day ASN baseline maintained by StorageSessions."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT asn_name, pct
+                FROM host_asn_stats
+                WHERE host = %s
+                ORDER BY pct DESC
+            """, (host,))
+            rows = cur.fetchall()
+        return {r[0]: float(r[1]) for r in rows}
+
+    def _get_url_stats(self, conn, incident_id):
+        """Attack URL distribution from incident_url_stats."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT url,
+                       ROUND(cmd_count * 100.0 / NULLIF(SUM(cmd_count) OVER (), 0), 1) AS pct
+                FROM incident_url_stats
+                WHERE incident_id = %s
+                ORDER BY cmd_count DESC
+                LIMIT 15
+            """, (incident_id,))
+            rows = cur.fetchall()
+        return [{'url': r[0], 'pct': float(r[1] or 0)} for r in rows]
+
+    def _get_ua_stats(self, conn, incident_id):
+        """Attack UA distribution from incident_ua_stats."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ua,
+                       ROUND(cmd_count * 100.0 / NULLIF(SUM(cmd_count) OVER (), 0), 1) AS pct
+                FROM incident_ua_stats
+                WHERE incident_id = %s
+                ORDER BY cmd_count DESC
+                LIMIT 10
+            """, (incident_id,))
+            rows = cur.fetchall()
+        return [{'ua': r[0], 'pct': float(r[1] or 0)} for r in rows]
+
+    def _get_normal_url_traffic(self, conn, host):
+        """Pre-aggregated URL baseline maintained by StorageSessions."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT url, pct FROM host_url_stats WHERE host = %s ORDER BY pct DESC",
+                (host,)
+            )
+            rows = cur.fetchall()
+        return {r[0]: float(r[1]) for r in rows}
+
+    def _get_normal_ua_traffic(self, conn, host):
+        """Pre-aggregated UA baseline maintained by StorageSessions."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ua, pct FROM host_ua_stats WHERE host = %s ORDER BY pct DESC",
+                (host,)
+            )
+            rows = cur.fetchall()
+        return {r[0]: float(r[1]) for r in rows}
+
+    def _get_fingerprint_stats(self, conn, incident):
+        """Top fingerprints accumulated by IncidentDetector during the incident."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT fingerprint,
+                       cmd_count,
+                       ROUND(cmd_count * 100.0 / NULLIF(SUM(cmd_count) OVER (), 0), 1) AS pct
+                FROM incident_fingerprint_stats
+                WHERE incident_id = %s
+                ORDER BY cmd_count DESC
+                LIMIT 10
+            """, (incident['id'],))
+            rows = cur.fetchall()
+        return [{'fingerprint': r[0], 'count': r[1], 'pct': float(r[2] or 0)} for r in rows]
+
+    def _block_fingerprint_ips(self, conn, incident, fingerprint_hash):
+        """
+        Find all IPs seen with this fingerprint during the incident and send
+        block_ip Kafka commands for each. Bypasses the LLM — fingerprint
+        concentration is a structural signal that doesn't need LLM judgment.
+        """
+        if self._producer is None and self._producer_output is None:
+            self.logger.warning("[FIRST_RESPONDER] No Kafka producer — fingerprint IP blocking skipped")
+            return 0
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ip
+                FROM sessions
+                WHERE host_name = %s
+                  AND session_start >= %s
+                  AND (%s IS NULL OR session_start <= %s)
+                  AND fingerprints = %s
+                LIMIT %s
+            """, (
+                incident['host'],
+                incident['started_at'],
+                incident['ended_at'],
+                incident['ended_at'],
+                fingerprint_hash,
+                self.fingerprint_max_ips,
+            ))
+            ips = [r[0] for r in cur.fetchall()]
+
+        host = incident['host']
+        dnet = '-'
+        meta = f'first_responder [block_fingerprint] [block_ip]'
+        blocked = 0
+        for ip in ips:
+            command = {
+                'Name': 'block_ip',
+                'Value': ip,
+                'host': host,
+                'dnet': dnet,
+                'meta': meta,
+                'ttl': self.ttl_minutes * 60,
+            }
+            value = json.dumps(command).encode('utf-8')
+            key = bytearray(host, encoding='utf-8')
+            partition = self.dnet_partition_map.get(dnet, -1)
+            if self._producer is not None:
+                self._producer.send(topic=self.topic_commands, value=value, key=key)
+            if partition < 0:
+                if self._producer_output is not None:
+                    self._producer_output.send(topic=self.topic_commands, value=value, key=key)
+            else:
+                if self._producer_output is not None:
+                    self._producer_output.send(topic=self.topic_commands, value=value, partition=partition)
+            blocked += 1
+
+        self.logger.warning(
+            f"[FIRST_RESPONDER] block_fingerprint host={host} fingerprint={fingerprint_hash} "
+            f"ips_blocked={blocked}"
+        )
+        return blocked
+
     def _mark_processed(self, conn, incident_id):
         with conn.cursor() as cur:
             cur.execute(
@@ -208,9 +432,36 @@ class IncidentFirstResponder:
     # LLM
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, incident, country_stats, asn_stats, normal_traffic):
+    @staticmethod
+    def _classify_ua(ua: str) -> str:
+        """Return a tag string for known scripted/suspicious UA patterns."""
+        ua_lower = ua.lower()
+        if any(p in ua_lower for p in ('python-requests', 'python-urllib', 'python/')):
+            return '[scripted]'
+        if any(p in ua_lower for p in ('curl/', 'wget/', 'httpie/')):
+            return '[scripted]'
+        if any(p in ua_lower for p in ('go-http-client', 'java/', 'okhttp', 'apache-httpclient')):
+            return '[scripted]'
+        if any(p in ua_lower for p in ('headlesschrome', 'phantomjs', 'puppeteer')):
+            return '[headless browser]'
+        if any(p in ua_lower for p in ('msie', 'trident/')):
+            return '[suspicious: legacy IE]'
+        if not ua.strip():
+            return '[empty UA]'
+        return ''
+
+    def _build_prompt(self, incident, country_stats, asn_stats, normal_traffic,
+                      normal_asn_traffic=None, url_stats=None, ua_stats=None,
+                      normal_url_traffic=None, normal_ua_traffic=None,
+                      fingerprint_stats=None):
         host = incident['host']
         survey_country = incident['survey_country']
+        normal_asn_traffic = normal_asn_traffic or {}
+        url_stats = url_stats or []
+        ua_stats = ua_stats or []
+        normal_url_traffic = normal_url_traffic or {}
+        normal_ua_traffic = normal_ua_traffic or {}
+        fingerprint_stats = fingerprint_stats or []
 
         lines = [
             f"=== ATTACK on {host} ===",
@@ -223,6 +474,23 @@ class IncidentFirstResponder:
 
         if incident['botnet_info']:
             lines.append(f"Botnet overlap with previous incidents:\n{incident['botnet_info']}")
+
+        behavior_samples = incident.get('behavior_samples', 0)
+        if behavior_samples > 0:
+            avg_api = incident.get('avg_api_ratio', 0.0)
+            avg_path = incident.get('avg_path_diversity', 1.0)
+            api_note = " ← HIGH (API endpoint hammering)" if avg_api > 0.7 else ""
+            path_note = " ← LOW (few distinct endpoints, parameter iteration)" if avg_path < 0.2 else ""
+            lines.append(
+                f"\n--- API behavior ({behavior_samples} sessions sampled) ---"
+            )
+            lines.append(f"  avg_api_ratio:      {avg_api:.2f}{api_note}")
+            lines.append(f"  avg_path_diversity: {avg_path:.2f}{path_note}")
+            if avg_api > 0.7 and avg_path < 0.2:
+                lines.append(
+                    "  ⚠ Strong API hammering pattern: bots are repeatedly hitting a small set of "
+                    "API endpoints with varying parameters. Consider block_ua if UA is uniform."
+                )
 
         lines.append("\n--- Attack country distribution ---")
         if country_stats:
@@ -237,11 +505,15 @@ class IncidentFirstResponder:
 
         lines.append("\n--- Attack ASN distribution ---")
         if asn_stats:
+            total_asns = len(asn_stats)
+            lines.append(f"  Total distinct ASNs in attack: {total_asns}")
             for s in asn_stats:
                 dc = " [datacenter]" if s['datacenter'] else ""
+                normal_pct = normal_asn_traffic.get(s['asn_name'], 0.0)
+                normal_str = f"  normal traffic: {normal_pct:.1f}%" if normal_pct > 0 else "  normal traffic: 0%"
                 lines.append(
                     f"  {s['asn_name'][:40]:40s}{dc}  "
-                    f"attack: {s['pct']:5.1f}%"
+                    f"attack: {s['pct']:5.1f}%{normal_str}"
                 )
         else:
             lines.append("  (no ASN data yet)")
@@ -252,6 +524,52 @@ class IncidentFirstResponder:
             lines.append("  Countries: " + ", ".join(f"{c}: {p:.1f}%" for c, p in top_normal))
         else:
             lines.append("  (no baseline data — site may be new)")
+
+        if normal_asn_traffic:
+            top_asn = sorted(normal_asn_traffic.items(), key=lambda x: -x[1])[:10]
+            lines.append("  ASNs: " + ", ".join(f"{a}: {p:.1f}%" for a, p in top_asn))
+        else:
+            lines.append("  ASNs: (no ASN baseline yet — site may be new)")
+
+        lines.append("\n--- Attack URL distribution ---")
+        if url_stats:
+            lines.append(f"  Total distinct URLs: {len(url_stats)}")
+            for s in url_stats:
+                normal_pct = normal_url_traffic.get(s['url'], 0.0)
+                note = "  ← NOT in normal top URLs" if normal_pct == 0.0 and normal_url_traffic else ""
+                lines.append(
+                    f"  {s['url'][:50]:50s}  attack: {s['pct']:5.1f}%  "
+                    f"normal traffic: {normal_pct:.1f}%{note}"
+                )
+        else:
+            lines.append("  (no URL data yet — static-file-only sessions not counted)")
+
+        lines.append("\n--- Attack User Agent distribution ---")
+        if ua_stats:
+            for s in ua_stats:
+                normal_pct = normal_ua_traffic.get(s['ua'], 0.0)
+                tag = self._classify_ua(s['ua'])
+                tag_str = f"  {tag}" if tag else ""
+                lines.append(
+                    f"  {s['ua'][:60]:60s}  attack: {s['pct']:5.1f}%  "
+                    f"normal traffic: {normal_pct:.1f}%{tag_str}"
+                )
+        else:
+            lines.append("  (no UA data yet)")
+
+        if fingerprint_stats:
+            lines.append("\n--- TLS/Browser fingerprint distribution (attack sessions) ---")
+            lines.append("  (fingerprint = hash of UA + TLS cipher suite order + accept-language)")
+            for s in fingerprint_stats:
+                dominant = " ← DOMINANT" if s['pct'] >= self.fingerprint_min_pct else ""
+                lines.append(f"  {s['fingerprint']}  {s['pct']:5.1f}%  ({s['count']} sessions){dominant}")
+            top_pct = fingerprint_stats[0]['pct'] if fingerprint_stats else 0
+            if top_pct >= self.fingerprint_min_pct:
+                lines.append(
+                    f"  ⚠ Single fingerprint covers {top_pct:.1f}% of attack sessions — "
+                    f"same tool/library across all IPs. IPs with this fingerprint will be "
+                    f"blocked directly (separate from this LLM decision)."
+                )
 
         lines.append(
             f"\nParameters: min_attack_pct={self.min_attack_pct}%, "
@@ -291,7 +609,7 @@ class IncidentFirstResponder:
 
     def _validate_response(self, rec):
         """Basic validation of LLM response before saving."""
-        valid_actions = {'block_country', 'block_asn', 'raise_threshold', 'monitor_only'}
+        valid_actions = {'block_country', 'block_asn', 'block_ua', 'raise_threshold', 'monitor_only'}
         valid_confidence = {'high', 'medium', 'low'}
         if not isinstance(rec, dict):
             return False
@@ -302,6 +620,78 @@ class IncidentFirstResponder:
         if not isinstance(rec.get('target', []), list):
             return False
         return True
+
+    def _sanitize_response(self, rec, survey_country=None):
+        """
+        - Remove protected ASNs from block_asn targets.
+        - Never block survey_country (site's primary audience).
+        - Enforce max 3 targets for block_asn and block_country.
+        - Downgrade to raise_threshold if block_country targets >3 countries.
+        """
+        action = rec.get('action')
+
+        if action == 'block_country' and survey_country:
+            targets = rec.get('target', [])
+            if survey_country in targets:
+                self.logger.error(
+                    f"[FIRST_RESPONDER] LLM tried to block survey_country={survey_country!r} — REMOVED"
+                )
+                targets = [t for t in targets if t != survey_country]
+                rec['target'] = targets
+                rec['reasoning'] = (
+                    rec.get('reasoning', '') +
+                    f' [auto-removed: {survey_country} is the site primary audience and must never be blocked]'
+                )
+                if not targets:
+                    self.logger.warning(
+                        f"[FIRST_RESPONDER] block_country had only survey_country as target — "
+                        f"downgrading to monitor_only"
+                    )
+                    rec['action'] = 'monitor_only'
+                    rec['confidence'] = 'low'
+
+        if action == 'block_country':
+            targets = rec.get('target', [])
+            if len(targets) > 3:
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] block_country has {len(targets)} targets — "
+                    f"downgrading to raise_threshold (too many countries = diffuse attack)"
+                )
+                rec['action'] = 'raise_threshold'
+                rec['target'] = []
+                rec['reasoning'] = (
+                    rec.get('reasoning', '') +
+                    f' [auto-downgraded: {len(targets)} countries is a diffuse attack, use raise_threshold]'
+                )
+            return rec
+
+        if action != 'block_asn':
+            return rec
+
+        original_targets = rec.get('target', [])
+        filtered = [t for t in original_targets if t not in PROTECTED_ASNS]
+        removed = [t for t in original_targets if t in PROTECTED_ASNS]
+
+        if removed:
+            self.logger.error(
+                f"[FIRST_RESPONDER] LLM tried to block protected ASNs — REMOVED: {removed}"
+            )
+
+        if not filtered:
+            self.logger.warning(
+                "[FIRST_RESPONDER] All block_asn targets were protected ASNs — "
+                "downgrading to raise_threshold"
+            )
+            rec['action'] = 'raise_threshold'
+            rec['target'] = []
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                ' [auto-downgraded: all targets were protected infrastructure ASNs]'
+            )
+        else:
+            rec['target'] = filtered
+
+        return rec
 
     # ------------------------------------------------------------------
     # Main loop
@@ -324,6 +714,36 @@ class IncidentFirstResponder:
                 if age_minutes < 10:
                     return
 
+        if incident['spike_ratio'] < self.min_spike_ratio:
+            self.logger.info(
+                f"[FIRST_RESPONDER] Skipping incident_id={incident_id} host={host} "
+                f"spike_ratio={incident['spike_ratio']:.1f}x < min={self.min_spike_ratio}"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': f"Skipped: spike_ratio={incident['spike_ratio']:.1f}x below minimum {self.min_spike_ratio}x",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
+        if incident['challenge_count'] < self.min_challenge_count:
+            self.logger.info(
+                f"[FIRST_RESPONDER] Skipping incident_id={incident_id} host={host} "
+                f"challenge_count={incident['challenge_count']} < min={self.min_challenge_count}"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': f"Skipped: challenge_count={incident['challenge_count']} below minimum {self.min_challenge_count}",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
         self.logger.info(
             f"[FIRST_RESPONDER] Analyzing incident_id={incident_id} host={host} "
             f"spike_ratio={incident['spike_ratio']:.1f}x"
@@ -332,6 +752,12 @@ class IncidentFirstResponder:
         country_stats = self._get_country_stats(conn, incident_id)
         asn_stats = self._get_asn_stats(conn, incident_id)
         normal_traffic = self._get_normal_traffic(conn, host)
+        normal_asn_traffic = self._get_normal_asn_traffic(conn, host)
+        url_stats = self._get_url_stats(conn, incident_id)
+        ua_stats = self._get_ua_stats(conn, incident_id)
+        normal_url_traffic = self._get_normal_url_traffic(conn, host)
+        normal_ua_traffic = self._get_normal_ua_traffic(conn, host)
+        fingerprint_stats = self._get_fingerprint_stats(conn, incident)
 
         if not country_stats and not asn_stats:
             age_minutes = (datetime.now(timezone.utc) - incident['started_at']).total_seconds() / 60
@@ -339,6 +765,13 @@ class IncidentFirstResponder:
                 self.logger.warning(
                     f"[FIRST_RESPONDER] incident_id={incident_id}: no stats after {age_minutes:.0f}min, giving up"
                 )
+                self._save_action(conn, incident_id, host, {
+                    'action': 'monitor_only',
+                    'target': [],
+                    'confidence': 'low',
+                    'reasoning': f"Skipped: no country/ASN stats available after {age_minutes:.0f} minutes",
+                    'ttl_minutes': self.ttl_minutes,
+                })
                 self._mark_processed(conn, incident_id)
             else:
                 self.logger.info(
@@ -346,7 +779,21 @@ class IncidentFirstResponder:
                 )
             return
 
-        prompt = self._build_prompt(incident, country_stats, asn_stats, normal_traffic)
+        # Fingerprint blocking: if one fingerprint dominates, block known IPs directly
+        if fingerprint_stats and fingerprint_stats[0]['pct'] >= self.fingerprint_min_pct:
+            dominant_fp = fingerprint_stats[0]['fingerprint']
+            self.logger.warning(
+                f"[FIRST_RESPONDER] incident_id={incident_id} host={host} "
+                f"dominant fingerprint={dominant_fp} pct={fingerprint_stats[0]['pct']:.1f}% "
+                f"— blocking IPs directly"
+            )
+            self._block_fingerprint_ips(conn, incident, dominant_fp)
+
+        prompt = self._build_prompt(
+            incident, country_stats, asn_stats, normal_traffic, normal_asn_traffic,
+            url_stats, ua_stats, normal_url_traffic, normal_ua_traffic,
+            fingerprint_stats=fingerprint_stats,
+        )
         self.logger.info(f"[FIRST_RESPONDER] Calling LLM for incident_id={incident_id}")
 
         rec = self._call_llm(prompt)
@@ -364,6 +811,7 @@ class IncidentFirstResponder:
             self._mark_processed(conn, incident_id)
             return
 
+        rec = self._sanitize_response(rec, survey_country=incident.get('survey_country'))
         self._save_action(conn, incident_id, host, rec)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
         if incident.get('ended_at') is not None:

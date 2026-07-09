@@ -40,6 +40,7 @@ class FeatureExtractor(object):
             'primary_session', 'bad_bot', 'human',
             'valid_browser_ciphers', 'weak_cipher', 'headless_ua', 'bot_ua',
             'ai_bot_ua', 'verified_bot','short_ua','asset_only',
+            'path_only_to_request_ratio',
         ]
 
         self.pca_feature = pca_feature
@@ -153,6 +154,7 @@ class FeatureExtractor(object):
         num_5xx = 0
         num_499 = 0
         url_map = defaultdict(int)
+        path_only_map = defaultdict(int)
         edge_map = defaultdict(int)
         ua_map = defaultdict(int)
         query_map = defaultdict(int)
@@ -187,6 +189,7 @@ class FeatureExtractor(object):
             payloads.append(int(r.get('payload', 0)) + 1.0)
             slash_counts.append(len(url.split('/')) - 1)  # path_depth uses only path
             url_map[full_url] += 1  # Use full URL for entropy/uniqueness
+            path_only_map[url] += 1  # Path without query — detects API endpoint hammering
             edge_map[r.get('edge', '')] += 1
             ua_map[r.get('ua', '')] += 1
             query_map[query] += 1
@@ -233,6 +236,7 @@ class FeatureExtractor(object):
             features['edge_count'] = 0
             features['ua_count'] = len(ua_map.keys())
             features['api_ratio'] = 0.0
+            features['path_only_to_request_ratio'] = 0.0
         else:
             request_rate = hits / session_duration * 60
             entropy = entropy_from_counts(url_map)
@@ -257,6 +261,7 @@ class FeatureExtractor(object):
             features['edge_count'] = len(edge_map.keys())
             features['ua_count'] = len(ua_map.keys())
             features['api_ratio'] = float(api_count) / hits
+            features['path_only_to_request_ratio'] = float(len(path_only_map)) / hits
         features['num_ciphers'] = len(session.get('ciphers', []))
         features['num_languages'] = session['num_languages']
         features['ua_score'] = float(session.get('ua_score', 0.0))

@@ -13,9 +13,10 @@ class FirstResponderBlocker:
     Session-pipeline-level blocker driven by first_responder_actions.
 
     Polls Postgres every `check_interval` seconds for active LLM-issued actions
-    (block_asn / block_country).  For each incoming web request, if the request's
-    ASN name or country matches an active action for that host, emits a block_ip
-    command to Kafka immediately — without waiting for a full session to be built.
+    (block_asn / block_country / block_ua).  For each incoming web request, if the
+    request's ASN name, country, or User-Agent matches an active action for that host,
+    emits a block_ip command to Kafka immediately — without waiting for a full session
+    to be built.
 
     This covers IPs that only hit static files and never produce a session, so the
     predictor never sees them.
@@ -78,7 +79,7 @@ class FirstResponderBlocker:
             for host, action, target_str in rows:
                 if host in new_actions:
                     continue  # take the most recent action per host
-                if action not in ('block_asn', 'block_country'):
+                if action not in ('block_asn', 'block_country', 'block_ua'):
                     continue
                 targets = {t.strip() for t in (target_str or '').split('|') if t.strip()}
                 if targets:
@@ -102,7 +103,7 @@ class FirstResponderBlocker:
     # Per-request check
     # ------------------------------------------------------------------
 
-    def process(self, host, ip, country, asn_name, survey_country, dnet='-'):
+    def process(self, host, ip, country, asn_name, survey_country, dnet='-', ua=''):
         """
         Returns True if the request matches an active block action and a block_ip
         command has been (or was already) issued.  The session pipeline should then
@@ -112,18 +113,23 @@ class FirstResponderBlocker:
         if ra is None:
             return False
 
-        # Survey-country protection: never block the site's primary audience
-        if survey_country and country and country == survey_country:
-            return False
-
         action = ra['action']
         target = ra['target']
         hit = False
 
-        if action == 'block_asn' and asn_name and asn_name in target:
-            hit = True
-        elif action == 'block_country' and country and country in target:
-            hit = True
+        if action == 'block_ua':
+            # UA matching: exact string match against target list
+            if ua and ua in target:
+                hit = True
+        else:
+            # Survey-country protection: never block the site's primary audience
+            if survey_country and country and country == survey_country:
+                return False
+
+            if action == 'block_asn' and asn_name and asn_name in target:
+                hit = True
+            elif action == 'block_country' and country and country in target:
+                hit = True
 
         if not hit:
             return False
@@ -133,22 +139,21 @@ class FirstResponderBlocker:
             return True
 
         self._blocked_ips[ip] = True
-        self._send_block(host, ip, country, asn_name, action, dnet)
+        self._send_block(host, ip, country, asn_name, action, dnet, ua)
         return True
 
     # ------------------------------------------------------------------
     # Kafka
     # ------------------------------------------------------------------
 
-    def _send_block(self, host, ip, country, asn_name, action, dnet):
-        meta = f'first_responder [{action}] [block_ip]'
+    def _send_block(self, host, ip, country, asn_name, action, dnet, ua=''):
+        meta = f'first_responder [{action}] [block_ip] [session_pipeline]'
         command = {
             'Name': 'block_ip',
             'Value': ip,
             'host': host,
             'country': country,
             'dnet': dnet,
-            'source': 'first_responder_blocker',
             'meta': meta,
             'ttl': 300,
         }
@@ -167,5 +172,5 @@ class FirstResponderBlocker:
 
         self.logger.warning(
             f'[FirstResponderBlocker] block_ip ip={ip} host={host} '
-            f'country={country} asn={asn_name} action={action}'
+            f'country={country} asn={asn_name} ua={ua!r} action={action}'
         )

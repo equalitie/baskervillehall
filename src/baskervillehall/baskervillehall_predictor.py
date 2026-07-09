@@ -371,6 +371,8 @@ class BaskervillehallPredictor(object):
             new_responder = {}
             for host, action, target_str in action_rows:
                 if host not in new_responder:  # keep most recent per host
+                    if action not in ('block_asn', 'block_country', 'block_ua'):
+                        continue
                     targets = {t.strip() for t in target_str.split('|') if t.strip()}
                     new_responder[host] = {'action': action, 'target': targets}
 
@@ -410,6 +412,19 @@ class BaskervillehallPredictor(object):
             shapley_report, key=lambda x: abs(x["values"]["shapley"]), reverse=True
         )
         return shapley_feature, shapley_report_sorted
+
+    @staticmethod
+    def _get_top_url(session):
+        """Most frequent non-static URL in the session, query string stripped."""
+        from collections import Counter
+        urls = [
+            r.get('url', '').split('?')[0]
+            for r in session.get('requests', [])
+            if r.get('url') and not r.get('static', False)
+        ]
+        if not urls:
+            return ''
+        return Counter(urls).most_common(1)[0][0][:200]
 
     def create_command(
             self,
@@ -473,6 +488,11 @@ class BaskervillehallPredictor(object):
             "baskerville_score": int(baskerville_score),
             "cloudflare_score": session.get("cloudflare_score", 0),
             "survey_country": session.get("survey_country", ""),
+            "ua": session.get("ua", ""),
+            "top_url": self._get_top_url(session),
+            "api_ratio": session.get("api_ratio", 0.0),
+            "path_only_to_request_ratio": session.get("path_only_to_request_ratio", 1.0),
+            "fingerprints": session.get("fingerprints", ""),
         }
         return d
 
@@ -649,18 +669,22 @@ class BaskervillehallPredictor(object):
             dnet = session.get("dnet", '-')
 
             api_ratio = 0.0
+            path_only_to_request_ratio = 1.0
             if shap_values_if and model_if:
                 sv = shap_values_if[i]
                 feats = model_if.get_all_features()
                 for k, fname in enumerate(feats):
                     if fname == "api_ratio":
                         api_ratio = round(sv.data[k], 2)
-                        break
+                    elif fname == "path_only_to_request_ratio":
+                        path_only_to_request_ratio = round(sv.data[k], 3)
 
             entropy = 1.0
             if model_if:
                 if 'entropy' in model_if.get_all_features():
                     entropy = float(vectors_if.iloc[i]['entropy'])
+                if 'path_only_to_request_ratio' in model_if.get_all_features():
+                    path_only_to_request_ratio = round(float(vectors_if.iloc[i]['path_only_to_request_ratio']), 3)
 
             if human:
                 if scores_classifier is not None:
@@ -686,6 +710,7 @@ class BaskervillehallPredictor(object):
                     "shapley_feature_ae": shapley_feature_ae,
                     "threshold_ae": threshold_ae,
                     "api_ratio": api_ratio,
+                    "path_only_to_request_ratio": path_only_to_request_ratio,
                     "entropy": entropy,
                     "baskerville_score": baskerville_score,
                 }
@@ -828,9 +853,12 @@ class BaskervillehallPredictor(object):
         shapley_feature_ae = r["shapley_feature_ae"]
         threshold_ae = r["threshold_ae"]
         api_ratio = r["api_ratio"]
+        path_only_to_request_ratio = r.get("path_only_to_request_ratio", 1.0)
         entropy = r["entropy"]
         baskerville_score = r["baskerville_score"]
         session_id = session["session_id"]
+        session["api_ratio"] = api_ratio
+        session["path_only_to_request_ratio"] = path_only_to_request_ratio
 
         ip = session["ip"]
         primary_session = session.get("primary_session", False)
@@ -899,7 +927,7 @@ class BaskervillehallPredictor(object):
             survey_country and session_country and session_country == survey_country
         )
 
-        # Responder actions: LLM-issued targeted blocks by country or ASN
+        # Responder actions: LLM-issued targeted blocks by country, ASN, or UA
         responder = self._first_responder_actions.get(host)
         if responder:
             ra_action = responder['action']
@@ -914,8 +942,13 @@ class BaskervillehallPredictor(object):
                 if asn_name and asn_name in ra_target:
                     ra_hit = True
                     ra_meta = 'first_responder [block_asn] [block_ip]'
+            elif ra_action == 'block_ua':
+                session_ua = session.get('ua', '')
+                if session_ua and session_ua in ra_target:
+                    ra_hit = True
+                    ra_meta = 'first_responder [block_ua] [block_ip]'
 
-            if ra_hit and not protected_country:
+            if ra_hit and (ra_action == 'block_ua' or not protected_country):
                 if ip not in pending_block_ip:
                     pending_block_ip[ip] = True
                     self.logger.warning(
