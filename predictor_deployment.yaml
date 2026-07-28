@@ -29,6 +29,7 @@ spec:
                     operator: In
                     values:
                       - postgres
+                      - baskerville
       containers:
       - name: "baskervillehall-predictor"
         image: "equalitie/baskervillehall:latest"

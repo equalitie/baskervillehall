@@ -56,6 +56,12 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS first_responder_processed BOOLEAN
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS avg_api_ratio      FLOAT DEFAULT 0.0;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS avg_path_diversity FLOAT DEFAULT 1.0;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS behavior_samples   INTEGER DEFAULT 0;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS traffic_peak_ratio   FLOAT DEFAULT 0.0;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS traffic_close_ratio  FLOAT DEFAULT 0.0;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS traffic_recent_ratio FLOAT DEFAULT 0.0;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS traffic_peak_count   INTEGER DEFAULT 0;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS traffic_recent_count INTEGER DEFAULT 0;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS traffic_close_count  INTEGER DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS first_responder_actions (
     id           BIGSERIAL PRIMARY KEY,
@@ -81,3 +87,5 @@ CREATE TABLE IF NOT EXISTS incident_fingerprint_stats (
 );
 CREATE INDEX IF NOT EXISTS incident_fingerprint_stats_incident_id
     ON incident_fingerprint_stats (incident_id);
+
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS narrative TEXT;

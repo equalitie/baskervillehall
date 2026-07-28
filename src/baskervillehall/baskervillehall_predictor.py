@@ -445,8 +445,12 @@ class BaskervillehallPredictor(object):
             rate_limit_hits=0,
             rate_limit_interval=0,
             rate_limit_expiration=0,
-            baskerville_score=0
+            baskerville_score=0,
+            novel_attack=False,
+            novel_attack_count=0,
     ):
+        if novel_attack:
+            meta = f"{meta} [novel_attack count={novel_attack_count}]"
         d = {
             "Name": command_name,
             "difficulty": difficulty,
@@ -493,6 +497,8 @@ class BaskervillehallPredictor(object):
             "api_ratio": session.get("api_ratio", 0.0),
             "path_only_to_request_ratio": session.get("path_only_to_request_ratio", 1.0),
             "fingerprints": session.get("fingerprints", ""),
+            "novel_attack": novel_attack,
+            "novel_attack_count": novel_attack_count,
         }
         return d
 
@@ -525,6 +531,7 @@ class BaskervillehallPredictor(object):
 
         """Process a batch of sessions for a specific host/human combination"""
         model_if = self.models_if.get_model(host, ModelType.HUMAN if human else ModelType.BOT)
+        model_if_opposite = self.models_if.get_model(host, ModelType.BOT if human else ModelType.HUMAN)
 
         # Adaptive Shapley processing: disable when heavily lagging to speed up processing
         use_shapley = self.use_shapley and len(sessions) < 50  # Skip Shapley for large batches
@@ -534,6 +541,11 @@ class BaskervillehallPredictor(object):
             scores_if, shap_values_if, vectors_if = model_if.transform(
                 sessions, use_shapley=use_shapley
             )
+
+        # Opposite model scores — no Shapley needed, just scores for High/High detection
+        scores_if_opposite = None
+        if model_if_opposite:
+            scores_if_opposite, _, _ = model_if_opposite.transform(sessions, use_shapley=False)
 
         # Skip AutoEncoder processing when lagging heavily
         scores_ae = shap_values_ae = None
@@ -650,6 +662,10 @@ class BaskervillehallPredictor(object):
                 prediction_if = False
                 shapley_feature_if, shapley_if = "", ""
 
+            # High/High: anomalous vs own baseline AND anomalous vs opposite baseline
+            score_if_opposite = float(scores_if_opposite[i]) if scores_if_opposite is not None else 0.0
+            novel_attack = prediction_if and score_if_opposite < 0
+
             # Autoencoder
             if scores_ae is not None:
                 score_ae = float(scores_ae[i])
@@ -713,6 +729,8 @@ class BaskervillehallPredictor(object):
                     "path_only_to_request_ratio": path_only_to_request_ratio,
                     "entropy": entropy,
                     "baskerville_score": baskerville_score,
+                    "novel_attack": novel_attack,
+                    "score_if_opposite": score_if_opposite,
                 }
             )
         return results
@@ -727,7 +745,8 @@ class BaskervillehallPredictor(object):
             pending_block_ip,
             host_ip_sessions,
             ip_with_sessions,
-            pending_session
+            pending_session,
+            novel_attack_counts,
     ):
         """Process results and apply decisions"""
         processed_count = 0
@@ -743,6 +762,7 @@ class BaskervillehallPredictor(object):
                 host_ip_sessions=host_ip_sessions,
                 ip_with_sessions=ip_with_sessions,
                 pending_session=pending_session,
+                novel_attack_counts=novel_attack_counts,
             )
 
             processed_count += 1
@@ -837,6 +857,7 @@ class BaskervillehallPredictor(object):
             host_ip_sessions: dict,
             ip_with_sessions: TTLCache,
             pending_session: TTLCache,
+            novel_attack_counts: TTLCache,
     ):
         host = r["host"]
         dnet = r["dnet"]
@@ -856,11 +877,24 @@ class BaskervillehallPredictor(object):
         path_only_to_request_ratio = r.get("path_only_to_request_ratio", 1.0)
         entropy = r["entropy"]
         baskerville_score = r["baskerville_score"]
+        novel_attack = r.get("novel_attack", False)
+        score_if_opposite = r.get("score_if_opposite", 0.0)
         session_id = session["session_id"]
         session["api_ratio"] = api_ratio
         session["path_only_to_request_ratio"] = path_only_to_request_ratio
 
         ip = session["ip"]
+
+        novel_attack_count = 0
+        if novel_attack:
+            novel_attack_count = novel_attack_counts.get(ip, 0) + 1
+            novel_attack_counts[ip] = novel_attack_count
+            self.logger.warning(
+                f"[NOVEL_ATTACK] ip={ip} host={host} human={human} "
+                f"score_if={score_if:.3f} score_if_opposite={score_if_opposite:.3f} "
+                f"novel_attack_count_1h={novel_attack_count} ua={session.get('ua', '')[:80]}"
+            )
+
         primary_session = session.get("primary_session", False)
         verified_bot = session.get("verified_bot", False)
         verified_ai_bot = session.get("verified_ai_bot", False)
@@ -972,6 +1006,8 @@ class BaskervillehallPredictor(object):
                         scraper_name=scraper_name,
                         threshold_ae=threshold_ae,
                         baskerville_score=1,
+                        novel_attack=novel_attack,
+                        novel_attack_count=novel_attack_count,
                     )
                     self.send(producer, producer_output, payload, key=host, dnet=dnet)
                 return
@@ -1007,6 +1043,8 @@ class BaskervillehallPredictor(object):
                     scraper_name=scraper_name,
                     threshold_ae=threshold_ae,
                     baskerville_score=1,
+                    novel_attack=novel_attack,
+                    novel_attack_count=novel_attack_count,
                 )
                 self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -1046,6 +1084,8 @@ class BaskervillehallPredictor(object):
                 rate_limit_interval=self.rate_limit_interval,
                 rate_limit_expiration=self.rate_limit_expiration,
                 baskerville_score=baskerville_score,
+                novel_attack=novel_attack,
+                novel_attack_count=novel_attack_count,
             )
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -1090,6 +1130,8 @@ class BaskervillehallPredictor(object):
                 rate_limit_interval=self.rate_limit_interval,
                 rate_limit_expiration=self.rate_limit_expiration,
                 baskerville_score=baskerville_score,
+                novel_attack=novel_attack,
+                novel_attack_count=novel_attack_count,
             )
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -1136,6 +1178,8 @@ class BaskervillehallPredictor(object):
                 rate_limit_interval=self.rate_limit_interval,
                 rate_limit_expiration=self.rate_limit_expiration,
                 baskerville_score=baskerville_score,
+                novel_attack=novel_attack,
+                novel_attack_count=novel_attack_count,
             )
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -1177,6 +1221,8 @@ class BaskervillehallPredictor(object):
                 scraper_name=scraper_name,
                 threshold_ae=threshold_ae,
                 baskerville_score=baskerville_score,
+                novel_attack=novel_attack,
+                novel_attack_count=novel_attack_count,
             )
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -1222,6 +1268,8 @@ class BaskervillehallPredictor(object):
                     scraper_name=scraper_name,
                     threshold_ae=threshold_ae,
                     baskerville_score=baskerville_score,
+                    novel_attack=novel_attack,
+                    novel_attack_count=novel_attack_count,
                 )
                 self.send(producer, producer_output, payload, key=host, dnet=dnet)
                 return
@@ -1278,6 +1326,8 @@ class BaskervillehallPredictor(object):
                 rate_limit_interval=self.rate_limit_interval,
                 rate_limit_expiration=self.rate_limit_expiration,
                 baskerville_score=baskerville_score,
+                novel_attack=novel_attack,
+                novel_attack_count=novel_attack_count,
             )
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
@@ -1402,6 +1452,7 @@ class BaskervillehallPredictor(object):
         pending_block_ip = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         host_ip_sessions: Dict[str, TTLCache] = dict()
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
+        novel_attack_counts = TTLCache(maxsize=50000, ttl=60 * 60)  # ip → count, 1h window
 
         offences = TTLCache(maxsize=10000, ttl=60 * 60)
         ip_with_sessions = TTLCache(maxsize=100000, ttl=60 * 60)
@@ -1500,6 +1551,7 @@ class BaskervillehallPredictor(object):
                         host_ip_sessions=host_ip_sessions,
                         ip_with_sessions=ip_with_sessions,
                         pending_session=pending_session,
+                        novel_attack_counts=novel_attack_counts,
                     )
 
                     self.logger.info(

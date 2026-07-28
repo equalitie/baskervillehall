@@ -56,6 +56,11 @@ CREATE INDEX IF NOT EXISTS first_responder_actions_host_expires
     ON first_responder_actions (host, expires_at DESC);
 """
 
+NARRATIVE_SYSTEM_PROMPT = """You are a security analyst writing a brief incident summary for a report.
+Write exactly 2-3 sentences in plain English. Be specific: include the site name, start time (UTC),
+spike magnitude, duration, attack origin (top countries/ASNs), AI response action, and whether
+traffic returned to normal. Do not use bullet points or headers — just flowing prose."""
+
 SYSTEM_PROMPT = """You are a DDoS mitigation expert. You receive attack statistics and normal traffic
 baseline for a website and must recommend a mitigation action.
 
@@ -145,6 +150,7 @@ class IncidentFirstResponder:
             dnet_partition_map=None,
             fingerprint_min_pct=40.0,
             fingerprint_max_ips=500,
+            host_whitelist=None,
             logger=None,
     ):
         self.postgres_connection = postgres_connection or {}
@@ -158,6 +164,7 @@ class IncidentFirstResponder:
         self.min_challenge_count = min_challenge_count
         self.topic_commands = topic_commands
         self.dnet_partition_map = dnet_partition_map or {}
+        self.host_whitelist = set(h.strip() for h in (host_whitelist or []) if h.strip())
         self.fingerprint_min_pct = fingerprint_min_pct
         self.fingerprint_max_ips = fingerprint_max_ips
         self.logger = logger or logging.getLogger(self.__class__.__name__)
@@ -187,7 +194,9 @@ class IncidentFirstResponder:
             cur.execute("""
                 SELECT id, host, challenge_count, baseline_avg, spike_ratio,
                        started_at, survey_country, botnet_info, ended_at,
-                       avg_api_ratio, avg_path_diversity, behavior_samples
+                       avg_api_ratio, avg_path_diversity, behavior_samples,
+                       traffic_peak_ratio, traffic_close_ratio, traffic_recent_ratio,
+                       traffic_peak_count, traffic_close_count, traffic_recent_count
                 FROM incidents
                 WHERE started_at > NOW() - INTERVAL '24 hours'
                   AND (
@@ -211,6 +220,12 @@ class IncidentFirstResponder:
                 'avg_api_ratio': float(r[9] or 0.0),
                 'avg_path_diversity': float(r[10] or 1.0),
                 'behavior_samples': int(r[11] or 0),
+                'traffic_peak_ratio': float(r[12] or 0.0),
+                'traffic_close_ratio': float(r[13] or 0.0),
+                'traffic_recent_ratio': float(r[14] or 0.0),
+                'traffic_peak_count': int(r[15] or 0),
+                'traffic_close_count': int(r[16] or 0),
+                'traffic_recent_count': int(r[17] or 0),
             }
             for r in rows
         ]
@@ -463,6 +478,13 @@ class IncidentFirstResponder:
         normal_ua_traffic = normal_ua_traffic or {}
         fingerprint_stats = fingerprint_stats or []
 
+        traffic_peak = incident.get('traffic_peak_ratio', 0.0)
+        traffic_close = incident.get('traffic_close_ratio', 0.0)
+        traffic_recent = incident.get('traffic_recent_ratio', 0.0)
+        traffic_peak_count = incident.get('traffic_peak_count', 0)
+        traffic_close_count = incident.get('traffic_close_count', 0)
+        traffic_recent_count = incident.get('traffic_recent_count', 0)
+
         lines = [
             f"=== ATTACK on {host} ===",
             f"Started: {incident['started_at']}",
@@ -471,6 +493,34 @@ class IncidentFirstResponder:
             f"Spike ratio: {incident['spike_ratio']:.1f}x",
             f"Site primary audience (survey_country): {survey_country or 'unknown'}",
         ]
+
+        if traffic_peak > 0.0:
+            peak_str = f"peak={traffic_peak:.1f}x"
+            if traffic_peak_count > 0:
+                peak_str += f" ({traffic_peak_count} req/min)"
+            if incident.get('ended_at') is not None and traffic_close > 0.0:
+                close_str = f"at close={traffic_close:.1f}x"
+                if traffic_close_count > 0:
+                    close_str += f" ({traffic_close_count} req/min)"
+                if traffic_close < 1.5:
+                    effectiveness = "✅ traffic returned to normal — mitigation effective"
+                elif traffic_close < traffic_peak * 0.5:
+                    effectiveness = "⚠ traffic reduced but still elevated"
+                else:
+                    effectiveness = "❌ traffic remained high — attack may have continued despite blocking"
+                lines.append(
+                    f"Raw traffic spike: {peak_str} baseline  {close_str}  {effectiveness}"
+                )
+            else:
+                if traffic_recent > 0.0:
+                    recent_str = f"  current={traffic_recent:.1f}x"
+                    if traffic_recent_count > 0:
+                        recent_str += f" ({traffic_recent_count} req/min)"
+                else:
+                    recent_str = ""
+                lines.append(f"Raw traffic spike: {peak_str} baseline{recent_str} (ongoing)")
+        else:
+            lines.append("Raw traffic spike: not detected (challenge spike only, or traffic monitor warming up)")
 
         if incident['botnet_info']:
             lines.append(f"Botnet overlap with previous incidents:\n{incident['botnet_info']}")
@@ -606,6 +656,100 @@ class IncidentFirstResponder:
         except Exception as e:
             self.logger.error(f"LLM call failed: {e!r}")
             return None
+
+    def _build_narrative_prompt(self, incident, country_stats, asn_stats, action_rec):
+        host = incident['host']
+        started_at = incident['started_at'].strftime('%Y-%m-%d %H:%M UTC')
+        spike = incident['spike_ratio']
+        challenges = incident['challenge_count']
+        traffic_peak = incident.get('traffic_peak_ratio', 0.0)
+        traffic_close = incident.get('traffic_close_ratio', 0.0)
+
+        # Duration
+        if incident.get('ended_at') and incident['started_at']:
+            duration_sec = (incident['ended_at'] - incident['started_at']).total_seconds()
+            duration_min = int(duration_sec / 60)
+            if duration_min >= 60:
+                duration_str = f"{duration_min // 60}h {duration_min % 60}min"
+            else:
+                duration_str = f"{duration_min} min"
+        else:
+            duration_str = "unknown duration"
+
+        # Top attack sources
+        top_countries = ", ".join(
+            f"{s['country']} ({s['pct']:.0f}%)" for s in (country_stats or [])[:3]
+        ) or "unknown"
+        top_asns = ", ".join(
+            f"{s['asn_name']} ({s['pct']:.0f}%)" for s in (asn_stats or [])[:3]
+        ) or "unknown"
+
+        # Action taken
+        if action_rec:
+            action = action_rec.get('action', 'monitor_only')
+            target = action_rec.get('target', [])
+            if action == 'block_country' and target:
+                action_str = f"AI blocked countries: {', '.join(target)}"
+            elif action == 'block_asn' and target:
+                action_str = f"AI blocked ASNs: {', '.join(target)}"
+            elif action == 'block_ua' and target:
+                action_str = f"AI blocked user agents: {', '.join(target)}"
+            elif action == 'raise_threshold':
+                action_str = "AI raised the challenge threshold (diffuse attack)"
+            else:
+                action_str = "AI monitored only (no blocking)"
+        else:
+            action_str = "no automated response"
+
+        # Traffic outcome
+        if traffic_peak > 0 and traffic_close > 0:
+            if traffic_close < 1.5:
+                outcome = f"traffic returned to normal at close ({traffic_close:.1f}x baseline)"
+            elif traffic_close < traffic_peak * 0.5:
+                outcome = f"traffic reduced but still elevated at close ({traffic_close:.1f}x baseline)"
+            else:
+                outcome = f"traffic remained high at close ({traffic_close:.1f}x baseline)"
+        elif traffic_peak > 0:
+            outcome = f"traffic peak was {traffic_peak:.1f}x baseline"
+        else:
+            outcome = "traffic monitor data unavailable"
+
+        return (
+            f"Write a 2-3 sentence incident summary:\n"
+            f"Site: {host}\n"
+            f"Start: {started_at}\n"
+            f"Spike: ×{spike:.1f}, duration: {duration_str}, challenges issued: {challenges}\n"
+            f"Top attack countries: {top_countries}\n"
+            f"Top attack ASNs: {top_asns}\n"
+            f"Response: {action_str}\n"
+            f"Outcome: {outcome}\n"
+        )
+
+    def _generate_narrative(self, prompt):
+        url = f"{self.ollama_url}/v1/chat/completions"
+        payload = {
+            "model": self.llm_model,
+            "messages": [
+                {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "stream": False,
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=600)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            self.logger.error(f"Narrative LLM call failed: {e!r}")
+            return None
+
+    def _save_narrative(self, conn, incident_id, narrative):
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET narrative = %s WHERE id = %s",
+                (narrative, incident_id)
+            )
 
     def _validate_response(self, rec):
         """Basic validation of LLM response before saving."""
@@ -744,6 +888,20 @@ class IncidentFirstResponder:
             self._mark_processed(conn, incident_id)
             return
 
+        if host in self.host_whitelist:
+            self.logger.info(
+                f"[FIRST_RESPONDER] host={host} is whitelisted — monitor only, no blocking"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': f"Host {host} is in the First Responder whitelist — blocking disabled to protect legitimate users.",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
         self.logger.info(
             f"[FIRST_RESPONDER] Analyzing incident_id={incident_id} host={host} "
             f"spike_ratio={incident['spike_ratio']:.1f}x"
@@ -816,6 +974,72 @@ class IncidentFirstResponder:
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
         if incident.get('ended_at') is not None:
             self._mark_processed(conn, incident_id)
+            # Generate a short narrative summary at incident close
+            narrative_prompt = self._build_narrative_prompt(
+                incident, country_stats, asn_stats, rec
+            )
+            narrative = self._generate_narrative(narrative_prompt)
+            if narrative:
+                self._save_narrative(conn, incident_id, narrative)
+                self.logger.info(
+                    f"[FIRST_RESPONDER] narrative saved for incident_id={incident_id}: {narrative[:120]}…"
+                )
+
+    def _get_incidents_missing_narrative(self, conn):
+        """Return closed incidents from the last 7 days that have an action but no narrative."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT i.id, i.host, i.challenge_count, i.baseline_avg, i.spike_ratio,
+                       i.started_at, i.survey_country, i.botnet_info, i.ended_at,
+                       i.avg_api_ratio, i.avg_path_diversity, i.behavior_samples,
+                       i.traffic_peak_ratio, i.traffic_close_ratio, i.traffic_recent_ratio,
+                       i.traffic_peak_count, i.traffic_close_count, i.traffic_recent_count,
+                       a.action, a.target, a.confidence
+                FROM incidents i
+                JOIN first_responder_actions a ON a.incident_id = i.id
+                WHERE i.started_at > NOW() - INTERVAL '7 days'
+                  AND i.ended_at IS NOT NULL
+                  AND i.narrative IS NULL
+                  AND a.action != 'monitor_only'
+                ORDER BY a.created_at DESC
+                LIMIT 1
+            """)
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            action_rec = {'action': r[18], 'target': r[19].split('|') if r[19] else [], 'confidence': r[20]}
+            result.append(({
+                'id': r[0], 'host': r[1], 'challenge_count': r[2],
+                'baseline_avg': float(r[3]), 'spike_ratio': float(r[4]),
+                'started_at': r[5], 'survey_country': r[6] or '',
+                'botnet_info': r[7] or '', 'ended_at': r[8],
+                'avg_api_ratio': float(r[9] or 0.0), 'avg_path_diversity': float(r[10] or 1.0),
+                'behavior_samples': int(r[11] or 0),
+                'traffic_peak_ratio': float(r[12] or 0.0), 'traffic_close_ratio': float(r[13] or 0.0),
+                'traffic_recent_ratio': float(r[14] or 0.0),
+                'traffic_peak_count': int(r[15] or 0), 'traffic_close_count': int(r[16] or 0),
+                'traffic_recent_count': int(r[17] or 0),
+            }, action_rec))
+        return result
+
+    def _backfill_narratives(self, conn):
+        """Generate narratives for recently closed incidents that don't have one yet."""
+        pending = self._get_incidents_missing_narrative(conn)
+        if not pending:
+            return
+        incident, action_rec = pending[0]
+        incident_id = incident['id']
+        host = incident['host']
+        self.logger.info(f"[FIRST_RESPONDER] Backfilling narrative for incident_id={incident_id} host={host}")
+        country_stats = self._get_country_stats(conn, incident_id)
+        asn_stats = self._get_asn_stats(conn, incident_id)
+        narrative_prompt = self._build_narrative_prompt(incident, country_stats, asn_stats, action_rec)
+        narrative = self._generate_narrative(narrative_prompt)
+        if narrative:
+            self._save_narrative(conn, incident_id, narrative)
+            self.logger.info(
+                f"[FIRST_RESPONDER] narrative backfilled for incident_id={incident_id}: {narrative[:120]}…"
+            )
 
     def run(self):
         self.logger.info(
@@ -843,6 +1067,12 @@ class IncidentFirstResponder:
                             self.logger.exception(
                                 f"[FIRST_RESPONDER] Failed to process incident_id={incident['id']}"
                             )
+                else:
+                    # No active work — use idle time to backfill missing narratives
+                    try:
+                        self._backfill_narratives(conn)
+                    except Exception:
+                        self.logger.exception("[FIRST_RESPONDER] Backfill error")
 
             except Exception:
                 self.logger.exception("[FIRST_RESPONDER] Postgres error, reconnecting")

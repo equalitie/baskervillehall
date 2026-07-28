@@ -23,6 +23,8 @@ from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
+import json as _json_std
+from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka.errors import NoBrokersAvailable
@@ -176,7 +178,9 @@ class BaskervillehallSession(object):
             score_2_num_requests=5,
             hostname='localhost',
             topic_commands=None,
-            dnet_partition_map=None
+            dnet_partition_map=None,
+            topic_traffic_stats=None,
+            traffic_stats_interval=60,
     ):
         super().__init__()
         if kafka_connection is None:
@@ -231,6 +235,7 @@ class BaskervillehallSession(object):
 
         # --- state ---
         self.producer = None
+        self.producer_output = None
         self.ips = dict()
         self.ips_primary = dict()
         self.flush_size_primary = dict()
@@ -276,6 +281,11 @@ class BaskervillehallSession(object):
             block_ttl=300,
             logger=self.logger,
         )
+
+        self.topic_traffic_stats = topic_traffic_stats
+        self.traffic_stats_interval = traffic_stats_interval
+        self.host_request_counts = defaultdict(int)
+        self.ts_traffic_flush = time_module.time()
 
         self.primary_collect_cooldown_sec = 2.0
         self._last_primary_collect = {}
@@ -364,6 +374,31 @@ class BaskervillehallSession(object):
         for k in list(self.profile_stats.keys()):
             self.profile_stats[k] = 0.0
 
+    def _flush_traffic_stats(self):
+        """Send per-host request counts to topic_traffic_stats and reset counters."""
+        if not self.host_request_counts:
+            self.logger.debug('[TRAFFIC_STATS] flush called but no counts')
+            return
+        ts_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        counts = dict(self.host_request_counts)
+        self.host_request_counts.clear()
+        self.logger.info(f'[TRAFFIC_STATS] flushing {len(counts)} hosts to {self.topic_traffic_stats}')
+        for host, count in counts.items():
+            msg = {
+                'host': host,
+                'request_count': count,
+                'ts': ts_str,
+                'window_seconds': self.traffic_stats_interval,
+            }
+            try:
+                self.producer_output.send(
+                    self.topic_traffic_stats,
+                    key=host.encode('utf-8'),
+                    value=msg,
+                )
+            except Exception as e:
+                self.logger.warning(f'[TRAFFIC_STATS] Failed to send for {host}: {e}')
+
     def create_kafka_connections(self, max_retries=10, initial_delay=5):
         consumer = None
         producer = None
@@ -428,8 +463,18 @@ class BaskervillehallSession(object):
                 self.logger.info(f"Assigned: {consumer.assignment()}")
 
                 producer = KafkaProducer(**kafka_producer_opts)
+
+                # Separate producer for output kafka (kafkab) — used for traffic stats
+                kafka_producer_output_opts = dict(self.kafka_connection_output)
+                kafka_producer_output_opts.update({
+                    'compression_type': 'gzip',
+                    'retries': 0,
+                    'value_serializer': _val_ser,
+                })
+                producer_output = KafkaProducer(**kafka_producer_output_opts)
+
                 self.logger.info("Successfully connected to Kafka brokers")
-                return consumer, producer
+                return consumer, producer, producer_output
             except NoBrokersAvailable as e:
                 delay = initial_delay * (2 ** attempt)
                 self.logger.warning(
@@ -1058,7 +1103,7 @@ class BaskervillehallSession(object):
     def run(self):
 
         try:
-            consumer, self.producer = self.create_kafka_connections()
+            consumer, self.producer, self.producer_output = self.create_kafka_connections()
             self.logger.info(
                 f'Starting Baskervillehall sessionizer from topic {self.topic_weblogs} to {self.topic_sessions}')
 
@@ -1112,6 +1157,10 @@ class BaskervillehallSession(object):
                 self.bot_verificator.refresh()
                 self.ai_bot_verificator.refresh()
                 self.first_responder_blocker.refresh()
+
+                if self.topic_traffic_stats and time_module.time() - self.ts_traffic_flush >= self.traffic_stats_interval:
+                    self._flush_traffic_stats()
+                    self.ts_traffic_flush = time_module.time()
 
                 for topic_partition, messages in raw_messages.items():
                     if (datetime.utcnow() - ts_lag_report).total_seconds() > 5:
@@ -1222,6 +1271,8 @@ class BaskervillehallSession(object):
                         ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
                         self.debugging = self.is_debugging_mode(data)
                         host = message.key.decode('utf-8', errors='replace')
+                        if self.topic_traffic_stats:
+                            self.host_request_counts[host] += 1
                         session_id = self.get_session_cookie(data)
                         self._acc('data_extraction', t_ext)
 
