@@ -138,6 +138,9 @@ class IncidentFirstResponder:
             postgres_connection=None,
             ollama_url='http://localhost:11434',
             llm_model='qwen2.5:7b',
+            llm_provider='ollama',
+            openai_api_key='',
+            openai_model='gpt-4.1',
             check_interval=30,
             min_attack_pct=50.0,
             max_normal_pct=20.0,
@@ -156,6 +159,9 @@ class IncidentFirstResponder:
         self.postgres_connection = postgres_connection or {}
         self.ollama_url = ollama_url.rstrip('/')
         self.llm_model = llm_model
+        self.llm_provider = llm_provider
+        self.openai_api_key = openai_api_key
+        self.openai_model = openai_model
         self.check_interval = check_interval
         self.min_attack_pct = min_attack_pct
         self.max_normal_pct = max_normal_pct
@@ -196,7 +202,8 @@ class IncidentFirstResponder:
                        started_at, survey_country, botnet_info, ended_at,
                        avg_api_ratio, avg_path_diversity, behavior_samples,
                        traffic_peak_ratio, traffic_close_ratio, traffic_recent_ratio,
-                       traffic_peak_count, traffic_close_count, traffic_recent_count
+                       traffic_peak_count, traffic_close_count, traffic_recent_count,
+                       COALESCE(source, 'spike_detector'), block_criteria
                 FROM incidents
                 WHERE started_at > NOW() - INTERVAL '24 hours'
                   AND (
@@ -226,6 +233,10 @@ class IncidentFirstResponder:
                 'traffic_peak_count': int(r[15] or 0),
                 'traffic_close_count': int(r[16] or 0),
                 'traffic_recent_count': int(r[17] or 0),
+                'source': r[18],
+                'block_criteria': r[19] if isinstance(r[19], list) else (
+                    json.loads(r[19]) if isinstance(r[19], str) else (r[19] or [])
+                ),
             }
             for r in rows
         ]
@@ -332,6 +343,184 @@ class IncidentFirstResponder:
             )
             rows = cur.fetchall()
         return {r[0]: float(r[1]) for r in rows}
+
+    def _send_ip_commands(self, incident, ips, command_name, reason):
+        """Send block_ip or challenge_ip Kafka commands for a list of IPs."""
+        if self._producer is None and self._producer_output is None:
+            self.logger.warning(
+                f"[CLUSTER_RESPONDER] No Kafka producer — {command_name} skipped"
+            )
+            return 0
+        host = incident['host']
+        dnet = '-'
+        meta = f'cluster_responder [{command_name}] {reason}'
+        sent = 0
+        for ip in ips:
+            command = {
+                'Name': command_name,
+                'Value': ip,
+                'host': host,
+                'dnet': dnet,
+                'meta': meta,
+                'ttl': self.ttl_minutes * 60,
+            }
+            value = json.dumps(command).encode('utf-8')
+            key = bytearray(host, encoding='utf-8')
+            partition = self.dnet_partition_map.get(dnet, -1)
+            if self._producer is not None:
+                self._producer.send(topic=self.topic_commands, value=value, key=key)
+            if partition < 0:
+                if self._producer_output is not None:
+                    self._producer_output.send(topic=self.topic_commands, value=value, key=key)
+            else:
+                if self._producer_output is not None:
+                    self._producer_output.send(topic=self.topic_commands, value=value, partition=partition)
+            sent += 1
+        self.logger.warning(
+            f"[CLUSTER_RESPONDER] {command_name} host={host} ips={sent} reason={reason}"
+        )
+        return sent
+
+    def _block_ip_list(self, incident, ips, reason):
+        """Send block_ip Kafka commands for a list of IPs (used by _block_fingerprint_ips)."""
+        return self._send_ip_commands(incident, ips, 'block_ip', reason)
+
+
+    def _apply_block_criterion(self, conn, incident, criterion):
+        """Apply one blocking criterion from cluster_analysis incident.
+
+        Each criterion carries an 'action' field ('block' or 'challenge') set by the predictor.
+        The responder honors it — never upgrades challenge to block.
+        """
+        ctype = criterion.get('type')
+        action = criterion.get('action', 'challenge')  # default to challenge if missing
+        incident_id = incident['id']
+        host = incident['host']
+        confidence = criterion.get('confidence', 'medium')
+
+        if ctype == 'fingerprint':
+            fp = criterion.get('value', '')
+            ips = criterion.get('ips', [])
+            pct = criterion.get('pct', 0.0)
+            if not fp:
+                return
+            command_name = 'block_ip' if action == 'block' else 'challenge_ip'
+            if ips:
+                sent = self._send_ip_commands(
+                    incident, ips, command_name,
+                    f'fingerprint={fp} pct={pct:.1f}%'
+                )
+            else:
+                # Fallback: query sessions table (fingerprint incidents store IPs directly now)
+                sent = self._block_fingerprint_ips(conn, incident, fp)
+            self._save_action(conn, incident_id, host, {
+                'action': command_name,
+                'target': [fp],
+                'confidence': confidence,
+                'reasoning': (
+                    f"Cluster analysis: fingerprint {fp} covers {pct:.1f}% of sessions "
+                    f"(same HTTP library/tool). {sent} IPs {command_name}d."
+                ),
+                'ttl_minutes': self.ttl_minutes,
+            })
+
+        elif ctype == 'ip_list':
+            ips = criterion.get('ips', [])
+            reason = criterion.get('reason', 'cluster_analysis')
+            if not ips:
+                return
+            command_name = 'block_ip' if action == 'block' else 'challenge_ip'
+            sent = self._send_ip_commands(incident, ips, command_name, reason)
+            self._save_action(conn, incident_id, host, {
+                'action': command_name,
+                'target': ips[:10],
+                'confidence': confidence,
+                'reasoning': f"Cluster analysis: {reason} — {sent} IPs {command_name}d.",
+                'ttl_minutes': self.ttl_minutes,
+            })
+
+        elif ctype == 'ua_exact':
+            ua = criterion.get('value', '')
+            ips = criterion.get('ips', [])
+            pct = criterion.get('pct', 0.0)
+            is_scripted = criterion.get('is_scripted', False)
+            if not ua:
+                return
+            command_name = 'block_ip' if action == 'block' else 'challenge_ip'
+            # Step 1: act on current cluster IPs immediately via banjax
+            if ips:
+                sent = self._send_ip_commands(
+                    incident, ips, command_name,
+                    f'ua_exact pct={pct:.1f}%'
+                )
+            else:
+                sent = 0
+            # Step 2: for scripted UAs, also save block_ua to first_responder_actions
+            # so first_responder_blocker blocks future sessions with this UA
+            if is_scripted:
+                self._save_action(conn, incident_id, host, {
+                    'action': 'block_ua',
+                    'target': [ua],
+                    'confidence': confidence,
+                    'reasoning': (
+                        f"Cluster analysis: scripted UA covers {pct:.1f}% of cluster. "
+                        f"{sent} current IPs {command_name}d. "
+                        f"UA: {ua[:100]}"
+                    ),
+                    'ttl_minutes': self.ttl_minutes,
+                })
+            else:
+                self._save_action(conn, incident_id, host, {
+                    'action': command_name,
+                    'target': ips[:10],
+                    'confidence': confidence,
+                    'reasoning': (
+                        f"Cluster analysis: browser UA covers {pct:.1f}% of cluster "
+                        f"(challenge only — UA not unique for future blocking). "
+                        f"{sent} IPs {command_name}d."
+                    ),
+                    'ttl_minutes': self.ttl_minutes,
+                })
+
+        else:
+            self.logger.warning(
+                f"[CLUSTER_RESPONDER] Unknown criterion type={ctype} for incident_id={incident_id}"
+            )
+
+    def _process_cluster_incident(self, conn, incident):
+        """Apply block_criteria from a cluster_analysis incident. No LLM call needed."""
+        incident_id = incident['id']
+        host = incident['host']
+        block_criteria = incident.get('block_criteria') or []
+
+        if host in self.host_whitelist:
+            self.logger.info(
+                f"[CLUSTER_RESPONDER] host={host} is whitelisted — skipping"
+            )
+            self._mark_processed(conn, incident_id)
+            return
+
+        if not block_criteria:
+            self.logger.info(
+                f"[CLUSTER_RESPONDER] No block_criteria for incident_id={incident_id} host={host}"
+            )
+            self._mark_processed(conn, incident_id)
+            return
+
+        self.logger.warning(
+            f"[CLUSTER_RESPONDER] Processing incident_id={incident_id} host={host} "
+            f"criteria={len(block_criteria)}"
+        )
+        for criterion in block_criteria:
+            try:
+                self._apply_block_criterion(conn, incident, criterion)
+            except Exception:
+                self.logger.exception(
+                    f"[CLUSTER_RESPONDER] Failed to apply criterion type={criterion.get('type')} "
+                    f"for incident_id={incident_id}"
+                )
+
+        self._mark_processed(conn, incident_id)
 
     def _get_fingerprint_stats(self, conn, incident):
         """Top fingerprints accumulated by IncidentDetector during the incident."""
@@ -633,21 +822,36 @@ class IncidentFirstResponder:
             min_attack_pct=self.min_attack_pct,
             max_normal_pct=self.max_normal_pct,
         )
-        url = f"{self.ollama_url}/v1/chat/completions"
-        payload = {
-            "model": self.llm_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            "stream": False,
-        }
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt},
+        ]
         try:
-            resp = requests.post(url, json=payload, timeout=600)
+            if self.llm_provider == 'openai':
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.openai_api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.openai_model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "response_format": {"type": "json_object"},
+                }
+                resp = requests.post(url, json=payload, headers=headers, timeout=120)
+            else:
+                url = f"{self.ollama_url}/v1/chat/completions"
+                payload = {
+                    "model": self.llm_model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "stream": False,
+                }
+                resp = requests.post(url, json=payload, timeout=600)
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
-            # Strip markdown code fences if present
+            # Strip markdown code fences if present (Ollama sometimes wraps JSON)
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
@@ -726,18 +930,32 @@ class IncidentFirstResponder:
         )
 
     def _generate_narrative(self, prompt):
-        url = f"{self.ollama_url}/v1/chat/completions"
-        payload = {
-            "model": self.llm_model,
-            "messages": [
-                {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.3,
-            "stream": False,
-        }
+        messages = [
+            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
         try:
-            resp = requests.post(url, json=payload, timeout=600)
+            if self.llm_provider == 'openai':
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.openai_api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.openai_model,
+                    "messages": messages,
+                    "temperature": 0.3,
+                }
+                resp = requests.post(url, json=payload, headers=headers, timeout=120)
+            else:
+                url = f"{self.ollama_url}/v1/chat/completions"
+                payload = {
+                    "model": self.llm_model,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "stream": False,
+                }
+                resp = requests.post(url, json=payload, timeout=600)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
@@ -765,10 +983,11 @@ class IncidentFirstResponder:
             return False
         return True
 
-    def _sanitize_response(self, rec, survey_country=None):
+    def _sanitize_response(self, rec, survey_country=None, normal_traffic=None):
         """
         - Remove protected ASNs from block_asn targets.
         - Never block survey_country (site's primary audience).
+        - Never block countries with >= max_normal_pct normal traffic.
         - Enforce max 3 targets for block_asn and block_country.
         - Downgrade to raise_threshold if block_country targets >3 countries.
         """
@@ -796,6 +1015,33 @@ class IncidentFirstResponder:
 
         if action == 'block_country':
             targets = rec.get('target', [])
+
+            # Code-level guard: never block a country that represents >= max_normal_pct of normal traffic
+            if normal_traffic and targets:
+                safe = [c for c in targets if normal_traffic.get(c, 0.0) < self.max_normal_pct]
+                removed_high = [c for c in targets if c not in safe]
+                if removed_high:
+                    for c in removed_high:
+                        self.logger.error(
+                            f"[FIRST_RESPONDER] LLM tried to block {c} which has "
+                            f"{normal_traffic.get(c, 0.0):.1f}% normal traffic "
+                            f"(>= max_normal_pct={self.max_normal_pct}%) — REMOVED"
+                        )
+                    targets = safe
+                    rec['target'] = targets
+                    rec['reasoning'] = (
+                        rec.get('reasoning', '') +
+                        f' [auto-removed high-normal-traffic countries: {removed_high}]'
+                    )
+                if not targets:
+                    self.logger.warning(
+                        "[FIRST_RESPONDER] All block_country targets had high normal traffic — "
+                        "downgrading to monitor_only"
+                    )
+                    rec['action'] = 'monitor_only'
+                    rec['confidence'] = 'low'
+                    return rec
+
             if len(targets) > 3:
                 self.logger.warning(
                     f"[FIRST_RESPONDER] block_country has {len(targets)} targets — "
@@ -844,6 +1090,10 @@ class IncidentFirstResponder:
     def _process_incident(self, conn, incident):
         incident_id = incident['id']
         host = incident['host']
+
+        # Route cluster_analysis incidents to dedicated handler
+        if incident.get('source') == 'cluster_analysis':
+            return self._process_cluster_incident(conn, incident)
 
         # For active incidents: re-analyze only every 10 minutes
         if incident['ended_at'] is None:
@@ -969,7 +1219,11 @@ class IncidentFirstResponder:
             self._mark_processed(conn, incident_id)
             return
 
-        rec = self._sanitize_response(rec, survey_country=incident.get('survey_country'))
+        rec = self._sanitize_response(
+            rec,
+            survey_country=incident.get('survey_country'),
+            normal_traffic=normal_traffic,
+        )
         self._save_action(conn, incident_id, host, rec)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
         if incident.get('ended_at') is not None:
@@ -1042,9 +1296,13 @@ class IncidentFirstResponder:
             )
 
     def run(self):
+        if self.llm_provider == 'openai':
+            llm_info = f"provider=openai model={self.openai_model}"
+        else:
+            llm_info = f"provider=ollama url={self.ollama_url} model={self.llm_model}"
         self.logger.info(
-            f"IncidentFirstResponder starting | ollama={self.ollama_url} "
-            f"model={self.llm_model} check_interval={self.check_interval}s "
+            f"IncidentFirstResponder starting | {llm_info} "
+            f"check_interval={self.check_interval}s "
             f"min_attack_pct={self.min_attack_pct}% max_normal_pct={self.max_normal_pct}%"
         )
 

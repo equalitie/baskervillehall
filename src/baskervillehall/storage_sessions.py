@@ -125,8 +125,13 @@ class StorageSessions(StorageBase):
                     cur.execute(_HOST_ASN_STATS_REFRESH_SQL)
                     cur.execute(_HOST_URL_STATS_REFRESH_SQL)
                     cur.execute(_HOST_UA_STATS_REFRESH_SQL)
+                    cur.execute(
+                        "DELETE FROM session_llm_verdicts "
+                        "WHERE created_at < NOW() - INTERVAL '%s days'",
+                        (self.ttl_records_days,),
+                    )
                 conn.commit()
-                self.logger.info("host stats refreshed (country, asn, url, ua)")
+                self.logger.info("host stats refreshed (country, asn, url, ua); session_llm_verdicts cleaned")
             finally:
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock(987654321)")

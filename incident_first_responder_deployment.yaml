@@ -38,6 +38,12 @@ spec:
         envFrom:
           - configMapRef:
               name: baskervillehall
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: OPENAI_API_KEY
         resources:
           requests:
             cpu: "200m"

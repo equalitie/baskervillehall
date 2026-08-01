@@ -10,10 +10,15 @@ Baskervillehall Predictor (single-threaded version)
 import json
 import logging
 import os
+import threading
 import time as time_module
-from collections import defaultdict
+import statistics
+from collections import defaultdict, deque, Counter
 from datetime import datetime
+from queue import Queue, Full
 from typing import List, Tuple, Dict, Any
+
+import requests as http_requests
 
 import psycopg2
 
@@ -30,6 +35,13 @@ from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.settings_postgres import SettingsPostgres
 from kafka.errors import NoBrokersAvailable
 from kafka.consumer.subscription_state import ConsumerRebalanceListener
+
+CLUSTER_CHECK_INTERVAL = 300    # seconds between checks per host
+CLUSTER_MIN_SESSIONS = 10       # minimum sessions to analyze
+CLUSTER_ALERT_THRESHOLD = 0.55  # uniformity score → warning log + cluster_alerts
+CLUSTER_LLM_THRESHOLD = 0.70    # uniformity score → trigger cluster LLM analysis
+CLUSTER_BUFFER_MAXLEN = 500     # max sessions kept per host
+
 
 class RebalanceLogger(ConsumerRebalanceListener):
     def __init__(self, logger, name="consumer"):
@@ -197,6 +209,15 @@ class BaskervillehallPredictor(object):
             attack_aggressive_spike_ratio=6.0,
             attack_extreme_spike_ratio=15.0,
             attack_response_mode=True,
+            session_llm_enabled=True,
+            ollama_url='http://localhost:11434',
+            llm_model='qwen2.5:7b',
+            session_llm_score_min=20,
+            session_llm_score_max=80,
+            session_llm_min_requests=5,
+            session_llm_queue_size=200,
+            session_llm_provider='ollama',
+            openai_api_key='',
     ):
         super().__init__()
 
@@ -313,6 +334,19 @@ class BaskervillehallPredictor(object):
         self._attack_aggressive_spike_ratio: float = attack_aggressive_spike_ratio
         self._attack_extreme_spike_ratio: float = attack_extreme_spike_ratio
 
+        self._session_llm_enabled: bool = session_llm_enabled
+        self._ollama_url: str = ollama_url
+        self._llm_model: str = llm_model
+        self._session_llm_score_min: int = session_llm_score_min
+        self._session_llm_score_max: int = session_llm_score_max
+        self._session_llm_min_requests: int = session_llm_min_requests
+        self._session_llm_queue_size: int = session_llm_queue_size
+        self._session_llm_provider: str = session_llm_provider  # 'ollama' or 'openai'
+        self._openai_api_key: str = openai_api_key
+        self._session_llm_queue: Queue = None   # initialized in run()
+        self._session_llm_cache: TTLCache = None  # ip → verdict, initialized in run()
+        self._cluster_llm_queue: Queue = None   # initialized in run()
+
     def _refresh_attack_response(self):
         """Poll Postgres incidents table to discover hosts currently under DDoS attack."""
         if not self._attack_response_mode:
@@ -389,6 +423,701 @@ class BaskervillehallPredictor(object):
 
         except Exception:
             self.logger.exception("Failed to refresh incident state from Postgres (non-fatal)")
+
+    # URL prefixes that indicate a logged-in CMS/admin user
+    _ADMIN_URL_PATTERNS = (
+        '/admin', '/wp-admin', '/wp-json/wp/v2',
+        '/media-library', '/node/add', '/node/edit',
+        '/user/login', '/user/register', '/user/password',
+        '/dashboard', '/manage', '/backend',
+        '/edit/', '/update/', '/delete/',
+        '/upload', '/filemanager',
+    )
+
+    def _build_session_llm_prompt(self, session: dict, host: str) -> str:
+        requests_raw = sorted(
+            session.get('requests', []),
+            key=lambda r: r.get('ts', ''),
+        )[:10]
+
+        lines = []
+        api_count = 0
+        post_count = 0
+        admin_count = 0
+        rsc_count = 0       # Next.js React Server Components navigation
+        wp_ajax_count = 0   # WordPress browser-side AJAX (GDPR, comments, tracking)
+        ajax_count = 0      # Generic AJAX/XHR (getFacet, inline JSON)
+        method_counts: dict = {}
+
+        for r in requests_raw:
+            url = r.get('url', '/')
+            query = r.get('query', '') or ''
+            ctype = r.get('type', 'text/html').split(';')[0].strip()
+            method = r.get('method', 'GET')
+            full_url = f"{url}?{query}" if query else url
+            q_str = f'?{query[:80]}' if query else ''
+            lines.append(f"  {method} {url}{q_str}  [{ctype}]")
+            method_counts[method] = method_counts.get(method, 0) + 1
+            if '/api/' in url or url.startswith('/api'):
+                api_count += 1
+            if method == 'POST':
+                post_count += 1
+            if any(pat in url for pat in self._ADMIN_URL_PATTERNS):
+                admin_count += 1
+            # Next.js RSC: _rsc= query param, text/x-component, or /_next/ assets
+            if '_rsc=' in query or ctype == 'text/x-component' or '/_next/' in url:
+                rsc_count += 1
+            # WordPress browser-side AJAX endpoints (called by JS, not admins)
+            if 'admin-ajax.php' in url or '/wp-json/' in url:
+                wp_ajax_count += 1
+            # Generic AJAX patterns (getFacet, XHR JSON endpoints)
+            if 'getFacet' in url or 'ajax' in url.lower() or ctype in ('application/json', 'text/x-component'):
+                ajax_count += 1
+
+        requests_text = '\n'.join(lines)
+        duration = session.get('duration', 0)
+        num_req = len(session.get('requests', []))
+        ua = session.get('ua', '')[:120]
+        method_summary = ', '.join(f"{m}:{c}" for m, c in sorted(method_counts.items()))
+        n = len(requests_raw) or 1
+
+        # Choose context in priority order
+        if rsc_count >= n * 0.5:
+            site_context = (
+                "CONTEXT: This is a Next.js site using React Server Components (RSC). "
+                "When a user navigates between pages in a Next.js SPA, the browser fetches "
+                "'text/x-component' resources with '?_rsc=...' query parameters — these are "
+                "server-rendered component payloads, NOT bot traffic. "
+                "/_next/image URLs are Next.js image optimization requests — these appear "
+                "whenever a Next.js page loads images, and are a strong signal of a real browser. "
+                "A mix of /_next/image requests + RSC fetches is the typical pattern of a human "
+                "browsing a Next.js site: images load first, then the user navigates via RSC. "
+                "Different _rsc tokens for the same URL are normal (cache-busting). "
+                "Label as bot only if: the UA is a known crawler, or URLs show clear "
+                "sitemap/enumeration patterns (sequential IDs, /sitemap.xml, /robots.txt)."
+            )
+        elif wp_ajax_count >= 2 or (wp_ajax_count > 0 and post_count > 0):
+            site_context = (
+                "CONTEXT: This WordPress site uses REST API and AJAX endpoints that are "
+                "called by browser-side JavaScript — NOT necessarily by admin users. "
+                "Common browser-triggered calls: wp-json/complianz (GDPR consent), "
+                "wp-json/<plugin>/* (donation/payment tracking, newsletter, etc.), "
+                "admin-ajax.php (comments, search, analytics, any plugin). "
+                "These appear in sessions of ORDINARY visitors when plugins run JS. "
+                "Presence of UTM/tracking parameters (utm_source, gclid, fbclid) in "
+                "any URL strongly indicates a real visitor from ads or social media. "
+                "Label as bot only if the UA is a known crawler or URLs show clear "
+                "reconnaissance/data-harvesting patterns."
+            )
+        elif ajax_count >= n * 0.5 and post_count == 0:
+            site_context = (
+                "CONTEXT: This session consists mainly of AJAX/XHR requests "
+                "(faceted search, inline data endpoints, JSON APIs). "
+                "Modern web applications fire many background XHR calls as the user "
+                "interacts with filters, search facets, or dynamic content — this is "
+                "normal human behavior in archive, search, or dashboard UIs. "
+                "Label as bot only if URLs show sequential numeric ID enumeration, "
+                "the UA is a known crawler, or requests target sensitive paths "
+                "(/.env, /.git, /phpinfo, /server-status)."
+            )
+        elif api_count >= n * 0.6:
+            site_context = (
+                "CONTEXT: This site exposes a REST/ActivityPub API. "
+                "Mobile apps, desktop clients, and browser SPAs call these endpoints on behalf of real users. "
+                "API polling (notifications, timelines, feed updates) by a legitimate client User-Agent is HUMAN behavior. "
+                "Label as bot only if: UA is a known crawler/script, URLs show sequential ID enumeration, "
+                "or the pattern matches sitemap/data harvesting."
+            )
+        elif admin_count > 0 or post_count >= n * 0.3:
+            site_context = (
+                "CONTEXT: This session contains POST requests and/or CMS admin/editor URLs. "
+                "Bots almost never send POST requests — they scrape content with GET. "
+                "POST-heavy sessions typically indicate a logged-in user submitting forms, "
+                "editing content in a CMS (Drupal, WordPress, etc.), or uploading media. "
+                "Admin paths (/admin/, /media-library/, /node/add/, /edit/, /upload/) "
+                "strongly indicate a legitimate site editor or administrator. "
+                "Label as bot only if the UA is a known crawler or the pattern clearly shows "
+                "automated data extraction (no POST, sequential IDs, sitemap crawling)."
+            )
+        else:
+            site_context = (
+                "CONTEXT: This site serves web pages. "
+                "Human browsing ALWAYS mixes HTML pages with CSS/JS/image assets — a real browser "
+                "loads stylesheets, scripts, and images alongside each HTML page. "
+                "CRITICAL BOT SIGNALS (any one is sufficient): "
+                "(1) Session contains ONLY [text/html] responses with NO [image/...], [text/css], "
+                "[application/javascript] responses — real browsers always load assets. "
+                "(2) Sequential numeric page IDs (/?p=12345, /?p=12346, ...). "
+                "(3) Pattern of /?p=ID followed by /date/category/ID/ for the same IDs — this is "
+                "a WordPress bot that fetches by ID then follows the canonical URL, NOT human navigation. "
+                "(4) Sitemap or feed crawling (/sitemap.xml, /feed, /rss/). "
+                "(5) Non-browser or empty UA. "
+                "Topic-based URLs and varied article paths do NOT indicate human traffic on their own — "
+                "bots crawl topic-organized sites too. The key differentiator is asset loading."
+            )
+
+        return f"""Analyze this web session on site: {host}
+Session: {num_req} requests over {duration:.0f}s ({method_summary})
+User-Agent: {ua}
+
+{site_context}
+
+Request sequence:
+{requests_text}
+
+Reply JSON only, no markdown:
+{{"label": "human" or "bot", "confidence": 0.0-1.0, "reasoning": "2-3 sentences"}}"""
+
+    def _session_llm_score(self, session: dict, host: str) -> dict | None:
+        try:
+            prompt = self._build_session_llm_prompt(session, host)
+            if self._session_llm_provider == 'openai':
+                url = 'https://api.openai.com/v1/chat/completions'
+                headers = {'Authorization': f'Bearer {self._openai_api_key}'}
+                timeout = 30
+            else:
+                url = f'{self._ollama_url}/v1/chat/completions'
+                headers = {}
+                timeout = 300
+            response = http_requests.post(
+                url,
+                headers=headers,
+                json={
+                    'model': self._llm_model,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.0,
+                },
+                timeout=timeout,
+            )
+            content = response.json()['choices'][0]['message']['content'].strip()
+            # Strip markdown code blocks if model wraps JSON in them
+            if content.startswith('```'):
+                content = content.split('```')[1]
+                if content.startswith('json'):
+                    content = content[4:]
+            return json.loads(content.strip())
+        except Exception:
+            self.logger.exception(
+                f"[SESSION_LLM] Error for ip={session.get('ip')} host={host}"
+            )
+            return None
+
+    def _save_session_llm_verdict(self, session: dict, host: str, baskerville_score: int, verdict: dict):
+        requests_raw = sorted(session.get('requests', []), key=lambda r: r.get('ts', ''))[:20]
+        url_sequence = '\n'.join(
+            f"{r.get('method','GET')} {r.get('url','/')}"
+            + (f"?{r.get('query','')}" if r.get('query') else '')
+            for r in requests_raw
+        )
+        try:
+            conn = psycopg2.connect(**self.postgres_connection)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO session_llm_verdicts
+                       (host, ip, session_id, baskerville_score, num_requests, duration,
+                        ua, llm_label, llm_confidence, llm_reasoning, url_sequence)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        host,
+                        session.get('ip', ''),
+                        session.get('session_id', ''),
+                        baskerville_score,
+                        len(session.get('requests', [])),
+                        session.get('duration', 0),
+                        session.get('ua', '')[:500],
+                        verdict.get('label', ''),
+                        float(verdict.get('confidence', 0.0)),
+                        verdict.get('reasoning', ''),
+                        url_sequence[:2000],
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception:
+            self.logger.exception(f"[SESSION_LLM] Failed to save verdict for ip={session.get('ip')} host={host}")
+
+    def _llm_session_worker(self):
+        self.logger.info("[SESSION_LLM] Worker started, model=%s", self._llm_model)
+        producer = KafkaProducer(**self.kafka_connection)
+        producer_output = KafkaProducer(**self.kafka_connection_output)
+        pending_challenge = TTLCache(maxsize=50000, ttl=self.pending_ttl)
+
+        while True:
+            try:
+                item = self._session_llm_queue.get(timeout=30)
+            except Exception:
+                continue
+
+            session = item['session']
+            host = item['host']
+            baskerville_score = item['baskerville_score']
+            dnet = item.get('dnet', '-')
+            ip = session.get('ip', '')
+
+            verdict = self._session_llm_score(session, host)
+            if verdict is None:
+                continue
+
+            label = verdict.get('label', '')
+            confidence = verdict.get('confidence', 0.0)
+            reasoning = verdict.get('reasoning', '')
+
+            # Cache verdict by IP for cluster analysis
+            if self._session_llm_cache is not None:
+                self._session_llm_cache[ip] = verdict
+
+            self.logger.info(
+                f"[SESSION_LLM] host={host} ip={ip} baskerville_score={baskerville_score} "
+                f"label={label} confidence={confidence:.2f} reasoning={reasoning}"
+            )
+
+            if self.postgres_connection:
+                self._save_session_llm_verdict(session, host, baskerville_score, verdict)
+
+            if label == 'bot' and confidence >= 0.85 and ip not in pending_challenge:
+                pending_challenge[ip] = True
+                command = 'challenge_ip' if confidence >= 0.9 else 'challenge_session'
+                scraper_name = session.get('scraper_name', detect_scraper(session.get('ua')))
+                payload = self.create_command(
+                    command_name=command,
+                    session=session,
+                    meta=f"session_llm [{command}] confidence={confidence:.2f}",
+                    prediction_if=False,
+                    score_if=0.0,
+                    shapley_if='',
+                    shapley_feature_if='',
+                    prediction_ae=False,
+                    score_ae=0.0,
+                    shapley_ae='',
+                    shapley_feature_ae='',
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=0.0,
+                    baskerville_score=baskerville_score,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+                producer.flush()
+                producer_output.flush()
+                self.logger.warning(
+                    f"[SESSION_LLM] {command} ip={ip} host={host} "
+                    f"confidence={confidence:.2f} reasoning={reasoning}"
+                )
+
+    # ------------------------------------------------------------------
+    # Cluster LLM analysis
+    # ------------------------------------------------------------------
+
+    def _build_cluster_llm_prompt(self, host: str, sessions: list, score: float) -> str:
+        n = len(sessions)
+        uas = [s['ua'] for s in sessions if s.get('ua')]
+        fps = [s['fingerprint'] for s in sessions if s.get('fingerprint')]
+        cvs = [s['interval_cv'] for s in sessions if s.get('interval_cv') is not None]
+        all_paths = [p for s in sessions for p in s.get('url_paths', [])]
+
+        ua_counts = Counter(uas)
+        fp_counts = Counter(fps)
+
+        ua_lines = '\n'.join(
+            f'  "{ua[:80]}" — {cnt} sessions ({cnt * 100 // n}%)'
+            for ua, cnt in ua_counts.most_common(5)
+        ) or '  (none)'
+        fp_lines = '\n'.join(
+            f'  {fp} — {cnt} sessions ({cnt * 100 // n}%)'
+            for fp, cnt in fp_counts.most_common(5)
+        ) or '  (none)'
+        ip_list = ', '.join({s['ip'] for s in sessions if s.get('ip')})
+
+        avg_cv = f'{statistics.mean(cvs):.3f}' if cvs else 'n/a'
+        top_path = Counter(all_paths).most_common(1)
+        top_path_str = f'{top_path[0][0]} ({top_path[0][1] * 100 // max(len(all_paths), 1)}%)' if top_path else 'n/a'
+
+        # Session LLM verdicts (if available)
+        llm_lines = ''
+        if self._session_llm_cache is not None:
+            verdicts = [(s['ip'], self._session_llm_cache.get(s['ip'])) for s in sessions]
+            found = [(ip, v) for ip, v in verdicts if v is not None]
+            if found:
+                bot_count = sum(1 for _, v in found if v.get('label') == 'bot')
+                llm_lines = (
+                    f'\nSESSION LLM VERDICTS ({len(found)}/{n} sessions analyzed):\n'
+                    f'  bot={bot_count}/{len(found)}, '
+                    f'human={len(found) - bot_count}/{len(found)}\n'
+                    + '\n'.join(
+                        f'  ip={ip} label={v.get("label")} confidence={v.get("confidence", 0):.2f}'
+                        for ip, v in found[:5]
+                    )
+                )
+
+        return (
+            f'You are a DDoS detection expert. Analyze this cluster of web sessions.\n\n'
+            f'Host: {host}\n'
+            f'Window: last {CLUSTER_CHECK_INTERVAL // 60} minutes\n'
+            f'Sessions: {n}\n'
+            f'Uniformity score: {score:.2f} (0=organic, 1=fully coordinated bot)\n\n'
+            f'CLUSTER SIGNALS:\n'
+            f'  fingerprint diversity: {len(set(fps))}/{len(fps) or 1:.0f} unique '
+            f'(1 = same HTTP library across all sessions)\n'
+            f'  UA diversity: {len(set(uas))}/{len(uas) or 1:.0f} unique\n'
+            f'  avg interval_cv: {avg_cv} (0.0 = perfect bot timer, >0.5 = human-like)\n'
+            f'  top URL pattern: {top_path_str}\n\n'
+            f'TOP USER AGENTS:\n{ua_lines}\n\n'
+            f'TOP FINGERPRINTS (UA+TLS cipher order+Accept-Language hash):\n{fp_lines}\n\n'
+            f'IP LIST: {ip_list}\n'
+            f'{llm_lines}\n\n'
+            f'Is this a coordinated bot attack or organic traffic?\n'
+            f'Respond with JSON only:\n'
+            f'{{"verdict": "attack" | "benign" | "uncertain", '
+            f'"confidence": "high" | "medium" | "low", '
+            f'"reasoning": "1-2 sentences"}}'
+        )
+
+    def _build_block_criteria(self, sessions: list, score: float) -> list:
+        """Derive blocking criteria from cluster features. Each criterion is self-contained.
+
+        Each criterion has an 'action' field: 'block' or 'challenge'.
+        Conservative by design — challenge on ambiguous signals, block only on very strong evidence.
+        """
+        criteria = []
+
+        # Fingerprint — always challenge, never block.
+        # A fingerprint (UA+TLS cipher order+Accept-Language) can match many legitimate users
+        # on the same browser version. Even 100% concentration is not safe to block.
+        fps = [s['fingerprint'] for s in sessions if s.get('fingerprint')]
+        if fps:
+            for fp, count in Counter(fps).most_common(3):
+                pct = count / len(fps) * 100
+                if pct >= 30:
+                    fp_ips = [s['ip'] for s in sessions if s.get('fingerprint') == fp and s.get('ip')]
+                    criteria.append({
+                        'type': 'fingerprint',
+                        'action': 'challenge',
+                        'value': fp,
+                        'count': count,
+                        'pct': round(pct, 1),
+                        'ips': fp_ips,
+                        'confidence': 'high' if pct >= 70 else 'medium',
+                    })
+
+        # IP list — split by interval_cv strength.
+        cvs_by_ip = {s['ip']: s.get('interval_cv') for s in sessions if s.get('ip')}
+
+        # Hard block: cv < 0.05 — near-perfect bot timer. Humans cannot maintain this regularity.
+        hard_bot_ips = [ip for ip, cv in cvs_by_ip.items() if cv is not None and cv < 0.05]
+        if hard_bot_ips:
+            criteria.append({
+                'type': 'ip_list',
+                'action': 'block',
+                'ips': hard_bot_ips,
+                'reason': 'interval_cv<0.05 (near-perfect bot timer)',
+                'confidence': 'high',
+            })
+
+        # Soft challenge: cv 0.05–0.10 — suspicious regularity but not conclusive.
+        soft_bot_ips = [ip for ip, cv in cvs_by_ip.items() if cv is not None and 0.05 <= cv < 0.10]
+        if soft_bot_ips:
+            criteria.append({
+                'type': 'ip_list',
+                'action': 'challenge',
+                'ips': soft_bot_ips,
+                'reason': 'interval_cv 0.05–0.10 (suspicious regularity)',
+                'confidence': 'medium',
+            })
+
+        # UA — two tiers:
+        # - Scripted UAs (python-requests, curl, etc.): block current IPs + block_ua for future
+        # - Browser UAs: challenge current IPs only (UA not unique, can't block future sessions)
+        _SCRIPTED_PATTERNS = (
+            'python-requests', 'python-urllib', 'python/',
+            'curl/', 'wget/', 'httpie/',
+            'go-http-client', 'java/', 'okhttp', 'apache-httpclient',
+            'headlesschrome', 'phantomjs', 'puppeteer',
+        )
+        uas = [s['ua'] for s in sessions if s.get('ua')]
+        if uas:
+            for ua, count in Counter(uas).most_common(2):
+                pct = count / len(uas) * 100
+                if pct >= 50 and count >= 5:
+                    ua_ips = [s['ip'] for s in sessions if s.get('ua') == ua and s.get('ip')]
+                    is_scripted = any(p in ua.lower() for p in _SCRIPTED_PATTERNS)
+                    criteria.append({
+                        'type': 'ua_exact',
+                        'action': 'block' if is_scripted else 'challenge',
+                        'value': ua,
+                        'ips': ua_ips,
+                        'count': count,
+                        'pct': round(pct, 1),
+                        'confidence': 'high' if is_scripted else 'medium',
+                        'is_scripted': is_scripted,
+                    })
+
+        return criteria
+
+    def _save_cluster_incident(self, host: str, score: float, sessions: list,
+                               block_criteria: list, llm_reasoning: str):
+        n = len(sessions)
+        try:
+            conn = psycopg2.connect(**self.postgres_connection)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO incidents
+                       (host, started_at, ended_at, challenge_count, baseline_avg, spike_ratio,
+                        source, block_criteria, narrative)
+                       VALUES (%s, NOW(), NOW(), 0, 0, 0, 'cluster_analysis', %s, %s)
+                       RETURNING id""",
+                    (
+                        host,
+                        json.dumps(block_criteria),
+                        f"[CLUSTER] uniformity_score={score:.2f} sessions={n}\n{llm_reasoning}",
+                    ),
+                )
+                incident_id = cur.fetchone()[0]
+            conn.commit()
+            conn.close()
+            self.logger.warning(
+                f"[CLUSTER_LLM] Incident created: host={host} incident_id={incident_id} "
+                f"score={score:.2f} criteria={len(block_criteria)}"
+            )
+        except Exception:
+            self.logger.exception(f"[CLUSTER_LLM] Failed to save incident for host={host}")
+
+    def _cluster_llm_worker(self):
+        self.logger.info("[CLUSTER_LLM] Worker started")
+        while True:
+            try:
+                item = self._cluster_llm_queue.get(timeout=60)
+            except Exception:
+                continue
+
+            host = item['host']
+            sessions = item['sessions']
+            score = item['score']
+
+            try:
+                prompt = self._build_cluster_llm_prompt(host, sessions, score)
+                response = http_requests.post(
+                    'https://api.openai.com/v1/chat/completions',
+                    headers={'Authorization': f'Bearer {self._openai_api_key}'},
+                    json={
+                        'model': self._llm_model,
+                        'messages': [{'role': 'user', 'content': prompt}],
+                        'temperature': 0.0,
+                        'response_format': {'type': 'json_object'},
+                    },
+                    timeout=30,
+                )
+                content = response.json()['choices'][0]['message']['content'].strip()
+                verdict = json.loads(content)
+            except Exception:
+                self.logger.exception(f"[CLUSTER_LLM] Error for host={host}")
+                continue
+
+            v = verdict.get('verdict', 'uncertain')
+            confidence = verdict.get('confidence', 'low')
+            reasoning = verdict.get('reasoning', '')
+
+            self.logger.warning(
+                f"[CLUSTER_LLM] host={host} score={score:.2f} verdict={v} "
+                f"confidence={confidence} reasoning={reasoning}"
+            )
+
+            if v == 'attack' and confidence in ('high', 'medium') and self.postgres_connection:
+                block_criteria = self._build_block_criteria(sessions, score)
+                if block_criteria:
+                    self._save_cluster_incident(host, score, sessions, block_criteria, reasoning)
+
+    # ------------------------------------------------------------------
+    # Cluster analysis — uniformity scoring
+    # ------------------------------------------------------------------
+
+    def _extract_cluster_features(self, session: dict) -> dict:
+        """Extract lightweight per-session data for cluster_buffer."""
+        requests = session.get('requests', [])
+        sorted_reqs = sorted(requests, key=lambda x: x.get('ts', ''))[:20]
+
+        url_paths = [r.get('url', '/') for r in sorted_reqs[:10]]
+
+        # Compute inter-request intervals from raw timestamps
+        intervals = []
+        prev_ts = None
+        for r in sorted_reqs:
+            ts = r.get('ts')
+            if prev_ts is not None and ts is not None:
+                try:
+                    ts_dt = datetime.strptime(ts, self.date_time_format) if isinstance(ts, str) else ts
+                    prev_dt = datetime.strptime(prev_ts, self.date_time_format) if isinstance(prev_ts, str) else prev_ts
+                    delta = (ts_dt - prev_dt).total_seconds()
+                    if 0 < delta < 300:
+                        intervals.append(delta)
+                except Exception:
+                    pass
+            prev_ts = ts
+
+        # interval_cv: coefficient of variation of request intervals
+        # High CV = human (erratic), Low CV = bot (regular timing)
+        if len(intervals) >= 2:
+            mean_iv = statistics.mean(intervals)
+            std_iv = statistics.stdev(intervals)
+            interval_cv = std_iv / mean_iv if mean_iv > 0 else 0.0
+        else:
+            interval_cv = None  # not enough data
+
+        return {
+            'ip': session.get('ip', ''),
+            'ts': session.get('start', datetime.utcnow()),
+            'url_paths': url_paths,
+            'ua': session.get('ua', ''),
+            'num_requests': len(requests),
+            'interval_cv': interval_cv,
+            # fingerprint: JA3-like TLS hash (UA + cipher list order + Accept-Language).
+            # Sessions from the same tool/library share the same fingerprint regardless
+            # of source IP — a very strong coordinated-attack signal.
+            'fingerprint': session.get('fingerprints', ''),
+        }
+
+    def _compute_uniformity(self, sessions: list) -> float:
+        """Compute a 0.0–1.0 uniformity score over a cluster of session feature dicts.
+
+        Higher score = more bot-like uniformity.
+        Uses pre-computed session features (static_ratio, interval_cv) for accuracy.
+        """
+        if len(sessions) < CLUSTER_MIN_SESSIONS:
+            return 0.0
+
+        scores = []
+
+        # 1. UA diversity: low unique-UA fraction → suspicious
+        uas = [s['ua'] for s in sessions]
+        ua_diversity = len(set(uas)) / len(uas)
+        scores.append(max(0.0, 1.0 - ua_diversity * 3))  # 0 if > 33% unique UAs
+
+        # 2. Fingerprint diversity: same TLS fingerprint across IPs → same tool → coordinated.
+        # fingerprint is a JA3-like hash of (UA + cipher list order + Accept-Language).
+        # Bots from the same library share one fingerprint even with different UAs.
+        # Low diversity (< 50% unique) is a very strong coordinated-attack signal.
+        fingerprints = [s['fingerprint'] for s in sessions if s.get('fingerprint')]
+        if len(fingerprints) >= CLUSTER_MIN_SESSIONS:
+            fp_diversity = len(set(fingerprints)) / len(fingerprints)
+            scores.append(max(0.0, 1.0 - fp_diversity * 2))  # 0 if > 50% unique
+        else:
+            scores.append(0.0)
+
+        # 3. URL path pattern uniformity: same top-level paths across IPs → suspicious
+        # Use first path segment only to find clusters hitting the same section
+        def top_path(paths):
+            if not paths:
+                return ''
+            first = paths[0].split('/')
+            return '/'.join(first[:3]) if len(first) >= 3 else paths[0]
+
+        path_patterns = [top_path(s['url_paths']) for s in sessions if s['url_paths']]
+        if len(path_patterns) >= CLUSTER_MIN_SESSIONS:
+            top_ratio = Counter(path_patterns).most_common(1)[0][1] / len(path_patterns)
+            scores.append(top_ratio)
+        else:
+            scores.append(0.0)
+
+        # 4. Interval CV: low cluster-average CV → suspicious (humans have high variance)
+        # interval_cv is None when session has < 2 intervals (skip those)
+        cvs = [s['interval_cv'] for s in sessions if s.get('interval_cv') is not None]
+        if len(cvs) >= 3:
+            mean_cv = statistics.mean(cvs)
+            # Humans: mean_cv > 0.8; bots: mean_cv < 0.3
+            scores.append(max(0.0, 1.0 - mean_cv * 1.25))
+        else:
+            scores.append(0.0)
+
+        # 5. Sequential numeric URL IDs across different IPs → suspicious
+        all_paths = [p for s in sessions for p in s['url_paths']]
+        numeric_paths = [p for p in all_paths if any(c.isdigit() for c in p)]
+        if len(numeric_paths) > 5:
+            unique_ratio = len(set(numeric_paths)) / len(numeric_paths)
+            scores.append(min(1.0, (1.0 - unique_ratio) + 0.3))
+        else:
+            scores.append(0.0)
+
+        # fingerprint (metric 2) gets primary weight — it's the strongest coordinated-attack
+        # signal and subsumes UA identity. UA diversity (metric 1) is secondary.
+        weights = [0.10, 0.50, 0.20, 0.15, 0.05]
+        base_score = sum(s * w for s, w in zip(scores, weights))
+
+        # LLM signal: blend in bot_ratio from session_llm_cache when available.
+        # Only grey-zone sessions have verdicts, so coverage is partial — we blend
+        # proportionally: LLM gets weight 0.30, existing metrics rescaled to 0.70.
+        if self._session_llm_cache is not None:
+            verdicts = [self._session_llm_cache.get(s['ip']) for s in sessions]
+            verdicts_found = [v for v in verdicts if v is not None]
+            if len(verdicts_found) >= 3:
+                bot_ratio = sum(1 for v in verdicts_found if v.get('label') == 'bot') / len(verdicts_found)
+                llm_weight = 0.30
+                return min(1.0, base_score * (1.0 - llm_weight) + bot_ratio * llm_weight)
+
+        return base_score
+
+    def _check_clusters(self, cluster_buffer: dict, cluster_alerts: TTLCache, cluster_check_ts: dict):
+        """Per-host uniformity check, called once per main loop iteration.
+
+        Phase 1: logging + cluster_alerts only, no LLM.
+        """
+        now = datetime.utcnow()
+        for host, buf in list(cluster_buffer.items()):
+            last_check = cluster_check_ts.get(host)
+            if last_check and (now - last_check).total_seconds() < CLUSTER_CHECK_INTERVAL:
+                continue
+
+            cluster_check_ts[host] = now
+            sessions = list(buf)
+
+            if len(sessions) < CLUSTER_MIN_SESSIONS:
+                continue
+
+            score = self._compute_uniformity(sessions)
+
+            # LLM verdict breakdown (for logging)
+            llm_info = ''
+            if self._session_llm_cache is not None:
+                verdicts = [self._session_llm_cache.get(s['ip']) for s in sessions]
+                verdicts_found = [v for v in verdicts if v is not None]
+                if verdicts_found:
+                    bot_count = sum(1 for v in verdicts_found if v.get('label') == 'bot')
+                    llm_info = (
+                        f" llm_coverage={len(verdicts_found)}/{len(sessions)}"
+                        f" llm_bots={bot_count}/{len(verdicts_found)}"
+                    )
+
+            if score >= CLUSTER_ALERT_THRESHOLD:
+                cluster_alerts[host] = score
+                uas = [s['ua'] for s in sessions]
+                ua_div = len(set(uas)) / len(uas)
+                fps = [s['fingerprint'] for s in sessions if s.get('fingerprint')]
+                fp_diversity = len(set(fps)) / len(fps) if fps else 1.0
+                unique_fps = len(set(fps))
+                cvs = [s['interval_cv'] for s in sessions if s.get('interval_cv') is not None]
+                avg_cv = statistics.mean(cvs) if cvs else None
+                self.logger.warning(
+                    f"[CLUSTER] Suspicious uniformity host={host} score={score:.2f} "
+                    f"sessions={len(sessions)} ua_diversity={ua_div:.2f} "
+                    f"fp_diversity={fp_diversity:.2f} unique_fps={unique_fps} "
+                    f"avg_interval_cv={f'{avg_cv:.2f}' if avg_cv is not None else 'n/a'}{llm_info}"
+                )
+                if score >= CLUSTER_LLM_THRESHOLD and self._cluster_llm_queue is not None:
+                    try:
+                        self._cluster_llm_queue.put_nowait({
+                            'host': host,
+                            'sessions': sessions,
+                            'score': score,
+                        })
+                        self.logger.info(
+                            f"[CLUSTER_LLM] Enqueued analysis host={host} score={score:.2f}"
+                        )
+                    except Full:
+                        self.logger.debug(f"[CLUSTER_LLM] Queue full, skipping host={host}")
+            else:
+                self.logger.debug(
+                    f"[CLUSTER] host={host} score={score:.2f} sessions={len(sessions)}"
+                    f" (below threshold){llm_info}"
+                )
+
+    # ------------------------------------------------------------------
 
     def get_shapley_report(self, shap_value, feature_names):
         """Legacy method for compatibility."""
@@ -911,6 +1640,30 @@ class BaskervillehallPredictor(object):
                 )
             return
 
+        # Queue for session-level LLM analysis (observation only, no action taken here).
+        # Two paths into grey zone:
+        #   1) baskerville_score in configured range (when classifier model is loaded)
+        #   2) ML anomaly detected on human session (fallback when classifier is absent)
+        _llm_score_in_range = self._session_llm_score_min <= baskerville_score <= self._session_llm_score_max
+        _llm_ml_anomaly = prediction_if or prediction_ae
+        if (
+            self._session_llm_enabled
+            and self._session_llm_queue is not None
+            and human
+            and not session.get('bad_bot', False)
+            and len(session.get('requests', [])) >= self._session_llm_min_requests
+            and (_llm_score_in_range or _llm_ml_anomaly)
+        ):
+            try:
+                self._session_llm_queue.put_nowait({
+                    'session': session,
+                    'host': host,
+                    'baskerville_score': baskerville_score,
+                    'dnet': dnet,
+                })
+            except Full:
+                pass  # queue full — skip, main loop must not block
+
         # if session.get("ai_spoofer", False):
         #     if ip in pending_block_ip:
         #         return
@@ -1021,11 +1774,10 @@ class BaskervillehallPredictor(object):
         if attack_response_extreme and session.get("datacenter_asn", False):
             if ip not in pending_block_ip:
                 pending_block_ip[ip] = True
-                extreme_command = "challenge_ip" if protected_country else "block_ip"
+                extreme_command = "block_ip"
                 self.logger.warning(
                     f"datacenter_asn {extreme_command} [attack_response] ip={ip} host={host} "
                     f"session_id={session_id} human={human}"
-                    + (" [survey_country protected]" if protected_country else "")
                 )
                 payload = self.create_command(
                     command_name=extreme_command,
@@ -1147,7 +1899,7 @@ class BaskervillehallPredictor(object):
             if entropy == 0 and num_non_static > 1:
                 command = "block_ip"
 
-            if host == 'antijob.net' or (attack_response_aggressive and not protected_country):
+            if host == 'antijob.net' or attack_response_aggressive:
                 command = "block_ip"
             # else:
             #     command = "rate_limit" if self.use_rate_limit else "challenge_ip"
@@ -1194,7 +1946,7 @@ class BaskervillehallPredictor(object):
             if ip in pending_challenge_ip:
                 return
             pending_challenge_ip[ip] = True
-            command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+            command = "challenge_ip"  # rate_limit not supported by banjax
             meta = f"{meta} [{command}]"
 
             baskerville_score = 20
@@ -1282,12 +2034,12 @@ class BaskervillehallPredictor(object):
             duration = session.get("duration", 0)
             if primary_session:
                 if not human:
-                    command = "block_ip" if (attack_response_aggressive and not protected_country) else "challenge_ip"
+                    command = "block_ip" if attack_response_aggressive else "challenge_ip"
                 else:
                     if ip in pending_challenge_ip:
                         return
                     pending_challenge_ip[ip] = True
-                    command = "rate_limit" if self.use_rate_limit else "challenge_ip"
+                    command = "challenge_ip"  # rate_limit not supported by banjax
             else:
                 if ip not in pending_session:
                     pending_session[ip] = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
@@ -1297,7 +2049,7 @@ class BaskervillehallPredictor(object):
                 if human:
                     command = "challenge_session"
                 else:
-                    command = "block_ip" if (attack_response_aggressive and not protected_country) else ("rate_limit" if self.use_rate_limit else "challenge_ip")
+                    command = "block_ip" if attack_response_aggressive else "challenge_ip"  # rate_limit not supported
 
             baskerville_score = baskerville_score if not human else 25
             self.logger.info(
@@ -1454,6 +2206,35 @@ class BaskervillehallPredictor(object):
         pending_session = TTLCache(maxsize=self.maxsize_pending, ttl=self.pending_ttl)
         novel_attack_counts = TTLCache(maxsize=50000, ttl=60 * 60)  # ip → count, 1h window
 
+        if self._session_llm_enabled:
+            self._session_llm_cache = TTLCache(maxsize=5000, ttl=300)  # ip → verdict, 5 min TTL
+            self._session_llm_queue = Queue(maxsize=self._session_llm_queue_size)
+            threading.Thread(target=self._llm_session_worker, daemon=True, name='session-llm').start()
+            self.logger.info(
+                f"[SESSION_LLM] Enabled: provider={self._session_llm_provider} model={self._llm_model} "
+                f"score_range=[{self._session_llm_score_min},{self._session_llm_score_max}] "
+                f"min_requests={self._session_llm_min_requests}"
+            )
+
+        # Cluster analysis — uniformity scoring + LLM incident creation
+        cluster_buffer: Dict[str, deque] = defaultdict(lambda: deque(maxlen=CLUSTER_BUFFER_MAXLEN))
+        cluster_alerts: TTLCache = TTLCache(maxsize=500, ttl=600)  # TTL 10 min
+        cluster_check_ts: Dict[str, datetime] = {}
+        if self._session_llm_enabled and self._openai_api_key:
+            self._cluster_llm_queue = Queue(maxsize=20)
+            threading.Thread(target=self._cluster_llm_worker, daemon=True, name='cluster-llm').start()
+            self.logger.info(
+                f"[CLUSTER] Uniformity scoring + LLM enabled: check_interval={CLUSTER_CHECK_INTERVAL}s "
+                f"min_sessions={CLUSTER_MIN_SESSIONS} alert_threshold={CLUSTER_ALERT_THRESHOLD} "
+                f"llm_threshold={CLUSTER_LLM_THRESHOLD}"
+            )
+        else:
+            self.logger.info(
+                f"[CLUSTER] Uniformity scoring enabled (LLM disabled): "
+                f"check_interval={CLUSTER_CHECK_INTERVAL}s "
+                f"min_sessions={CLUSTER_MIN_SESSIONS} alert_threshold={CLUSTER_ALERT_THRESHOLD}"
+            )
+
         offences = TTLCache(maxsize=10000, ttl=60 * 60)
         ip_with_sessions = TTLCache(maxsize=100000, ttl=60 * 60)
 
@@ -1475,6 +2256,7 @@ class BaskervillehallPredictor(object):
                     ts_assign_report = datetime.utcnow()
 
                 self._refresh_attack_response()
+                self._check_clusters(cluster_buffer, cluster_alerts, cluster_check_ts)
 
                 raw_messages = consumer.poll(timeout_ms=self.kafka_poll_timeout_ms, max_records=self.batch_size)
                 for topic_partition, messages in raw_messages.items():
@@ -1527,6 +2309,7 @@ class BaskervillehallPredictor(object):
                             ip_with_sessions[session["ip"]] = True
 
                         session["host"] = host
+                        cluster_buffer[host].append(self._extract_cluster_features(session))
                         batch[(host, human)].append(session)
                         predicting_total += 1
 

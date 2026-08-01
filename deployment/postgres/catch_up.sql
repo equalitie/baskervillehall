@@ -89,3 +89,25 @@ CREATE INDEX IF NOT EXISTS incident_fingerprint_stats_incident_id
     ON incident_fingerprint_stats (incident_id);
 
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS narrative TEXT;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'spike_detector';
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS block_criteria JSONB;
+
+CREATE TABLE IF NOT EXISTS session_llm_verdicts (
+    id                BIGSERIAL PRIMARY KEY,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    host              TEXT NOT NULL,
+    ip                TEXT NOT NULL,
+    session_id        TEXT NOT NULL,
+    baskerville_score INTEGER NOT NULL,
+    num_requests      INTEGER NOT NULL,
+    duration          FLOAT,
+    ua                TEXT,
+    llm_label         TEXT NOT NULL,
+    llm_confidence    FLOAT NOT NULL,
+    llm_reasoning     TEXT,
+    url_sequence      TEXT
+);
+CREATE INDEX IF NOT EXISTS session_llm_verdicts_created_at
+    ON session_llm_verdicts (created_at DESC);
+CREATE INDEX IF NOT EXISTS session_llm_verdicts_host_label
+    ON session_llm_verdicts (host, llm_label, created_at DESC);

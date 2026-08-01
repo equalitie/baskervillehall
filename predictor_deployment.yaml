@@ -67,3 +67,8 @@ spec:
             secretKeyRef:
               name: baskerville-secrets
               key: s3_region
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: OPENAI_API_KEY

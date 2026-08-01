@@ -187,6 +187,15 @@ def main():
             'attack_min_spike_ratio': float(os.environ.get('ATTACK_MIN_SPIKE_RATIO', 4.0)),
             'attack_aggressive_spike_ratio': float(os.environ.get('ATTACK_AGGRESSIVE_SPIKE_RATIO', 6.0)),
             'attack_extreme_spike_ratio': float(os.environ.get('ATTACK_EXTREME_SPIKE_RATIO', 15.0)),
+            'session_llm_enabled': os.environ.get('SESSION_LLM_ENABLED', 'True') == 'True',
+            'session_llm_provider': os.environ.get('SESSION_LLM_PROVIDER', 'ollama'),
+            'ollama_url': os.environ.get('OLLAMA_URL', 'http://localhost:11434'),
+            'llm_model': os.environ.get('SESSION_LLM_MODEL', os.environ.get('LLM_MODEL', 'qwen2.5:7b')),
+            'openai_api_key': os.environ.get('OPENAI_API_KEY', ''),
+            'session_llm_score_min': int(os.environ.get('SESSION_LLM_SCORE_MIN', '20')),
+            'session_llm_score_max': int(os.environ.get('SESSION_LLM_SCORE_MAX', '80')),
+            'session_llm_min_requests': int(os.environ.get('SESSION_LLM_MIN_REQUESTS', '5')),
+            'session_llm_queue_size': int(os.environ.get('SESSION_LLM_QUEUE_SIZE', '200')),
         }
 
         predictor = BaskervillehallPredictor(
@@ -201,10 +210,14 @@ def main():
         predictor.run()
     elif args.pipeline == 'respond':
         from baskervillehall.incident_first_responder import IncidentFirstResponder
+        llm_provider = os.environ.get('FIRST_RESPONDER_LLM_PROVIDER', 'ollama')
         IncidentFirstResponder(
             postgres_connection=postgres_connection,
             ollama_url=os.environ.get('OLLAMA_URL', 'http://localhost:11434'),
             llm_model=os.environ.get('LLM_MODEL', 'qwen2.5:7b'),
+            llm_provider=llm_provider,
+            openai_api_key=os.environ.get('OPENAI_API_KEY', ''),
+            openai_model=os.environ.get('FIRST_RESPONDER_LLM_MODEL', 'gpt-4.1'),
             check_interval=int(os.environ.get('FIRST_RESPONDER_CHECK_INTERVAL', '30')),
             min_attack_pct=float(os.environ.get('FIRST_RESPONDER_MIN_ATTACK_PCT', '50.0')),
             max_normal_pct=float(os.environ.get('FIRST_RESPONDER_MAX_NORMAL_PCT', '20.0')),
