@@ -361,6 +361,7 @@ class IncidentFirstResponder:
                 'Value': ip,
                 'host': host,
                 'dnet': dnet,
+                'source': meta,
                 'meta': meta,
                 'ttl': self.ttl_minutes * 60,
             }
@@ -576,6 +577,7 @@ class IncidentFirstResponder:
                 'Value': ip,
                 'host': host,
                 'dnet': dnet,
+                'source': meta,
                 'meta': meta,
                 'ttl': self.ttl_minutes * 60,
             }

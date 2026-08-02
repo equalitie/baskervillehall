@@ -38,6 +38,7 @@ from kafka.consumer.subscription_state import ConsumerRebalanceListener
 
 CLUSTER_CHECK_INTERVAL = 300    # seconds between checks per host
 CLUSTER_MIN_SESSIONS = 10       # minimum sessions to analyze
+CLUSTER_MIN_UNIQUE_IPS = 3      # minimum unique IPs — single crawler never triggers an incident
 CLUSTER_ALERT_THRESHOLD = 0.55  # uniformity score → warning log + cluster_alerts
 CLUSTER_LLM_THRESHOLD = 0.70    # uniformity score → trigger cluster LLM analysis
 CLUSTER_BUFFER_MAXLEN = 500     # max sessions kept per host
@@ -787,7 +788,7 @@ Reply JSON only, no markdown:
             for fp, count in Counter(fps).most_common(3):
                 pct = count / len(fps) * 100
                 if pct >= 30:
-                    fp_ips = [s['ip'] for s in sessions if s.get('fingerprint') == fp and s.get('ip')]
+                    fp_ips = list(dict.fromkeys(s['ip'] for s in sessions if s.get('fingerprint') == fp and s.get('ip')))
                     criteria.append({
                         'type': 'fingerprint',
                         'action': 'challenge',
@@ -837,7 +838,7 @@ Reply JSON only, no markdown:
             for ua, count in Counter(uas).most_common(2):
                 pct = count / len(uas) * 100
                 if pct >= 50 and count >= 5:
-                    ua_ips = [s['ip'] for s in sessions if s.get('ua') == ua and s.get('ip')]
+                    ua_ips = list(dict.fromkeys(s['ip'] for s in sessions if s.get('ua') == ua and s.get('ip')))
                     is_scripted = any(p in ua.lower() for p in _SCRIPTED_PATTERNS)
                     criteria.append({
                         'type': 'ua_exact',
@@ -858,14 +859,35 @@ Reply JSON only, no markdown:
         try:
             conn = psycopg2.connect(**self.postgres_connection)
             with conn.cursor() as cur:
+                # Dedup: skip if a cluster_analysis incident already exists for this host
+                # in the last 30 minutes to avoid creating a new incident every 5 minutes
+                # for the same ongoing attack.
+                cur.execute(
+                    """SELECT id FROM incidents
+                       WHERE host = %s AND source = 'cluster_analysis'
+                         AND started_at > NOW() - INTERVAL '30 minutes'
+                       LIMIT 1""",
+                    (host,),
+                )
+                if cur.fetchone():
+                    self.logger.info(
+                        f"[CLUSTER_LLM] Skipping duplicate incident for host={host} "
+                        f"(recent cluster_analysis incident exists)"
+                    )
+                    conn.close()
+                    return
+
                 cur.execute(
                     """INSERT INTO incidents
                        (host, started_at, ended_at, challenge_count, baseline_avg, spike_ratio,
-                        source, block_criteria, narrative)
-                       VALUES (%s, NOW(), NOW(), 0, 0, 0, 'cluster_analysis', %s, %s)
+                        command, window_seconds, source, block_criteria, narrative)
+                       VALUES (%s, NOW(), NOW(), 0, 0, %s,
+                               'cluster_analysis', %s, 'cluster_analysis', %s, %s)
                        RETURNING id""",
                     (
                         host,
+                        round(score, 3),
+                        CLUSTER_CHECK_INTERVAL,
                         json.dumps(block_criteria),
                         f"[CLUSTER] uniformity_score={score:.2f} sessions={n}\n{llm_reasoning}",
                     ),
@@ -1068,6 +1090,14 @@ Reply JSON only, no markdown:
             sessions = list(buf)
 
             if len(sessions) < CLUSTER_MIN_SESSIONS:
+                continue
+
+            unique_ips = len({s['ip'] for s in sessions if s.get('ip')})
+            if unique_ips < CLUSTER_MIN_UNIQUE_IPS:
+                self.logger.debug(
+                    f"[CLUSTER] Skipping host={host} — only {unique_ips} unique IP(s), "
+                    f"likely a single crawler"
+                )
                 continue
 
             score = self._compute_uniformity(sessions)
