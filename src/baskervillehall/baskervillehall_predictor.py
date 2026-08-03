@@ -853,29 +853,61 @@ Reply JSON only, no markdown:
 
         return criteria
 
+    @staticmethod
+    def _cluster_criteria_signature(block_criteria: list) -> frozenset:
+        """Stable signature of block_criteria for change detection.
+
+        Captures the set of fingerprint values, ua_exact values, and
+        the frozenset of hard-blocked IPs (ip_list with action=block).
+        If all three are identical to the previous incident → no new incident needed.
+        """
+        fingerprints = frozenset(
+            c['value'] for c in block_criteria if c.get('type') == 'fingerprint'
+        )
+        uas = frozenset(
+            c['value'] for c in block_criteria if c.get('type') == 'ua_exact'
+        )
+        blocked_ips = frozenset(
+            ip
+            for c in block_criteria
+            if c.get('type') == 'ip_list' and c.get('action') == 'block'
+            for ip in c.get('ips', [])
+        )
+        return frozenset([('fp', fingerprints), ('ua', uas), ('ips', blocked_ips)])
+
     def _save_cluster_incident(self, host: str, score: float, sessions: list,
                                block_criteria: list, llm_reasoning: str):
         n = len(sessions)
         try:
             conn = psycopg2.connect(**self.postgres_connection)
             with conn.cursor() as cur:
-                # Dedup: skip if a cluster_analysis incident already exists for this host
-                # in the last 30 minutes to avoid creating a new incident every 5 minutes
-                # for the same ongoing attack.
+                # Dedup: skip if the most recent cluster_analysis incident for this host
+                # (within last 4 hours) has identical block_criteria signature —
+                # same fingerprints, same UA, same hard-blocked IPs.
+                # If the attack evolved (new IPs, new fingerprint), create a new incident.
                 cur.execute(
-                    """SELECT id FROM incidents
+                    """SELECT block_criteria FROM incidents
                        WHERE host = %s AND source = 'cluster_analysis'
-                         AND started_at > NOW() - INTERVAL '30 minutes'
+                         AND started_at > NOW() - INTERVAL '4 hours'
+                       ORDER BY started_at DESC
                        LIMIT 1""",
                     (host,),
                 )
-                if cur.fetchone():
+                row = cur.fetchone()
+                if row and row[0]:
+                    prev_criteria = row[0] if isinstance(row[0], list) else json.loads(row[0])
+                    prev_sig = self._cluster_criteria_signature(prev_criteria)
+                    new_sig = self._cluster_criteria_signature(block_criteria)
+                    if prev_sig == new_sig:
+                        self.logger.info(
+                            f"[CLUSTER_LLM] Skipping duplicate incident for host={host} "
+                            f"(block_criteria unchanged)"
+                        )
+                        conn.close()
+                        return
                     self.logger.info(
-                        f"[CLUSTER_LLM] Skipping duplicate incident for host={host} "
-                        f"(recent cluster_analysis incident exists)"
+                        f"[CLUSTER_LLM] Attack evolved for host={host}, creating new incident"
                     )
-                    conn.close()
-                    return
 
                 cur.execute(
                     """INSERT INTO incidents
