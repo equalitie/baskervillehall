@@ -857,9 +857,11 @@ Reply JSON only, no markdown:
     def _cluster_criteria_signature(block_criteria: list) -> frozenset:
         """Stable signature of block_criteria for change detection.
 
-        Captures the set of fingerprint values, ua_exact values, and
-        the frozenset of hard-blocked IPs (ip_list with action=block).
-        If all three are identical to the previous incident → no new incident needed.
+        Captures fingerprint values and ua_exact values only.
+        ip_list IPs are intentionally excluded — they change every window
+        (different IPs cross interval_cv threshold each time) but represent
+        the same underlying attack. Only a change in fingerprint or UA
+        signals a genuinely new/evolved attack.
         """
         fingerprints = frozenset(
             c['value'] for c in block_criteria if c.get('type') == 'fingerprint'
@@ -867,13 +869,7 @@ Reply JSON only, no markdown:
         uas = frozenset(
             c['value'] for c in block_criteria if c.get('type') == 'ua_exact'
         )
-        blocked_ips = frozenset(
-            ip
-            for c in block_criteria
-            if c.get('type') == 'ip_list' and c.get('action') == 'block'
-            for ip in c.get('ips', [])
-        )
-        return frozenset([('fp', fingerprints), ('ua', uas), ('ips', blocked_ips)])
+        return frozenset([('fp', fingerprints), ('ua', uas)])
 
     def _save_cluster_incident(self, host: str, score: float, sessions: list,
                                block_criteria: list, llm_reasoning: str):
@@ -883,8 +879,9 @@ Reply JSON only, no markdown:
             with conn.cursor() as cur:
                 # Dedup: skip if the most recent cluster_analysis incident for this host
                 # (within last 4 hours) has identical block_criteria signature —
-                # same fingerprints, same UA, same hard-blocked IPs.
-                # If the attack evolved (new IPs, new fingerprint), create a new incident.
+                # same fingerprints + same UA. ip_list IPs are excluded from signature
+                # because individual IPs change each window while the attack stays the same.
+                # Only create a new incident if fingerprint or UA changed (evolved attack).
                 cur.execute(
                     """SELECT block_criteria FROM incidents
                        WHERE host = %s AND source = 'cluster_analysis'
@@ -1726,45 +1723,35 @@ Reply JSON only, no markdown:
             except Full:
                 pass  # queue full — skip, main loop must not block
 
-        # if session.get("ai_spoofer", False):
-        #     if ip in pending_block_ip:
-        #         return
-        #     num_non_static = len(session.get("requests", []))
-        #     duration = session.get("duration", 0)
-        #     if num_non_static > 3:
-        #         return
-        #     if duration < 10:
-        #         return
-        #     if ip in ip_with_sessions.keys():
-        #         return
-        #
-        #     pending_block_ip[ip] = True
-        #     self.logger.warning(
-        #         f"AI bot spoofer block_ip ip={ip} host={host} "
-        #         f"asn={session.get('asn_name', '')} ua={session.get('ua', '')} session_id={session_id}"
-        #     )
-        #     payload = self.create_command(
-        #         command_name="block_ip",
-        #         session=session,
-        #         meta="ai_spoofer",
-        #         prediction_if=prediction_if,
-        #         score_if=score_if,
-        #         shapley_if=shapley_if,
-        #         shapley_feature_if=shapley_feature_if,
-        #         prediction_ae=prediction_ae,
-        #         score_ae=score_ae,
-        #         shapley_ae=shapley_ae,
-        #         shapley_feature_ae=shapley_feature_ae,
-        #         difficulty=0,
-        #         scraper_name=scraper_name,
-        #         threshold_ae=threshold_ae,
-        #         rate_limit_hits=self.rate_limit_hits,
-        #         rate_limit_interval=self.rate_limit_interval,
-        #         rate_limit_expiration=self.rate_limit_expiration,
-        #         baskerville_score=baskerville_score,
-        #     )
-        #     self.send(producer, producer_output, payload, key=host, dnet=dnet)
-        #     return
+        if session.get("ai_spoofer", False):
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                self.logger.warning(
+                    f"[AI_SPOOFER] block_ip ip={ip} host={host} "
+                    f"asn={session.get('asn_name', '')} ua={session.get('ua', '')[:120]}"
+                )
+                payload = self.create_command(
+                    command_name="block_ip",
+                    session=session,
+                    meta="ai_spoofer",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    rate_limit_hits=self.rate_limit_hits,
+                    rate_limit_interval=self.rate_limit_interval,
+                    rate_limit_expiration=self.rate_limit_expiration,
+                    baskerville_score=baskerville_score,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
 
         if not session.get("primary_session", False):
             ip_with_sessions[session["ip"]] = True
@@ -2371,7 +2358,10 @@ Reply JSON only, no markdown:
                             ip_with_sessions[session["ip"]] = True
 
                         session["host"] = host
-                        cluster_buffer[host].append(self._extract_cluster_features(session))
+                        if (not session.get('verified_bot', False)
+                                and not session.get('verified_ai_bot', False)
+                                and not session.get('ai_spoofer', False)):
+                            cluster_buffer[host].append(self._extract_cluster_features(session))
                         batch[(host, human)].append(session)
                         predicting_total += 1
 
