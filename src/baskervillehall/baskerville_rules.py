@@ -493,6 +493,44 @@ def is_ai_bot_user_agent(user_agent: str) -> bool:
     return any(re.search(pattern, ua) for pattern in known_ai_crawlers)
 
 
+def is_activitypub_user_agent(user_agent: str) -> bool:
+    """
+    Returns True if the user-agent belongs to a known ActivityPub federation client.
+
+    ActivityPub servers (Mastodon, PeerTube, Lemmy, Friendica, Misskey, etc.) make
+    server-to-server requests to federated instances as part of normal protocol operation.
+    This traffic originates from datacenter IPs (Hetzner, OVH, DigitalOcean) and looks
+    like a bot, but it is legitimate automated traffic that must not be challenged or blocked.
+
+    The user-agent format is standardised by each platform and includes the instance URL,
+    making spoofing low-value for attackers.
+    """
+    if not user_agent:
+        return False
+    ua = user_agent.lower()
+    patterns = [
+        r"mastodon/",           # Mastodon/4.x.y (http.rb/...; +https://instance/)
+        r"peertube/",           # PeerTube/8.x.y (+https://instance/)
+        r"lemmy/",              # Lemmy/0.x.y; +https://instance/
+        r"friendica ",          # Friendica Name Version; https://instance/
+        r"misskey/",            # Misskey/2024.x.y
+        r"calckey/",            # Calckey
+        r"foundkey/",           # FoundKey
+        r"firefish/",           # Firefish
+        r"akkoma/",             # Akkoma
+        r"pleroma/",            # Pleroma
+        r"pixelfed/",           # Pixelfed
+        r"funkwhale/",          # Funkwhale
+        r"writefreely/",        # WriteFreely
+        r"gotosocial/",         # GoToSocial
+        r"hometown/",           # Hometown (Mastodon fork, may appear in UA)
+        r"activity-relay",      # Generic ActivityPub relay service
+        r"activityrelay",       # ActivityRelay
+        r"http\.rb/.*mastodon", # http.rb library used by Mastodon (backup match)
+    ]
+    return any(re.search(p, ua) for p in patterns)
+
+
 def is_fcrdns_bot_user_agent(user_agent: str) -> bool:
     """Returns True if the UA suggests a crawler verified via FCrDNS (Meta or Amazon).
     Note: facebookbot/facebot are Facebook link-preview crawlers, NOT the Meta AI training

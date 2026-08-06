@@ -1244,6 +1244,15 @@ class BaskervillehallSession(object):
                         asn = data.get('geoip_asn', {}).get('as', {}).get('number', '0')
                         asn_name = data.get('geoip_asn', {}).get('as', {}).get('organization', {}).get('name', '')
 
+                        # ActivityPub federation traffic (Mastodon, PeerTube, Lemmy, etc.)
+                        # cannot be verified by IP range — any server can run these platforms.
+                        # Detect by UA pattern instead. This traffic is legitimate and must not
+                        # be challenged or counted as bot traffic.
+                        if not verified_bot and baskerville_rules.is_activitypub_user_agent(ua):
+                            verified_bot = True
+                            verified_bot_name = 'ActivityPub'
+                            self.logger.debug(f'[ACTIVITYPUB] ip={ip} ua="{ua[:80]}"')
+
                         if verified_bot or self.skip_expensive_ops or not baskerville_rules.is_ai_bot_user_agent(ua):
                             verified_ai_bot = False
                             verified_ai_bot_name = ''
