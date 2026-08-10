@@ -597,6 +597,9 @@ def is_bad_bot(session):
     if session['verified_bot'] or session.get('verified_ai_bot', False):
         return False
 
+    if is_activitypub_user_agent(session.get('ua', '')):
+        return False
+
     if not session['primary_session']:
         return False
 
