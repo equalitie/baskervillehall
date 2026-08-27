@@ -40,8 +40,12 @@ CLUSTER_CHECK_INTERVAL = 300    # seconds between checks per host
 CLUSTER_MIN_SESSIONS = 10       # minimum sessions to analyze
 CLUSTER_MIN_UNIQUE_IPS = 3      # minimum unique IPs — single crawler never triggers an incident
 CLUSTER_ALERT_THRESHOLD = 0.55  # uniformity score → warning log + cluster_alerts
-CLUSTER_LLM_THRESHOLD = 0.70    # uniformity score → trigger cluster LLM analysis
+CLUSTER_LLM_THRESHOLD = 0.85    # uniformity score → trigger cluster LLM analysis
+CLUSTER_LLM_COOLDOWN = 1800     # seconds between LLM calls per host (30 min)
 CLUSTER_BUFFER_MAXLEN = 500     # max sessions kept per host
+CLUSTER_IP_CONCENTRATION = 0.50     # single IP fraction → UA-rotation scraper detection
+CLUSTER_SUBNET_CONCENTRATION = 0.70 # single /24 subnet fraction → scraper detection
+CLUSTER_SUBNET16_CONCENTRATION = 0.70 # single /16 subnet fraction → distributed scraper detection
 
 
 class RebalanceLogger(ConsumerRebalanceListener):
@@ -196,6 +200,7 @@ class BaskervillehallPredictor(object):
             max_requests_in_command=20,
             bot_score_threshold=0.5,
             challenge_scrapers=True,
+            block_commercial_crawlers=True,
             rate_limit_hits=20,
             rate_limit_interval=60,
             rate_limit_expiration=300,
@@ -274,6 +279,7 @@ class BaskervillehallPredictor(object):
         self.max_requests_in_command = max_requests_in_command
         self.bot_score_threshold = bot_score_threshold
         self.challenge_scrapers = challenge_scrapers
+        self.block_commercial_crawlers = block_commercial_crawlers
         self.rate_limit_hits = rate_limit_hits,
         self.rate_limit_interval = rate_limit_interval,
         self.rate_limit_expiration = rate_limit_expiration
@@ -569,28 +575,45 @@ Request sequence:
 Reply JSON only, no markdown:
 {{"label": "human" or "bot", "confidence": 0.0-1.0, "reasoning": "2-3 sentences"}}"""
 
-    def _session_llm_score(self, session: dict, host: str) -> dict | None:
-        try:
-            prompt = self._build_session_llm_prompt(session, host)
-            if self._session_llm_provider == 'openai':
-                url = 'https://api.openai.com/v1/chat/completions'
-                headers = {'Authorization': f'Bearer {self._openai_api_key}'}
-                timeout = 30
-            else:
-                url = f'{self._ollama_url}/v1/chat/completions'
-                headers = {}
-                timeout = 300
+    def _call_llm(self, prompt: str, model: str, timeout: int = 30) -> str:
+        """Call LLM API (Anthropic or Ollama) and return raw text content."""
+        if self._session_llm_provider == 'anthropic':
             response = http_requests.post(
-                url,
-                headers=headers,
+                'https://api.anthropic.com/v1/messages',
+                headers={
+                    'x-api-key': self._openai_api_key,
+                    'anthropic-version': '2023-06-01',
+                    'content-type': 'application/json',
+                },
                 json={
-                    'model': self._llm_model,
+                    'model': model,
+                    'max_tokens': 1024,
+                    'temperature': 0.0,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                },
+                timeout=timeout,
+            )
+            resp_json = response.json()
+            if 'content' not in resp_json:
+                raise ValueError(f"Anthropic API error: {resp_json}")
+            return resp_json['content'][0]['text'].strip()
+        else:
+            response = http_requests.post(
+                f'{self._ollama_url}/v1/chat/completions',
+                headers={},
+                json={
+                    'model': model,
                     'messages': [{'role': 'user', 'content': prompt}],
                     'temperature': 0.0,
                 },
                 timeout=timeout,
             )
-            content = response.json()['choices'][0]['message']['content'].strip()
+            return response.json()['choices'][0]['message']['content'].strip()
+
+    def _session_llm_score(self, session: dict, host: str) -> dict | None:
+        try:
+            prompt = self._build_session_llm_prompt(session, host)
+            content = self._call_llm(prompt, model=self._llm_model, timeout=30)
             # Strip markdown code blocks if model wraps JSON in them
             if content.startswith('```'):
                 content = content.split('```')[1]
@@ -824,6 +847,57 @@ Reply JSON only, no markdown:
                 'confidence': 'medium',
             })
 
+        # IP concentration — if a single IP or /24 subnet generates the majority of sessions,
+        # block it directly regardless of UA/fingerprint diversity. This catches UA-rotation
+        # scrapers that evade uniformity scoring by spoofing many different browser versions.
+        ip_list_all = [s['ip'] for s in sessions if s.get('ip')]
+        if ip_list_all:
+            ip_counts = Counter(ip_list_all)
+            top_ip, top_ip_count = ip_counts.most_common(1)[0]
+            ip_concentration = top_ip_count / len(ip_list_all)
+            if ip_concentration >= CLUSTER_IP_CONCENTRATION:
+                # Single IP dominates → block it directly
+                if top_ip not in hard_bot_ips and top_ip not in soft_bot_ips:
+                    criteria.append({
+                        'type': 'ip_list',
+                        'action': 'block',
+                        'ips': [top_ip],
+                        'reason': f'ip_concentration={ip_concentration:.0%} (single IP dominates cluster)',
+                        'confidence': 'high',
+                    })
+            else:
+                subnet_counts = Counter('.'.join(ip.split('.')[:3]) for ip in ip_list_all)
+                top_subnet, top_subnet_count = subnet_counts.most_common(1)[0]
+                subnet_concentration = top_subnet_count / len(ip_list_all)
+                if subnet_concentration >= CLUSTER_SUBNET_CONCENTRATION:
+                    # /24 subnet dominates → block all IPs from it not already blocked
+                    subnet_ips = [ip for ip in ip_counts if ip.startswith(top_subnet + '.')
+                                  and ip not in hard_bot_ips and ip not in soft_bot_ips]
+                    if subnet_ips:
+                        criteria.append({
+                            'type': 'ip_list',
+                            'action': 'block',
+                            'ips': subnet_ips,
+                            'reason': f'subnet_concentration={subnet_concentration:.0%} ({top_subnet}.x dominates cluster)',
+                            'confidence': 'high',
+                        })
+                else:
+                    # /16 subnet — catches distributed scrapers rotating across multiple /24s
+                    subnet16_counts = Counter('.'.join(ip.split('.')[:2]) for ip in ip_list_all)
+                    top_subnet16, top_subnet16_count = subnet16_counts.most_common(1)[0]
+                    subnet16_concentration = top_subnet16_count / len(ip_list_all)
+                    if subnet16_concentration >= CLUSTER_SUBNET16_CONCENTRATION:
+                        subnet16_ips = [ip for ip in ip_counts if ip.startswith(top_subnet16 + '.')
+                                        and ip not in hard_bot_ips and ip not in soft_bot_ips]
+                        if subnet16_ips:
+                            criteria.append({
+                                'type': 'ip_list',
+                                'action': 'block',
+                                'ips': subnet16_ips,
+                                'reason': f'subnet16_concentration={subnet16_concentration:.0%} ({top_subnet16}.x.x dominates cluster)',
+                                'confidence': 'medium',
+                            })
+
         # UA — two tiers:
         # - Scripted UAs (python-requests, curl, etc.): block current IPs + block_ua for future
         # - Browser UAs: challenge current IPs only (UA not unique, can't block future sessions)
@@ -857,11 +931,10 @@ Reply JSON only, no markdown:
     def _cluster_criteria_signature(block_criteria: list) -> frozenset:
         """Stable signature of block_criteria for change detection.
 
-        Captures fingerprint values and ua_exact values only.
-        ip_list IPs are intentionally excluded — they change every window
-        (different IPs cross interval_cv threshold each time) but represent
-        the same underlying attack. Only a change in fingerprint or UA
-        signals a genuinely new/evolved attack.
+        Captures fingerprint values, ua_exact values, and concentration-blocked IPs.
+        Regular ip_list IPs (interval_cv) are excluded — they change every window
+        but represent the same attack. Concentration IPs are included because a new
+        dominant IP means a genuinely different scraper node.
         """
         fingerprints = frozenset(
             c['value'] for c in block_criteria if c.get('type') == 'fingerprint'
@@ -869,10 +942,19 @@ Reply JSON only, no markdown:
         uas = frozenset(
             c['value'] for c in block_criteria if c.get('type') == 'ua_exact'
         )
-        return frozenset([('fp', fingerprints), ('ua', uas)])
+        # Include IPs blocked by concentration rule (not interval_cv) so that a new
+        # dominant IP triggers a fresh incident.
+        concentration_ips = frozenset(
+            ip
+            for c in block_criteria
+            if c.get('type') == 'ip_list' and 'concentration' in c.get('reason', '')
+            for ip in c.get('ips', [])
+        )
+        return frozenset([('fp', fingerprints), ('ua', uas), ('conc_ips', concentration_ips)])
 
     def _save_cluster_incident(self, host: str, score: float, sessions: list,
-                               block_criteria: list, llm_reasoning: str):
+                               block_criteria: list, llm_reasoning: str,
+                               survey_country: str = ''):
         n = len(sessions)
         try:
             conn = psycopg2.connect(**self.postgres_connection)
@@ -909,9 +991,9 @@ Reply JSON only, no markdown:
                 cur.execute(
                     """INSERT INTO incidents
                        (host, started_at, ended_at, challenge_count, baseline_avg, spike_ratio,
-                        command, window_seconds, source, block_criteria, narrative)
+                        command, window_seconds, source, block_criteria, narrative, survey_country)
                        VALUES (%s, NOW(), NOW(), 0, 0, %s,
-                               'cluster_analysis', %s, 'cluster_analysis', %s, %s)
+                               'cluster_analysis', %s, 'cluster_analysis', %s, %s, %s)
                        RETURNING id""",
                     (
                         host,
@@ -919,9 +1001,23 @@ Reply JSON only, no markdown:
                         CLUSTER_CHECK_INTERVAL,
                         json.dumps(block_criteria),
                         f"[CLUSTER] uniformity_score={score:.2f} sessions={n}\n{llm_reasoning}",
+                        survey_country or None,
                     ),
                 )
                 incident_id = cur.fetchone()[0]
+
+                # Insert IPs from block_criteria into incident_ips so botnet overlap
+                # detection (BOTNET_OVERLAP_SQL) can match against past incidents.
+                all_ips = set()
+                for c in block_criteria:
+                    for ip in c.get('ips', []):
+                        all_ips.add(ip)
+                if all_ips:
+                    cur.executemany(
+                        "INSERT INTO incident_ips (incident_id, ip) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        [(incident_id, ip) for ip in all_ips],
+                    )
+
             conn.commit()
             conn.close()
             self.logger.warning(
@@ -942,22 +1038,16 @@ Reply JSON only, no markdown:
             host = item['host']
             sessions = item['sessions']
             score = item['score']
+            survey_country = item.get('survey_country', '')
 
             try:
                 prompt = self._build_cluster_llm_prompt(host, sessions, score)
-                response = http_requests.post(
-                    'https://api.openai.com/v1/chat/completions',
-                    headers={'Authorization': f'Bearer {self._openai_api_key}'},
-                    json={
-                        'model': self._llm_model,
-                        'messages': [{'role': 'user', 'content': prompt}],
-                        'temperature': 0.0,
-                        'response_format': {'type': 'json_object'},
-                    },
-                    timeout=30,
-                )
-                content = response.json()['choices'][0]['message']['content'].strip()
-                verdict = json.loads(content)
+                content = self._call_llm(prompt, model=self._llm_model, timeout=30)
+                if content.startswith('```'):
+                    content = content.split('```')[1]
+                    if content.startswith('json'):
+                        content = content[4:]
+                verdict = json.loads(content.strip())
             except Exception:
                 self.logger.exception(f"[CLUSTER_LLM] Error for host={host}")
                 continue
@@ -974,7 +1064,7 @@ Reply JSON only, no markdown:
             if v == 'attack' and confidence in ('high', 'medium') and self.postgres_connection:
                 block_criteria = self._build_block_criteria(sessions, score)
                 if block_criteria:
-                    self._save_cluster_incident(host, score, sessions, block_criteria, reasoning)
+                    self._save_cluster_incident(host, score, sessions, block_criteria, reasoning, survey_country)
 
     # ------------------------------------------------------------------
     # Cluster analysis — uniformity scoring
@@ -1023,6 +1113,7 @@ Reply JSON only, no markdown:
             # Sessions from the same tool/library share the same fingerprint regardless
             # of source IP — a very strong coordinated-attack signal.
             'fingerprint': session.get('fingerprints', ''),
+            'survey_country': session.get('survey_country', ''),
         }
 
     def _compute_uniformity(self, sessions: list) -> float:
@@ -1104,7 +1195,7 @@ Reply JSON only, no markdown:
 
         return base_score
 
-    def _check_clusters(self, cluster_buffer: dict, cluster_alerts: TTLCache, cluster_check_ts: dict):
+    def _check_clusters(self, cluster_buffer: dict, cluster_alerts: TTLCache, cluster_check_ts: dict, cluster_llm_ts: dict):
         """Per-host uniformity check, called once per main loop iteration.
 
         Phase 1: logging + cluster_alerts only, no LLM.
@@ -1128,6 +1219,49 @@ Reply JSON only, no markdown:
                     f"likely a single crawler"
                 )
                 continue
+
+            # IP concentration check: detect UA-rotation scrapers that evade uniformity
+            # scoring by using many different User-Agents and TLS fingerprints but still
+            # originate from a single IP or /24 subnet (e.g. Tencent/Alibaba Cloud scrapers).
+            if self._cluster_llm_queue is not None:
+                ip_list = [s['ip'] for s in sessions if s.get('ip')]
+                if ip_list:
+                    ip_counts = Counter(ip_list)
+                    top_ip, top_ip_count = ip_counts.most_common(1)[0]
+                    ip_concentration = top_ip_count / len(ip_list)
+
+                    subnet_counts = Counter('.'.join(ip.split('.')[:3]) for ip in ip_list)
+                    top_subnet, top_subnet_count = subnet_counts.most_common(1)[0]
+                    subnet_concentration = top_subnet_count / len(ip_list)
+
+                    subnet16_counts = Counter('.'.join(ip.split('.')[:2]) for ip in ip_list)
+                    top_subnet16, top_subnet16_count = subnet16_counts.most_common(1)[0]
+                    subnet16_concentration = top_subnet16_count / len(ip_list)
+
+                    if (ip_concentration >= CLUSTER_IP_CONCENTRATION
+                            or subnet_concentration >= CLUSTER_SUBNET_CONCENTRATION
+                            or subnet16_concentration >= CLUSTER_SUBNET16_CONCENTRATION):
+                        self.logger.warning(
+                            f"[CLUSTER_SCRAPER] High IP concentration host={host} "
+                            f"top_ip={top_ip} ip_pct={ip_concentration:.0%} "
+                            f"subnet={top_subnet}.x subnet_pct={subnet_concentration:.0%} "
+                            f"subnet16={top_subnet16}.x.x subnet16_pct={subnet16_concentration:.0%} "
+                            f"sessions={len(sessions)} ua_diversity="
+                            f"{len({s['ua'] for s in sessions})/len(sessions):.2f}"
+                        )
+                        survey_country = next(
+                            (s.get('survey_country', '') for s in sessions if s.get('survey_country')),
+                            ''
+                        )
+                        try:
+                            self._cluster_llm_queue.put_nowait({
+                                'host': host,
+                                'sessions': sessions,
+                                'score': max(ip_concentration, subnet_concentration, subnet16_concentration),
+                                'survey_country': survey_country,
+                            })
+                        except Exception:
+                            pass
 
             score = self._compute_uniformity(sessions)
 
@@ -1159,17 +1293,31 @@ Reply JSON only, no markdown:
                     f"avg_interval_cv={f'{avg_cv:.2f}' if avg_cv is not None else 'n/a'}{llm_info}"
                 )
                 if score >= CLUSTER_LLM_THRESHOLD and self._cluster_llm_queue is not None:
-                    try:
-                        self._cluster_llm_queue.put_nowait({
-                            'host': host,
-                            'sessions': sessions,
-                            'score': score,
-                        })
-                        self.logger.info(
-                            f"[CLUSTER_LLM] Enqueued analysis host={host} score={score:.2f}"
+                    last_llm = cluster_llm_ts.get(host)
+                    llm_on_cooldown = last_llm and (now - last_llm).total_seconds() < CLUSTER_LLM_COOLDOWN
+                    if llm_on_cooldown:
+                        self.logger.debug(
+                            f"[CLUSTER_LLM] Cooldown active host={host} score={score:.2f} "
+                            f"next_in={(CLUSTER_LLM_COOLDOWN - (now - last_llm).total_seconds()):.0f}s"
                         )
-                    except Full:
-                        self.logger.debug(f"[CLUSTER_LLM] Queue full, skipping host={host}")
+                    else:
+                        try:
+                            survey_country = next(
+                                (s.get('survey_country', '') for s in sessions if s.get('survey_country')),
+                                ''
+                            )
+                            self._cluster_llm_queue.put_nowait({
+                                'host': host,
+                                'sessions': sessions,
+                                'score': score,
+                                'survey_country': survey_country,
+                            })
+                            cluster_llm_ts[host] = now
+                            self.logger.info(
+                                f"[CLUSTER_LLM] Enqueued analysis host={host} score={score:.2f}"
+                            )
+                        except Full:
+                            self.logger.debug(f"[CLUSTER_LLM] Queue full, skipping host={host}")
             else:
                 self.logger.debug(
                     f"[CLUSTER] host={host} score={score:.2f} sessions={len(sessions)}"
@@ -1753,6 +1901,133 @@ Reply JSON only, no markdown:
                 self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
+        # AI crawler blocking (PetalBot, AhrefsBot, CCBot, etc.)
+        # These are commercial/AI crawlers that provide zero benefit to our clients.
+        # They openly declare themselves via UA, so blocking is surgical and accurate.
+        # verified_ai_bot (DNS-verified) is already handled above (skip without action).
+        if session.get("ai_bot_ua", False):
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                self.logger.warning(
+                    f"[AI_BOT] block_ip ip={ip} host={host} "
+                    f"ua={session.get('ua', '')[:120]}"
+                )
+                payload = self.create_command(
+                    command_name="block_ip",
+                    session=session,
+                    meta="ai_bot_ua",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    baskerville_score=baskerville_score,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
+        # Commercial crawler blocking (AhrefsBot, SemrushBot, MJ12bot, etc.)
+        # These are paid SEO/analytics products that crawl for their customers' benefit.
+        # No benefit to our clients — block directly. Controlled by BLOCK_COMMERCIAL_CRAWLERS.
+        if self.block_commercial_crawlers and session.get("commercial_crawler", False):
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                self.logger.warning(
+                    f"[COMMERCIAL_CRAWLER] block_ip ip={ip} host={host} "
+                    f"ua={session.get('ua', '')[:120]}"
+                )
+                payload = self.create_command(
+                    command_name="block_ip",
+                    session=session,
+                    meta="commercial_crawler",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    baskerville_score=baskerville_score,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
+        # WordPress credential brute force detection.
+        # High 4xx ratio + enough requests = credential stuffing bot (curl/python, not a browser).
+        # challenge_ip won't help — these clients can't solve JS challenges. Block directly.
+        _4xx_ratio = session.get("response4xx_to_request_ratio", 0.0)
+        _num_requests = session.get("num_requests", 0)
+        if _4xx_ratio > 0.8 and _num_requests >= 15:
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                self.logger.warning(
+                    f"[BRUTE_FORCE] block_ip ip={ip} host={host} "
+                    f"4xx_ratio={_4xx_ratio:.2f} num_requests={_num_requests} "
+                    f"ua={session.get('ua', '')[:80]}"
+                )
+                payload = self.create_command(
+                    command_name="block_ip",
+                    session=session,
+                    meta="brute_force_4xx",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    baskerville_score=baskerville_score,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
+        # WordPress login brute force detection.
+        # wp-login.php returns 200 even on failed auth, so 4xx_ratio stays low.
+        # Detect by path concentration: all requests hammering the same login endpoint.
+        # challenge_ip won't help — block directly.
+        _top_url = self._get_top_url(session)
+        _top_ratio = session.get('top_page_to_request_ratio', 0.0)
+        if ('wp-login' in (_top_url or '') and _top_ratio > 0.8 and _num_requests >= 5):
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                self.logger.warning(
+                    f"[WP_BRUTE_FORCE] block_ip ip={ip} host={host} "
+                    f"top_url={_top_url} top_ratio={_top_ratio:.2f} num_requests={_num_requests}"
+                )
+                payload = self.create_command(
+                    command_name="block_ip",
+                    session=session,
+                    meta="wp_brute_force",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    baskerville_score=baskerville_score,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
         if not session.get("primary_session", False):
             ip_with_sessions[session["ip"]] = True
 
@@ -1850,6 +2125,52 @@ Reply JSON only, no markdown:
                 self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
+        # High bot score from banjax fingerprinting → block.
+        # This check must come BEFORE the classifier challenge path because the classifier
+        # path returns early and would shadow banjax's bot_score signal.
+        bot_score = session.get("bot_score", 0.0)
+        bot_score_top_factor = session.get("bot_score_top_factor", "")
+        if (
+                session.get("passed_challenge")
+                and bot_score > self.bot_score_threshold
+                and bot_score_top_factor != "no_payload"
+        ):
+            if ip in pending_block_ip:
+                return
+            pending_block_ip[ip] = True
+            baskerville_score = 10
+            self.logger.info(
+                f"High bot score - block_ip for ip={ip}, "
+                f"human={human}, session_id={session_id}, host={host}, "
+                f"top_factor={bot_score_top_factor} threshold={self.bot_score_threshold}  "
+                f"baskerville_score={baskerville_score}  "
+                f"cloudflare_score={session.get('cloudflare_score', 0)}."
+            )
+            payload = self.create_command(
+                command_name="block_ip",
+                session=session,
+                meta="high_bot_score [block_ip]",
+                prediction_if=prediction_if,
+                score_if=score_if,
+                shapley_if=shapley_if,
+                shapley_feature_if=shapley_feature_if,
+                prediction_ae=prediction_ae,
+                score_ae=score_ae,
+                shapley_ae=shapley_ae,
+                shapley_feature_ae=shapley_feature_ae,
+                difficulty=0,
+                scraper_name=scraper_name,
+                threshold_ae=threshold_ae,
+                rate_limit_hits=self.rate_limit_hits,
+                rate_limit_interval=self.rate_limit_interval,
+                rate_limit_expiration=self.rate_limit_expiration,
+                baskerville_score=baskerville_score,
+                novel_attack=novel_attack,
+                novel_attack_count=novel_attack_count,
+            )
+            self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
+
         # High baskerville_score — threshold raised to 50 under DDoS attack
         classifier_threshold = 50 if attack_response else 30
         if human and 0 < baskerville_score < classifier_threshold:
@@ -1891,52 +2212,6 @@ Reply JSON only, no markdown:
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
-        # High bot score -> block
-        bot_score = session.get("bot_score", 0.0)
-        bot_score_top_factor = session.get("bot_score_top_factor", "")
-        if (
-                human
-                and session.get("passed_challenge")
-                and bot_score > self.bot_score_threshold
-                and bot_score_top_factor != "no_payload"
-        ):
-            if ip in pending_block_ip:
-                return
-            pending_block_ip[ip] = True
-            command = "block_ip"
-            baskerville_score = 10
-            self.logger.info(
-                f"High bot score - {command} for ip={ip}, "
-                f"human={human}, command={command}, session_id={session_id}, host={host}, "
-                f"top_factor = {bot_score_top_factor}  "
-                f"baskerville_score={baskerville_score}  "
-                f"cloudflare_score={session.get('cloudflare_score', 0)}."
-            )
-            payload = self.create_command(
-                command_name=command,
-                session=session,
-                meta="high_bot_score [block_ip]",
-                prediction_if=prediction_if,
-                score_if=score_if,
-                shapley_if=shapley_if,
-                shapley_feature_if=shapley_feature_if,
-                prediction_ae=prediction_ae,
-                score_ae=score_ae,
-                shapley_ae=shapley_ae,
-                shapley_feature_ae=shapley_feature_ae,
-                difficulty=0,
-                scraper_name=scraper_name,
-                threshold_ae=threshold_ae,
-                rate_limit_hits=self.rate_limit_hits,
-                rate_limit_interval=self.rate_limit_interval,
-                rate_limit_expiration=self.rate_limit_expiration,
-                baskerville_score=baskerville_score,
-                novel_attack=novel_attack,
-                novel_attack_count=novel_attack_count,
-            )
-            self.send(producer, producer_output, payload, key=host, dnet=dnet)
-            return
-
         if self.bad_bot_challenge and session.get("bad_bot") and ip not in ip_with_sessions.keys():
             if ip in pending_challenge_ip:
                 return
@@ -1946,6 +2221,10 @@ Reply JSON only, no markdown:
 
             num_non_static = len(session.get("requests", []))
             if entropy == 0 and num_non_static > 1:
+                command = "block_ip"
+
+            # Very short/empty UA can't be a real browser — won't solve JS challenge
+            if len(session.get("ua", "") or "") < 5:
                 command = "block_ip"
 
             if host == 'antijob.net' or attack_response_aggressive:
@@ -2256,7 +2535,7 @@ Reply JSON only, no markdown:
         novel_attack_counts = TTLCache(maxsize=50000, ttl=60 * 60)  # ip → count, 1h window
 
         if self._session_llm_enabled:
-            self._session_llm_cache = TTLCache(maxsize=5000, ttl=300)  # ip → verdict, 5 min TTL
+            self._session_llm_cache = TTLCache(maxsize=5000, ttl=3600)  # ip → verdict, 1h cooldown
             self._session_llm_queue = Queue(maxsize=self._session_llm_queue_size)
             threading.Thread(target=self._llm_session_worker, daemon=True, name='session-llm').start()
             self.logger.info(
@@ -2269,6 +2548,7 @@ Reply JSON only, no markdown:
         cluster_buffer: Dict[str, deque] = defaultdict(lambda: deque(maxlen=CLUSTER_BUFFER_MAXLEN))
         cluster_alerts: TTLCache = TTLCache(maxsize=500, ttl=600)  # TTL 10 min
         cluster_check_ts: Dict[str, datetime] = {}
+        cluster_llm_ts: Dict[str, datetime] = {}
         if self._session_llm_enabled and self._openai_api_key:
             self._cluster_llm_queue = Queue(maxsize=20)
             threading.Thread(target=self._cluster_llm_worker, daemon=True, name='cluster-llm').start()
@@ -2305,7 +2585,7 @@ Reply JSON only, no markdown:
                     ts_assign_report = datetime.utcnow()
 
                 self._refresh_attack_response()
-                self._check_clusters(cluster_buffer, cluster_alerts, cluster_check_ts)
+                self._check_clusters(cluster_buffer, cluster_alerts, cluster_check_ts, cluster_llm_ts)
 
                 raw_messages = consumer.poll(timeout_ms=self.kafka_poll_timeout_ms, max_records=self.batch_size)
                 for topic_partition, messages in raw_messages.items():

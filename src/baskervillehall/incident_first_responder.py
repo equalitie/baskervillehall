@@ -21,8 +21,10 @@ PROTECTED_ASNS = {
     "Fastly, Inc.",
     "Fastly Inc.",
     "Meta Platforms, Inc.",
+    "Facebook, Inc.",
     "Apple Inc.",
     "Twitter Inc.",
+    "X Corp.",
     "Oracle Corporation",
     "Wikimedia Foundation",
     "AT&T Enterprises, LLC",
@@ -102,10 +104,10 @@ Decision rules (apply in order):
      "Google LLC", "Cloudflare, Inc.", "Cloudflare Inc.", "Amazon.com, Inc.",
      "Amazon Technologies Inc.", "Microsoft Corporation", "Akamai Technologies",
      "Akamai Connected Cloud", "Fastly, Inc.", "Fastly Inc.",
-     "Meta Platforms, Inc.", "Apple Inc.", "Twitter Inc.", "Oracle Corporation",
-     "Wikimedia Foundation", "AT&T Enterprises, LLC", "Charter Communications Inc",
-     "Charter Communications LLC", "Comcast Cable Communications, LLC",
-     "Verizon Business", "Deutsche Telekom AG",
+     "Meta Platforms, Inc.", "Facebook, Inc.", "Apple Inc.", "Twitter Inc.", "X Corp.",
+     "Oracle Corporation", "Wikimedia Foundation", "AT&T Enterprises, LLC",
+     "Charter Communications Inc", "Charter Communications LLC",
+     "Comcast Cable Communications, LLC", "Verizon Business", "Deutsche Telekom AG",
      "Space Exploration Technologies Corporation", "Space Exploration Technologies Corp.".
    These are major internet infrastructure providers. Their IPs appear in attack
    traffic because attackers ROUTE THROUGH them, not because they are attackers.
@@ -131,6 +133,102 @@ Decision rules (apply in order):
     data is already conclusive.
 """
 
+TRAFFIC_SPIKE_SYSTEM_PROMPT = """You are a DDoS mitigation expert analyzing a RAW TRAFFIC SPIKE —
+an attack where each bot IP sends only 1 request and disconnects immediately. These attacks bypass
+per-IP rate limiting and standard session analysis. Your job is to determine: IS THIS A BOT ATTACK
+or ORGANIC TRAFFIC (e.g. viral content, news mention)?
+
+Respond with a JSON object only — no explanation outside the JSON.
+
+Output format:
+{{
+  "action": "block_country" | "block_asn" | "raise_threshold" | "monitor_only",
+  "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | [],
+  "confidence": "high" | "medium" | "low",
+  "ttl_minutes": 30,
+  "reasoning": "brief explanation"
+}}
+
+AVAILABLE SIGNALS (apply heuristics in this priority order):
+
+1. *** TLS FINGERPRINT UNIFORMITY — STRONGEST SIGNAL ***
+   If one fingerprint covers >70% of spike traffic: this is almost certainly a bot.
+   Real browser populations cannot produce uniform fingerprints — each browser version,
+   OS, and configuration produces a distinct fingerprint. Uniform = single tool/operator.
+   Set confidence=high if fingerprint uniformity >70%.
+
+2. *** USER AGENT UNIFORMITY — STRONG SIGNAL ***
+   If one UA covers >80% of spike traffic: bot. Real browser populations are diverse —
+   Chrome alone spans dozens of minor version numbers, each with different UA strings.
+   A single exact UA string dominating is statistically impossible organically.
+   Combined with fingerprint uniformity: conclusive bot evidence.
+   *** UNIFORM MULTI-UA ROTATION — EQUALLY STRONG SIGNAL ***
+   If multiple UAs each cover a similar share (e.g., 8 UAs at ~12% each, variation <15%):
+   this is bot UA rotation. Real traffic follows a power-law — one UA dominates, others trail
+   off sharply. A flat uniform distribution across several UAs is statistically impossible
+   organically. The prompt will flag this with "UA distribution is SUSPICIOUSLY UNIFORM".
+   Treat this as equivalent to a single-UA bot signal.
+
+3. *** COUNTRY CONCENTRATION ***
+   If one country covers >80% of spike traffic AND is not the site's survey_country:
+   strong bot signal. Viral content spreads across many countries matching the site's
+   normal audience. Country-concentrated spikes from unexpected geography = attack.
+   - Spike from survey_country: could be organic (news article, social media) — use raise_threshold.
+   - Spike from 1-2 unexpected countries with uniform UA/fingerprint: bot attack.
+   - If >3 countries each contribute >20%: diffuse — likely organic or use raise_threshold.
+
+4. *** ASN TYPE ***
+   Carrier/residential ASNs (China Mobile, CHINA UNICOM, Chinanet) from unexpected geography
+   = organized residential botnet. This is harder to block than datacenter ASNs but confirms
+   the traffic is from real devices being used maliciously.
+
+5. *** IMMATURE SESSION RATIO ***
+   "Immature sessions" = sessions with exactly 1 request (bot fires one request and disconnects).
+   - immature_ratio >= 90%: near-certain bot attack. Each IP sends exactly 1 request — this is
+     a deliberate cache-busting / rate-limit-bypass technique. Organic users always browse multiple pages.
+   - immature_ratio 70-90%: strong bot indicator.
+   - immature_ratio < 50%: more consistent with organic traffic (real users explore the site).
+   - No immature_ratio data: insufficient session data, rely on other signals.
+
+6. *** SPIKE MAGNITUDE ***
+   - 10-50x above baseline: possible organic surge, look for other signals.
+   - 50-200x: very unlikely organic, needs UA/fingerprint confirmation.
+   - 200x+: essentially impossible organically. Block even with medium UA/fingerprint uniformity.
+
+DECISION RULES:
+
+7. *** ABSOLUTE HARD RULE — NO EXCEPTIONS ***
+   NEVER include survey_country in "target". survey_country is the site's primary audience.
+   If the spike comes from survey_country, use raise_threshold — it may be organic traffic.
+
+8. Use block_country if: one country dominates (>60%) AND country != survey_country
+   AND (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80% OR spike_ratio >100x).
+   Never include more than 2 countries in a single block_country action.
+
+9. Use block_asn if: specific ASNs dominate AND total ASNs <= 5 AND
+   (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80%).
+   Never include more than 3 ASNs. Prefer block_country for residential botnets spread
+   across many ASNs in the same country.
+
+10. Use raise_threshold if: traffic is geographically diverse (>3 countries each >15%),
+    OR dominant country == survey_country, OR immature_ratio < 50%, OR signals are ambiguous.
+    raise_threshold buys time without blocking legitimate users.
+
+11. Use monitor_only if: spike is small (<50 req/min peak), signals are absent or
+    contradictory, or the site has no baseline yet.
+
+12. *** ABSOLUTE HARD RULE — NO EXCEPTIONS ***
+    NEVER put these ASNs in "target": Google LLC, Cloudflare Inc., Amazon.com Inc.,
+    Microsoft Corporation, Akamai Technologies, Fastly Inc., Meta Platforms Inc.,
+    Facebook Inc., Apple Inc., Twitter Inc., X Corp., AT&T Enterprises LLC,
+    Verizon Business, Deutsche Telekom AG.
+    These are infrastructure providers — their IPs appear because traffic routes through them.
+
+13. Set confidence=high only when 2+ signals agree (e.g. fingerprint >70% AND country >80%,
+    or immature_ratio >90% AND country >80%). Set confidence=medium when 1 strong signal exists.
+    Set confidence=low when signals conflict.
+"""
+
 
 class IncidentFirstResponder:
     def __init__(
@@ -154,6 +252,9 @@ class IncidentFirstResponder:
             fingerprint_min_pct=40.0,
             fingerprint_max_ips=500,
             host_whitelist=None,
+            min_traffic_peak_count=50,
+            min_traffic_peak_req_min=50,
+            min_incident_duration_minutes=10,
             logger=None,
     ):
         self.postgres_connection = postgres_connection or {}
@@ -173,6 +274,9 @@ class IncidentFirstResponder:
         self.host_whitelist = set(h.strip() for h in (host_whitelist or []) if h.strip())
         self.fingerprint_min_pct = fingerprint_min_pct
         self.fingerprint_max_ips = fingerprint_max_ips
+        self.min_traffic_peak_count = min_traffic_peak_count
+        self.min_traffic_peak_req_min = min_traffic_peak_req_min
+        self.min_incident_duration_minutes = min_incident_duration_minutes
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
         self._producer_output = KafkaProducer(**kafka_connection_output) if kafka_connection_output else None
@@ -203,7 +307,8 @@ class IncidentFirstResponder:
                        avg_api_ratio, avg_path_diversity, behavior_samples,
                        traffic_peak_ratio, traffic_close_ratio, traffic_recent_ratio,
                        traffic_peak_count, traffic_close_count, traffic_recent_count,
-                       COALESCE(source, 'spike_detector'), block_criteria
+                       COALESCE(source, 'spike_detector'), block_criteria,
+                       immature_ratio
                 FROM incidents
                 WHERE started_at > NOW() - INTERVAL '24 hours'
                   AND (
@@ -237,6 +342,7 @@ class IncidentFirstResponder:
                 'block_criteria': r[19] if isinstance(r[19], list) else (
                     json.loads(r[19]) if isinstance(r[19], str) else (r[19] or [])
                 ),
+                'immature_ratio': float(r[20]) if r[20] is not None else None,
             }
             for r in rows
         ]
@@ -520,6 +626,46 @@ class IncidentFirstResponder:
                     f"[CLUSTER_RESPONDER] Failed to apply criterion type={criterion.get('type')} "
                     f"for incident_id={incident_id}"
                 )
+
+        # Compute botnet overlap against past incidents sharing the same IPs.
+        if not incident.get('botnet_info'):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT i.id, i.host, i.started_at,
+                               COUNT(*) AS matching_ips,
+                               ROUND(COUNT(*) * 100.0 / curr.total, 1) AS pct_of_current,
+                               ROUND(COUNT(*) * 100.0 / prev.total, 1) AS pct_of_prev
+                        FROM incident_ips ii_prev
+                        JOIN incidents i ON i.id = ii_prev.incident_id
+                        JOIN incident_ips ii_curr
+                            ON ii_curr.ip = ii_prev.ip AND ii_curr.incident_id = %s
+                        JOIN (SELECT COUNT(*) AS total FROM incident_ips WHERE incident_id = %s) curr ON true
+                        JOIN (SELECT incident_id, COUNT(*) AS total FROM incident_ips GROUP BY incident_id) prev
+                            ON prev.incident_id = i.id
+                        WHERE i.id != %s AND i.started_at > NOW() - INTERVAL '30 days'
+                        GROUP BY i.id, i.host, i.started_at, curr.total, prev.total
+                        HAVING ROUND(COUNT(*) * 100.0 / curr.total, 1) >= 30
+                           AND ROUND(COUNT(*) * 100.0 / prev.total, 1) >= 30
+                        ORDER BY matching_ips DESC LIMIT 5
+                    """, (incident_id, incident_id, incident_id))
+                    rows = cur.fetchall()
+                if rows:
+                    lines = [
+                        f"#{r[0]} | {r[1]} | {r[2]} | {r[3]} IPs ({r[4]}% of current, {r[5]}% of prev)"
+                        for r in rows
+                    ]
+                    botnet_info = "\n".join(lines)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE incidents SET botnet_info = %s WHERE id = %s",
+                            (botnet_info, incident_id),
+                        )
+                    self.logger.info(
+                        f"[CLUSTER_RESPONDER] botnet overlap found for incident_id={incident_id}: {len(rows)} past incidents"
+                    )
+            except Exception:
+                self.logger.exception(f"[CLUSTER_RESPONDER] botnet overlap check failed for incident_id={incident_id}")
 
         self._mark_processed(conn, incident_id)
 
@@ -819,41 +965,57 @@ class IncidentFirstResponder:
 
         return "\n".join(lines)
 
-    def _call_llm(self, user_prompt):
-        system = SYSTEM_PROMPT.format(
-            min_attack_pct=self.min_attack_pct,
-            max_normal_pct=self.max_normal_pct,
-        )
+    def _call_llm(self, user_prompt, system_prompt=None):
+        if self.llm_provider == 'none':
+            return None
+        if system_prompt is None:
+            system = SYSTEM_PROMPT.format(
+                min_attack_pct=self.min_attack_pct,
+                max_normal_pct=self.max_normal_pct,
+            )
+        else:
+            system = system_prompt
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt},
         ]
         try:
-            if self.llm_provider == 'openai':
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {self.openai_api_key}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": self.openai_model,
-                    "messages": messages,
-                    "temperature": 0.1,
-                    "response_format": {"type": "json_object"},
-                }
-                resp = requests.post(url, json=payload, headers=headers, timeout=120)
+            if self.llm_provider == 'anthropic':
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.openai_api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": self.openai_model,
+                        "max_tokens": 1024,
+                        "temperature": 0.1,
+                        "messages": [m for m in messages if m["role"] != "system"],
+                        "system": next((m["content"] for m in messages if m["role"] == "system"), None),
+                    },
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                content = resp.json()["content"][0]["text"].strip()
+            elif self.llm_provider == 'openai':
+                resp = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"},
+                    json={"model": self.openai_model, "messages": messages, "temperature": 0.1, "response_format": {"type": "json_object"}},
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"].strip()
             else:
-                url = f"{self.ollama_url}/v1/chat/completions"
-                payload = {
-                    "model": self.llm_model,
-                    "messages": messages,
-                    "temperature": 0.1,
-                    "stream": False,
-                }
-                resp = requests.post(url, json=payload, timeout=600)
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            # Strip markdown code fences if present (Ollama sometimes wraps JSON)
+                resp = requests.post(
+                    f"{self.ollama_url}/v1/chat/completions",
+                    json={"model": self.llm_model, "messages": messages, "temperature": 0.1, "stream": False},
+                    timeout=600,
+                )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"].strip()
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
@@ -937,29 +1099,42 @@ class IncidentFirstResponder:
             {"role": "user", "content": prompt},
         ]
         try:
-            if self.llm_provider == 'openai':
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {self.openai_api_key}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": self.openai_model,
-                    "messages": messages,
-                    "temperature": 0.3,
-                }
-                resp = requests.post(url, json=payload, headers=headers, timeout=120)
+            if self.llm_provider == 'anthropic':
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.openai_api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": self.openai_model,
+                        "max_tokens": 1024,
+                        "temperature": 0.3,
+                        "messages": [m for m in messages if m["role"] != "system"],
+                        "system": next((m["content"] for m in messages if m["role"] == "system"), None),
+                    },
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                return resp.json()["content"][0]["text"].strip()
+            elif self.llm_provider == 'openai':
+                resp = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"},
+                    json={"model": self.openai_model, "messages": messages, "temperature": 0.3},
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
             else:
-                url = f"{self.ollama_url}/v1/chat/completions"
-                payload = {
-                    "model": self.llm_model,
-                    "messages": messages,
-                    "temperature": 0.3,
-                    "stream": False,
-                }
-                resp = requests.post(url, json=payload, timeout=600)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+                resp = requests.post(
+                    f"{self.ollama_url}/v1/chat/completions",
+                    json={"model": self.llm_model, "messages": messages, "temperature": 0.3, "stream": False},
+                    timeout=600,
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
             self.logger.error(f"Narrative LLM call failed: {e!r}")
             return None
@@ -1086,6 +1261,301 @@ class IncidentFirstResponder:
         return rec
 
     # ------------------------------------------------------------------
+    # Traffic-spike incident handler (source='traffic_spike')
+    # ------------------------------------------------------------------
+
+    def _build_traffic_spike_prompt(self, incident, country_stats, asn_stats,
+                                    normal_traffic, normal_asn_traffic,
+                                    ua_stats, fingerprint_stats):
+        host = incident['host']
+        survey_country = incident.get('survey_country') or 'unknown'
+        spike_ratio = incident.get('spike_ratio', 0.0) or incident.get('traffic_peak_ratio', 0.0)
+        peak_count = incident.get('traffic_peak_count', 0)
+        baseline_avg = incident.get('baseline_avg', 0.0)
+
+        immature_ratio = incident.get('immature_ratio')
+        if immature_ratio is not None:
+            immature_pct = immature_ratio * 100
+            if immature_pct >= 90:
+                immature_tag = " ← EXTREME (almost all sessions are single-request bots)"
+            elif immature_pct >= 70:
+                immature_tag = " ← HIGH (majority are single-request bots)"
+            else:
+                immature_tag = ""
+        else:
+            immature_pct = None
+
+        lines = [
+            f"=== TRAFFIC SPIKE on {host} ===",
+            f"Source type: traffic_spike (1-request-per-IP bot pattern — no challenge commands generated)",
+            f"Started: {incident['started_at']}",
+            f"Spike ratio: {spike_ratio:.1f}x above baseline",
+            f"Peak request count: {peak_count} req/min  Baseline avg: {baseline_avg:.1f} req/min",
+            f"Site primary audience (survey_country): {survey_country}",
+        ]
+        if immature_pct is not None:
+            lines.append(
+                f"Immature session ratio: {immature_pct:.1f}% of sessions had exactly 1 request"
+                + (immature_tag if immature_ratio is not None else "")
+            )
+
+        lines.append("\n--- Traffic country distribution ---")
+        if country_stats:
+            for s in country_stats:
+                normal_pct = normal_traffic.get(s['country'], 0.0)
+                survey_tag = " ← SURVEY COUNTRY (do not block)" if s['country'] == survey_country else ""
+                lines.append(
+                    f"  {s['country']:4s}  spike traffic: {s['pct']:5.1f}%  "
+                    f"normal traffic: {normal_pct:.1f}%{survey_tag}"
+                )
+        else:
+            lines.append("  (no country data yet)")
+
+        lines.append("\n--- Traffic ASN distribution ---")
+        if asn_stats:
+            total_asns = len(asn_stats)
+            lines.append(f"  Total distinct ASNs: {total_asns}")
+            for s in asn_stats:
+                dc = " [datacenter]" if s.get('datacenter') else " [residential/carrier]"
+                normal_pct = normal_asn_traffic.get(s['asn_name'], 0.0)
+                normal_str = f"  normal traffic: {normal_pct:.1f}%" if normal_pct > 0 else "  normal traffic: 0%"
+                lines.append(
+                    f"  {s['asn_name'][:40]:40s}{dc}  "
+                    f"spike: {s['pct']:5.1f}%{normal_str}"
+                )
+        else:
+            lines.append("  (no ASN data yet)")
+
+        lines.append("\n--- User Agent distribution (spike traffic) ---")
+        if ua_stats:
+            top_pct = ua_stats[0]['pct'] if ua_stats else 0.0
+            if top_pct >= 70.0:
+                lines.append(
+                    f"  ⚠ TOP UA covers {top_pct:.1f}% of spike traffic — "
+                    f"highly uniform, strong bot indicator"
+                )
+            elif len(ua_stats) >= 3:
+                top_pcts = [s['pct'] for s in ua_stats[:8]]
+                mean_pct = sum(top_pcts) / len(top_pcts)
+                cv = (max(top_pcts) - min(top_pcts)) / mean_pct if mean_pct > 0 else 1.0
+                if cv < 0.15 and mean_pct >= 8.0:
+                    lines.append(
+                        f"  ⚠ UA distribution is SUSPICIOUSLY UNIFORM: {len(top_pcts)} UAs "
+                        f"each ~{mean_pct:.1f}% of traffic (variation={cv:.2f}). "
+                        f"Real browser populations follow power-law distribution — a flat uniform "
+                        f"distribution across multiple UAs is statistically impossible organically "
+                        f"and is a strong indicator of bot UA rotation."
+                    )
+            for s in ua_stats:
+                tag = self._classify_ua(s['ua'])
+                tag_str = f"  {tag}" if tag else ""
+                lines.append(
+                    f"  {s['ua'][:70]:70s}  {s['pct']:5.1f}%{tag_str}"
+                )
+        else:
+            lines.append("  (no UA data — all requests were 1-hit sessions not sent to predictor)")
+
+        lines.append("\n--- TLS Fingerprint distribution (spike traffic) ---")
+        lines.append("  (fingerprint = hash of UA + TLS cipher suite + accept-language)")
+        if fingerprint_stats:
+            top_pct = fingerprint_stats[0]['pct'] if fingerprint_stats else 0.0
+            if top_pct >= 60.0:
+                lines.append(
+                    f"  ⚠ TOP fingerprint covers {top_pct:.1f}% of spike traffic — "
+                    f"cannot be spoofed by changing headers. Same tool across all IPs."
+                )
+            for s in fingerprint_stats:
+                dominant = " ← DOMINANT" if s['pct'] >= 60.0 else ""
+                lines.append(
+                    f"  {s['fingerprint']}  {s['pct']:5.1f}%  "
+                    f"({s['count']} requests){dominant}"
+                )
+        else:
+            lines.append("  (no fingerprint data — requests did not reach session analysis)")
+
+        lines.append("\n--- Normal traffic baseline ---")
+        if normal_traffic:
+            top_normal = sorted(normal_traffic.items(), key=lambda x: -x[1])[:8]
+            lines.append("  Countries: " + ", ".join(f"{c}: {p:.1f}%" for c, p in top_normal))
+        else:
+            lines.append("  Countries: (no baseline — site may be new)")
+        if normal_asn_traffic:
+            top_asn = sorted(normal_asn_traffic.items(), key=lambda x: -x[1])[:5]
+            lines.append("  ASNs: " + ", ".join(f"{a}: {p:.1f}%" for a, p in top_asn))
+
+        return "\n".join(lines)
+
+    def _process_traffic_spike_incident(self, conn, incident):
+        incident_id = incident['id']
+        host = incident['host']
+
+        # For active incidents: re-analyze only every 10 minutes
+        if incident['ended_at'] is None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(created_at) FROM first_responder_actions WHERE incident_id = %s",
+                    (incident_id,)
+                )
+                last_action_at = cur.fetchone()[0]
+            if last_action_at is not None:
+                age_minutes = (datetime.now(timezone.utc) - last_action_at).total_seconds() / 60
+                if age_minutes < 10:
+                    return
+
+        peak_count = incident.get('traffic_peak_count', 0)
+        if peak_count < self.min_traffic_peak_count:
+            # If peak_count=0 the stats haven't arrived yet (alerts flushes every 60s).
+            # Wait for the next cycle instead of marking processed permanently.
+            if peak_count == 0:
+                self.logger.info(
+                    f"[FIRST_RESPONDER] Waiting for traffic stats: incident_id={incident_id} host={host} "
+                    f"traffic_peak_count=0 — will retry next cycle"
+                )
+                return
+            self.logger.info(
+                f"[FIRST_RESPONDER] Skipping traffic_spike incident_id={incident_id} host={host} "
+                f"peak_count={peak_count} < min={self.min_traffic_peak_count}"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': f"Skipped: traffic_peak_count={peak_count} below minimum {self.min_traffic_peak_count}",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
+        peak_req_min = incident.get('traffic_peak_count', 0)
+        if peak_req_min < self.min_traffic_peak_req_min:
+            self.logger.info(
+                f"[FIRST_RESPONDER] Skipping traffic_spike incident_id={incident_id} host={host} "
+                f"traffic_peak_count={peak_req_min} req/min < min={self.min_traffic_peak_req_min} — low-volume noise"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': f"Skipped: traffic_peak_count={peak_req_min} req/min below minimum {self.min_traffic_peak_req_min} req/min — spike is statistically significant but volume is too low to warrant blocking",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
+        # Skip closed incidents that lasted less than min_incident_duration_minutes.
+        # Short probes (6 min) are over before any block could take effect — LLM analysis is wasteful.
+        ended_at = incident.get('ended_at')
+        if ended_at is not None and self.min_incident_duration_minutes > 0:
+            started_at = incident.get('started_at')
+            if started_at is not None:
+                duration_sec = (ended_at - started_at).total_seconds()
+                duration_min = duration_sec / 60.0
+                if duration_min < self.min_incident_duration_minutes:
+                    self.logger.info(
+                        f"[FIRST_RESPONDER] Skipping short-lived traffic_spike incident_id={incident_id} host={host} "
+                        f"duration={duration_min:.1f}min < min={self.min_incident_duration_minutes}min — probe, not sustained attack"
+                    )
+                    self._save_action(conn, incident_id, host, {
+                        'action': 'monitor_only',
+                        'target': [],
+                        'confidence': 'low',
+                        'reasoning': f"Incident duration {duration_min:.0f} min is below minimum {self.min_incident_duration_minutes} min. Short probes end before any block could take effect.",
+                        'ttl_minutes': self.ttl_minutes,
+                    })
+                    self._mark_processed(conn, incident_id)
+                    return
+
+        if host in self.host_whitelist:
+            self.logger.info(
+                f"[FIRST_RESPONDER] host={host} is whitelisted — monitor only, no blocking"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': f"Host {host} is in the First Responder whitelist — blocking disabled.",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
+        self.logger.info(
+            f"[FIRST_RESPONDER] Analyzing traffic_spike incident_id={incident_id} host={host} "
+            f"peak_count={peak_count} peak_req_min={peak_req_min} spike_ratio={incident.get('spike_ratio', 0.0):.1f}x"
+        )
+
+        country_stats = self._get_country_stats(conn, incident_id)
+        asn_stats = self._get_asn_stats(conn, incident_id)
+        normal_traffic = self._get_normal_traffic(conn, host)
+        normal_asn_traffic = self._get_normal_asn_traffic(conn, host)
+        ua_stats = self._get_ua_stats(conn, incident_id)
+        fingerprint_stats = self._get_fingerprint_stats(conn, incident)
+
+        if not country_stats and not asn_stats:
+            age_minutes = (datetime.now(timezone.utc) - incident['started_at']).total_seconds() / 60
+            if age_minutes > 30:
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] traffic_spike incident_id={incident_id}: "
+                    f"no stats after {age_minutes:.0f}min, giving up"
+                )
+                self._save_action(conn, incident_id, host, {
+                    'action': 'monitor_only',
+                    'target': [],
+                    'confidence': 'low',
+                    'reasoning': f"Skipped: no country/ASN stats available after {age_minutes:.0f} minutes",
+                    'ttl_minutes': self.ttl_minutes,
+                })
+                self._mark_processed(conn, incident_id)
+            else:
+                self.logger.info(
+                    f"[FIRST_RESPONDER] traffic_spike incident_id={incident_id}: no stats yet, skipping"
+                )
+            return
+
+        prompt = self._build_traffic_spike_prompt(
+            incident, country_stats, asn_stats,
+            normal_traffic, normal_asn_traffic,
+            ua_stats, fingerprint_stats,
+        )
+        self.logger.info(
+            f"[FIRST_RESPONDER] Calling LLM for traffic_spike incident_id={incident_id}"
+        )
+
+        rec = self._call_llm(prompt, system_prompt=TRAFFIC_SPIKE_SYSTEM_PROMPT)
+        if rec is None:
+            self.logger.error(
+                f"[FIRST_RESPONDER] LLM returned no response for traffic_spike incident_id={incident_id}"
+            )
+            self._mark_processed(conn, incident_id)
+            return
+
+        if not self._validate_response(rec):
+            self.logger.error(
+                f"[FIRST_RESPONDER] Invalid LLM response for traffic_spike incident_id={incident_id}: {rec}"
+            )
+            self._mark_processed(conn, incident_id)
+            return
+
+        rec = self._sanitize_response(
+            rec,
+            survey_country=incident.get('survey_country'),
+            normal_traffic=normal_traffic,
+        )
+        self._save_action(conn, incident_id, host, rec)
+        if incident.get('ended_at') is not None:
+            self._mark_processed(conn, incident_id)
+            narrative_prompt = self._build_narrative_prompt(
+                incident, country_stats, asn_stats, rec
+            )
+            narrative = self._generate_narrative(narrative_prompt)
+            if narrative:
+                self._save_narrative(conn, incident_id, narrative)
+                self.logger.info(
+                    f"[FIRST_RESPONDER] narrative saved for traffic_spike incident_id={incident_id}: "
+                    f"{narrative[:120]}…"
+                )
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -1096,6 +1566,10 @@ class IncidentFirstResponder:
         # Route cluster_analysis incidents to dedicated handler
         if incident.get('source') == 'cluster_analysis':
             return self._process_cluster_incident(conn, incident)
+
+        # Route traffic_spike incidents to dedicated handler (no challenge commands)
+        if incident.get('source') == 'traffic_spike':
+            return self._process_traffic_spike_incident(conn, incident)
 
         # For active incidents: re-analyze only every 10 minutes
         if incident['ended_at'] is None:
@@ -1298,8 +1772,8 @@ class IncidentFirstResponder:
             )
 
     def run(self):
-        if self.llm_provider == 'openai':
-            llm_info = f"provider=openai model={self.openai_model}"
+        if self.llm_provider in ('openai', 'anthropic'):
+            llm_info = f"provider={self.llm_provider} model={self.openai_model}"
         else:
             llm_info = f"provider=ollama url={self.ollama_url} model={self.llm_model}"
         self.logger.info(
