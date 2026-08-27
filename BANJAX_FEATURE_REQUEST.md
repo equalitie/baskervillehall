@@ -119,18 +119,79 @@ blocking — targets a specific datacenter, VPS provider, or residential botnet 
 
 ### 7. `block_tls_fingerprint` / `challenge_tls_fingerprint`
 
-Block or challenge requests matching a specific TLS fingerprint (JA3 or similar).
+Block or challenge requests matching a specific session fingerprint hash.
 
-TLS fingerprint is the strongest bot signal we have — it cannot be spoofed and reflects the
-exact HTTP library/tool being used. When 100% of attack traffic shares one fingerprint, this
-command surgically blocks the attack tool without any collateral damage to legitimate users
-who happen to be in the same country or ASN.
+This is the strongest bot signal we have — when 100% of attack traffic shares one fingerprint,
+this command surgically blocks the exact tool/library being used without any collateral damage
+to legitimate users in the same country or ASN.
+
+**The fingerprint hash is already computed by Baskerville** and sent in the Kafka command.
+Banjax needs to compute the same hash on each incoming request and compare it.
+
+#### Fingerprint algorithm (must be identical in banjax)
+
+All fields are available to banjax at request time:
+
+```
+combined = ua + "||" + cipher + "||" + ciphers_ordered + "||" + accept_language_sorted + "||" + tls_version
+fingerprint = sha256(combined)[:16]  # first 16 hex chars
+```
+
+Where:
+- `ua` — `User-Agent` HTTP header (string, or `"None"` if absent)
+- `cipher` — negotiated TLS cipher suite name (e.g. `TLS_AES_128_GCM_SHA256`, or `"None"`)
+- `ciphers_ordered` — comma-joined list of advertised cipher suites **in original ClientHello order** (e.g. `TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,TLS_CHACHA20_POLY1305_SHA256`)
+- `accept_language_sorted` — pipe-joined Accept-Language values **sorted alphabetically** (e.g. `en-US|en;q=0.9`)
+- `tls_version` — inferred from cipher name: `"tls13"` if cipher starts with `TLS_` or `AEAD-`, `"tls12"` if contains `ECDHE` or `DHE`, else `"legacy"`
+
+#### Go reference implementation
+
+```go
+import (
+    "crypto/sha256"
+    "fmt"
+    "sort"
+    "strings"
+)
+
+func computeFingerprint(ua, cipher string, ciphers []string, acceptLanguages []string) string {
+    tlsVersion := "legacy"
+    c := strings.ToUpper(cipher)
+    if strings.HasPrefix(c, "TLS_") || strings.HasPrefix(c, "AEAD-") {
+        tlsVersion = "tls13"
+    } else if strings.Contains(c, "ECDHE") || strings.Contains(c, "DHE") {
+        tlsVersion = "tls12"
+    }
+
+    langs := make([]string, len(acceptLanguages))
+    copy(langs, acceptLanguages)
+    sort.Strings(langs)
+
+    none := func(s string) string {
+        if s == "" { return "None" }
+        return s
+    }
+
+    combined := strings.Join([]string{
+        none(ua),
+        none(cipher),
+        none(strings.Join(ciphers, ",")),
+        none(strings.Join(langs, "|")),
+        tlsVersion,
+    }, "||")
+
+    h := sha256.Sum256([]byte(combined))
+    return fmt.Sprintf("%x", h)[:16]
+}
+```
+
+#### Command format
 
 ```json
 {
   "command": "block_tls_fingerprint",
   "host": "example.org",
-  "fingerprint": "TLS_AES_128_GCM_SHA256",
+  "fingerprint": "a3f2c1e8b7d94501",
   "ttl": 3600
 }
 ```
@@ -139,7 +200,7 @@ who happen to be in the same country or ASN.
 {
   "command": "challenge_tls_fingerprint",
   "host": "example.org",
-  "fingerprint": "TLS_AES_128_GCM_SHA256",
+  "fingerprint": "a3f2c1e8b7d94501",
   "ttl": 3600
 }
 ```
