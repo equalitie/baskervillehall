@@ -95,6 +95,12 @@ Decision rules (apply in order):
    or monitor_only instead. There are NO exceptions to this rule.
 5. Use monitor_only if blocking would affect >{max_normal_pct}% of normal traffic
    (collateral damage too high).
+   *** IMPORTANT EXCEPTION TO RULE 5 ***: If the attack is dominated by a SINGLE specific
+   residential/datacenter ASN that is absent from normal traffic (<{max_normal_pct}%),
+   use block_asn targeting that ASN even if the country would be auto-removed.
+   Example: attack is 100% US via Latitude.sh (0% normal baseline for Latitude.sh)
+   → use block_asn Latitude.sh, NOT block_country US.
+   Always prefer the more precise tool: ASN blocking over country blocking.
 6. Use raise_threshold as a fallback when the attack is diffuse across many sources.
 7. Set confidence=high only when a single pattern dominates (>70% of attack).
 8. ttl_minutes should be 30 unless there is a strong reason to differ.
@@ -209,6 +215,10 @@ DECISION RULES:
    (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80%).
    Never include more than 3 ASNs. Prefer block_country for residential botnets spread
    across many ASNs in the same country.
+   *** IMPORTANT ***: If a single specific ASN dominates the attack AND block_country
+   would be ruled out (dominant country has high normal traffic), always fall back to
+   block_asn for that specific ASN — do NOT fall back to raise_threshold or monitor_only
+   if the attacking ASN itself has low normal traffic (<{max_normal_pct}%).
 
 10. Use raise_threshold if: traffic is geographically diverse (>3 countries each >15%),
     OR dominant country == survey_country, OR immature_ratio < 50%, OR signals are ambiguous.
