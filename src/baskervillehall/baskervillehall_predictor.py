@@ -334,6 +334,7 @@ class BaskervillehallPredictor(object):
         self._attack_response_mode: bool = attack_response_mode
         self._attack_response_hosts: dict = {}  # host → spike_ratio
         self._first_responder_actions: dict = {}  # host → {'action': str, 'target': set[str]}
+        self._blocked_fingerprints: set = set()  # fingerprint hashes to block immediately
         self._last_incident_check: float = 0.0
         self._incident_check_interval: int = 30  # seconds
         self._attack_min_challenge_count: int = attack_min_challenge_count
@@ -407,6 +408,23 @@ class BaskervillehallPredictor(object):
                     "WHERE expires_at > NOW() AND applied = FALSE"
                 )
             conn.commit()
+
+            # Load blocked fingerprints
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT fingerprint FROM blocked_fingerprints WHERE expires_at > NOW()"
+                )
+                fp_rows = cur.fetchall()
+            new_blocked_fps = {row[0] for row in fp_rows}
+            if new_blocked_fps != self._blocked_fingerprints:
+                added = new_blocked_fps - self._blocked_fingerprints
+                removed = self._blocked_fingerprints - new_blocked_fps
+                if added:
+                    self.logger.warning(f"BlockedFingerprints: +{len(added)} new ({list(added)[:3]}...)")
+                if removed:
+                    self.logger.info(f"BlockedFingerprints: -{len(removed)} expired")
+            self._blocked_fingerprints = new_blocked_fps
+
             conn.close()
 
             new_responder = {}
@@ -2037,6 +2055,41 @@ Reply JSON only, no markdown:
         protected_country = bool(
             survey_country and session_country and session_country == survey_country
         )
+
+        # Block sessions with known-malicious fingerprints (set by first_responder)
+        session_fp = session.get('fingerprints', '')
+        if session_fp and session_fp in self._blocked_fingerprints:
+            if ip not in pending_block_ip:
+                pending_block_ip[ip] = True
+                self.logger.warning(
+                    f"block_ip (blocked_fingerprint) ip={ip} host={host} "
+                    f"fp={session_fp[:8]}... asn={session.get('asn_name', '')} "
+                    f"ua={session.get('ua', '')[:60]}"
+                )
+                payload = self.create_command(
+                    command_name="block_ip",
+                    session=session,
+                    meta="first_responder [block_fingerprint] [block_ip]",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    rate_limit_hits=self.rate_limit_hits,
+                    rate_limit_interval=self.rate_limit_interval,
+                    rate_limit_expiration=self.rate_limit_expiration,
+                    baskerville_score=1,
+                    novel_attack=novel_attack,
+                    novel_attack_count=novel_attack_count,
+                )
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
+            return
 
         # Responder actions: LLM-issued targeted blocks by country, ASN, or UA
         responder = self._first_responder_actions.get(host)

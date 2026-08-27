@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS first_responder_actions (
 );
 CREATE INDEX IF NOT EXISTS first_responder_actions_host_expires
     ON first_responder_actions (host, expires_at DESC);
+
+CREATE TABLE IF NOT EXISTS blocked_fingerprints (
+    id           BIGSERIAL PRIMARY KEY,
+    fingerprint  TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    incident_id  BIGINT REFERENCES incidents(id),
+    reason       TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at   TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS blocked_fingerprints_fp_host
+    ON blocked_fingerprints (fingerprint, host);
+CREATE INDEX IF NOT EXISTS blocked_fingerprints_expires
+    ON blocked_fingerprints (expires_at);
 """
 
 NARRATIVE_SYSTEM_PROMPT = """You are a security analyst writing a brief incident summary for a report.
@@ -789,6 +803,21 @@ class IncidentFirstResponder:
             f"action_id={action_id}"
         )
         self.logger.info(f"[FIRST_RESPONDER] reasoning: {rec.get('reasoning', '')}")
+
+    def _save_blocked_fingerprint(self, conn, incident_id, host, fingerprint, reason):
+        ttl_minutes = self.ttl_minutes
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO blocked_fingerprints (fingerprint, host, incident_id, reason, expires_at)
+                   VALUES (%s, %s, %s, %s, NOW() + INTERVAL '{ttl_minutes} minutes')
+                   ON CONFLICT (fingerprint, host) DO UPDATE
+                   SET expires_at = EXCLUDED.expires_at, reason = EXCLUDED.reason""",
+                (fingerprint, host, incident_id, reason)
+            )
+        conn.commit()
+        self.logger.info(
+            f"[FIRST_RESPONDER] Blocked fingerprint={fingerprint[:8]}... host={host} ttl={ttl_minutes}min"
+        )
 
     # ------------------------------------------------------------------
     # LLM
@@ -1564,6 +1593,17 @@ class IncidentFirstResponder:
                     f"[FIRST_RESPONDER] narrative saved for traffic_spike incident_id={incident_id}: "
                     f"{narrative[:120]}…"
                 )
+
+        # Block dominant fingerprints directly in predictor (for long sessions via protected ASNs)
+        if fingerprint_stats:
+            for fp_stat in fingerprint_stats:
+                fp_hash = fp_stat.get('fingerprint', '')
+                fp_pct = fp_stat.get('pct', 0.0)
+                if fp_hash and fp_pct >= 70.0:
+                    self._save_blocked_fingerprint(
+                        conn, incident_id, host, fp_hash,
+                        f"traffic_spike: {fp_pct:.0f}% uniformity, spike={incident.get('spike_ratio', 0):.1f}x"
+                    )
 
     # ------------------------------------------------------------------
     # Main loop
