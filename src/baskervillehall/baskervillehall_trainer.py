@@ -317,7 +317,9 @@ class BaskervillehallTrainer(object):
                                 if len(batch[host]['human']) < self.num_sessions:
                                     batch[host]['human'].append(_strip_session(session))
                             else:
-                                if not session.get('bad_bot', False):
+                                if not session.get('bad_bot', False) and \
+                                        not session.get('commercial_crawler', False) and \
+                                        not session.get('ai_bot_ua', False):
                                     if len(batch[host]['bot']) < self.num_sessions:
                                         batch[host]['bot'].append(_strip_session(session))
 

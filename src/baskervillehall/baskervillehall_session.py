@@ -285,6 +285,12 @@ class BaskervillehallSession(object):
         self.topic_traffic_stats = topic_traffic_stats
         self.traffic_stats_interval = traffic_stats_interval
         self.host_request_counts = defaultdict(int)
+        self.host_country_counts = defaultdict(lambda: defaultdict(int))
+        self.host_asn_counts = defaultdict(lambda: defaultdict(int))
+        self.host_ua_counts = defaultdict(lambda: defaultdict(int))
+        self.host_session_counts = defaultdict(int)
+        self.host_immature_counts = defaultdict(int)
+        self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
         self.ts_traffic_flush = time_module.time()
 
         self.primary_collect_cooldown_sec = 2.0
@@ -375,20 +381,48 @@ class BaskervillehallSession(object):
             self.profile_stats[k] = 0.0
 
     def _flush_traffic_stats(self):
-        """Send per-host request counts to topic_traffic_stats and reset counters."""
+        """Send per-host request counts and breakdowns to topic_traffic_stats and reset counters."""
         if not self.host_request_counts:
             self.logger.debug('[TRAFFIC_STATS] flush called but no counts')
             return
+
+        def top10(d):
+            return dict(sorted(d.items(), key=lambda x: -x[1])[:10])
+
         ts_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         counts = dict(self.host_request_counts)
+        country_snap = {h: dict(v) for h, v in self.host_country_counts.items()}
+        asn_snap = {h: dict(v) for h, v in self.host_asn_counts.items()}
+        ua_snap = {h: dict(v) for h, v in self.host_ua_counts.items()}
+        fp_snap = {h: dict(v) for h, v in self.host_fingerprint_counts.items()}
+        session_snap = dict(self.host_session_counts)
+        immature_snap = dict(self.host_immature_counts)
+
         self.host_request_counts.clear()
+        self.host_country_counts.clear()
+        self.host_asn_counts.clear()
+        self.host_ua_counts.clear()
+        self.host_fingerprint_counts.clear()
+        self.host_session_counts.clear()
+        self.host_immature_counts.clear()
+
         self.logger.info(f'[TRAFFIC_STATS] flushing {len(counts)} hosts to {self.topic_traffic_stats}')
         for host, count in counts.items():
+            total_sessions = session_snap.get(host, 0)
+            immature_sessions = immature_snap.get(host, 0)
+            immature_ratio = round(immature_sessions / total_sessions, 3) if total_sessions > 0 else None
             msg = {
                 'host': host,
                 'request_count': count,
                 'ts': ts_str,
                 'window_seconds': self.traffic_stats_interval,
+                'country_counts': top10(country_snap.get(host, {})),
+                'asn_counts': top10(asn_snap.get(host, {})),
+                'ua_counts': top10(ua_snap.get(host, {})),
+                'fingerprint_counts': top10(fp_snap.get(host, {})),
+                'session_count': total_sessions,
+                'immature_session_count': immature_sessions,
+                'immature_ratio': immature_ratio,
             }
             try:
                 self.producer_output.send(
@@ -637,6 +671,23 @@ class BaskervillehallSession(object):
             size = len(session['requests']) + session.get('static_count', 0)
             immature_session = self.score_2_num_requests <= size < self.min_number_of_requests
             session['immature_session'] = immature_session
+
+            # Fast-path for known crawlers: flush immediately on first request
+            ua = session.get('ua', '')
+            is_known_crawler = (
+                baskerville_rules.is_commercial_crawler(ua) or
+                baskerville_rules.is_ai_bot_user_agent(ua)
+            )
+            if is_known_crawler and not session.get('crawler_flushed', False):
+                session['immature_session'] = False
+                t0 = self._t()
+                self.send_session(session)
+                self._acc('session_send', t0)
+                session['flush_size'] = size
+                session['flush_end'] = session['end']
+                session['crawler_flushed'] = True
+                return
+
             if (immature_session and not session.get('immature_session_flushed', False) ) or \
                     (session['duration'] > self.min_session_duration and size > self.min_number_of_requests):
                 if 'flush_size' not in session or size - session.get('flush_size') > self.flush_increment:
@@ -736,6 +787,8 @@ class BaskervillehallSession(object):
             'asn_name': session['asn_name'],
             'bot_ua': baskerville_rules.is_bot_user_agent(session['ua']),
             'ai_bot_ua': baskerville_rules.is_ai_bot_user_agent(session['ua']),
+            'commercial_crawler': baskerville_rules.is_commercial_crawler(session['ua']),
+            'fake_ua': baskerville_rules.is_fake_user_agent(session['ua']),
             'num_languages': session['num_languages'],
             'accept_language': session['accept_language'],
             'short_ua': baskerville_rules.is_short_user_agent(session['ua']),
@@ -789,6 +842,8 @@ class BaskervillehallSession(object):
             session_final['class'] = 'verified_ai_bot'
         elif session_final['ai_bot_ua']:
             session_final['class'] = 'ai_bot'
+        elif session_final['commercial_crawler']:
+            session_final['class'] = 'commercial_crawler'
         elif session_final['bad_bot']:
             session_final['class'] = 'bad_bot'
         elif session_final['is_scraper']:
@@ -805,6 +860,12 @@ class BaskervillehallSession(object):
                 value=session_final
             )
         self._acc('send_producer_send', t_send)
+
+        if self.topic_traffic_stats:
+            host = session['host']
+            self.host_session_counts[host] += 1
+            if session_final.get('immature_session', False):
+                self.host_immature_counts[host] += 1
 
     def collect_primary_session(self, ip):
         primary_sessions = self.ips_primary.get(ip)
@@ -883,9 +944,7 @@ class BaskervillehallSession(object):
                 to_delete = {sid for sid, s in primary_sessions.items() if s['host'] == host}
                 to_delete_by_host[host] = to_delete
                 continue
-            if self.current_lag < self.lag_moderate_threshold:
-                send_threshold = max(send_threshold, self.min_number_of_requests * 2)
-            elif self.current_lag >= self.lag_high_threshold:
+            if self.current_lag >= self.lag_high_threshold:
                 send_threshold = max(send_threshold, int(self.min_number_of_requests * 1.5))
 
             immature_session = request_count == 1
@@ -1253,6 +1312,7 @@ class BaskervillehallSession(object):
                         if verified_bot or self.skip_expensive_ops or not baskerville_rules.is_ai_bot_user_agent(ua):
                             verified_ai_bot = False
                             verified_ai_bot_name = ''
+                            ai_spoofer = False
                         else:
                             check_fcrdns = baskerville_rules.is_fcrdns_bot_user_agent(ua)
                             verified_ai_bot_name = self.ai_bot_verificator.get_bot_name(ip, check_fcrdns=check_fcrdns)
@@ -1274,11 +1334,26 @@ class BaskervillehallSession(object):
                                 self.logger.info(
                                     f'[AI] unsupported ip={ip} asn="{asn_name}" ua="{ua}"'
                                 )
-                        ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
+                            ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
                         self.debugging = self.is_debugging_mode(data)
                         host = message.key.decode('utf-8', errors='replace')
                         if self.topic_traffic_stats:
                             self.host_request_counts[host] += 1
+                            _geoip = data.get('geoip', {})
+                            _country = _geoip.get('country_code2', _geoip.get('country_code', '')) or 'XX'
+                            _cipher = (
+                                data.get('ssl_cipher') or
+                                data.get('cloudflareProperties', {}).get('tlsCipher') or
+                                data.get('tlsCipher') or ''
+                            )
+                            _ua_key = ua[:150] if ua else ''
+                            self.host_country_counts[host][_country] += 1
+                            if asn_name:
+                                self.host_asn_counts[host][asn_name] += 1
+                            if _ua_key:
+                                self.host_ua_counts[host][_ua_key] += 1
+                            if _cipher:
+                                self.host_fingerprint_counts[host][_cipher] += 1
                         session_id = self.get_session_cookie(data)
                         self._acc('data_extraction', t_ext)
 
