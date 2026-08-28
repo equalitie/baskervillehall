@@ -1496,6 +1496,23 @@ class IncidentFirstResponder:
                 duration_sec = (ended_at - started_at).total_seconds()
                 duration_min = duration_sec / 60.0
                 if duration_min < self.min_incident_duration_minutes:
+                    # If a blocking action was already applied during the active phase,
+                    # do NOT override it with monitor_only — the block was justified.
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT action FROM first_responder_actions
+                            WHERE incident_id = %s
+                              AND action IN ('block_country', 'block_asn', 'block_ua')
+                            ORDER BY created_at DESC LIMIT 1
+                        """, (incident_id,))
+                        existing_block = cur.fetchone()
+                    if existing_block:
+                        self.logger.info(
+                            f"[FIRST_RESPONDER] Short incident_id={incident_id} host={host} "
+                            f"duration={duration_min:.1f}min but block already applied ({existing_block[0]}) — keeping"
+                        )
+                        self._mark_processed(conn, incident_id)
+                        return
                     self.logger.info(
                         f"[FIRST_RESPONDER] Skipping short-lived traffic_spike incident_id={incident_id} host={host} "
                         f"duration={duration_min:.1f}min < min={self.min_incident_duration_minutes}min — probe, not sustained attack"

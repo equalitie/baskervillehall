@@ -78,9 +78,12 @@ class FirstResponderBlocker:
             conn.close()
 
             new_actions: dict = {}
+            seen_hosts: set = set()
             for host, action, target_str in rows:
-                if host in new_actions:
+                if host in seen_hosts:
                     continue  # take the most recent action per host
+                seen_hosts.add(host)  # mark as seen regardless of action type
+                # monitor_only / raise_threshold cancel any previous block action
                 if action not in ('block_asn', 'block_country', 'block_ua'):
                     continue
                 targets = {t.strip() for t in (target_str or '').split('|') if t.strip()}
