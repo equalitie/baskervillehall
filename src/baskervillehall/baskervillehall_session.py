@@ -1337,23 +1337,42 @@ class BaskervillehallSession(object):
                             ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
                         self.debugging = self.is_debugging_mode(data)
                         host = message.key.decode('utf-8', errors='replace')
+
+                        # Compute TLS fingerprint once per request — used both for traffic
+                        # stats counting and for per-request fingerprint blocking in
+                        # FirstResponderBlocker (catches 1-req-per-IP bots that never
+                        # form a full session and are invisible to the predictor).
+                        _cipher = (
+                            data.get('ssl_cipher') or
+                            data.get('cloudflareProperties', {}).get('tlsCipher') or
+                            data.get('tlsCipher') or ''
+                        )
+                        if _cipher:
+                            _ciphers_raw = data.get('ssl_ciphers', '')
+                            _ciphers_list = _ciphers_raw.split(':') if _ciphers_raw else [_cipher]
+                            _accept_lang = data.get('accept_language', '') or data.get('language', '')
+                            _accept_lang_list = [_accept_lang] if isinstance(_accept_lang, str) and _accept_lang else (_accept_lang if isinstance(_accept_lang, list) else [])
+                            _fp_hash = SessionFingerprints.get_fingerprints({
+                                'ua': ua,
+                                'cipher': _cipher,
+                                'ciphers': _ciphers_list,
+                                'accept_language': _accept_lang_list,
+                            })
+                        else:
+                            _fp_hash = ''
+
                         if self.topic_traffic_stats:
                             self.host_request_counts[host] += 1
                             _geoip = data.get('geoip', {})
                             _country = _geoip.get('country_code2', _geoip.get('country_code', '')) or 'XX'
-                            _cipher = (
-                                data.get('ssl_cipher') or
-                                data.get('cloudflareProperties', {}).get('tlsCipher') or
-                                data.get('tlsCipher') or ''
-                            )
                             _ua_key = ua[:150] if ua else ''
                             self.host_country_counts[host][_country] += 1
                             if asn_name:
                                 self.host_asn_counts[host][asn_name] += 1
                             if _ua_key:
                                 self.host_ua_counts[host][_ua_key] += 1
-                            if _cipher:
-                                self.host_fingerprint_counts[host][_cipher] += 1
+                            if _fp_hash:
+                                self.host_fingerprint_counts[host][_fp_hash] += 1
                         session_id = self.get_session_cookie(data)
                         self._acc('data_extraction', t_ext)
 
@@ -1374,7 +1393,7 @@ class BaskervillehallSession(object):
                             self.profile_stats['message_count'] += 1
                             continue
 
-                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country, dnet, ua):
+                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country, dnet, ua, _fp_hash):
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                             self.profile_stats['message_count'] += 1
                             continue

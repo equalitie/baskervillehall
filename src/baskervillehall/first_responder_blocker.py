@@ -41,6 +41,8 @@ class FirstResponderBlocker:
 
         # host → {'action': str, 'target': set[str], 'survey_country': str}
         self._actions: dict = {}
+        # host → set of blocked SHA256 fingerprint hashes
+        self._fingerprints: dict = {}
         self._last_refresh: float = 0.0
 
         # Per-IP dedup cache: avoids re-sending block_ip on every request from same IP
@@ -96,6 +98,27 @@ class FirstResponderBlocker:
                     self.logger.info("[FirstResponderBlocker] no active actions")
             self._actions = new_actions
 
+            # Load blocked TLS fingerprints (set by first_responder when uniformity >= 70%)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT host, fingerprint FROM blocked_fingerprints
+                    WHERE expires_at > NOW()
+                """)
+                fp_rows = cur.fetchall()
+
+            new_fingerprints: dict = {}
+            for host, fp in fp_rows:
+                new_fingerprints.setdefault(host, set()).add(fp)
+
+            added_fps = sum(len(v) for v in new_fingerprints.values()) - sum(len(v) for v in self._fingerprints.values())
+            if added_fps > 0:
+                self.logger.warning(
+                    f"[FirstResponderBlocker] blocked fingerprints: "
+                    f"{sum(len(v) for v in new_fingerprints.values())} active across "
+                    f"{len(new_fingerprints)} hosts"
+                )
+            self._fingerprints = new_fingerprints
+
         except Exception as e:
             self.logger.error(f"[FirstResponderBlocker] Postgres refresh failed: {e!r}")
 
@@ -103,12 +126,20 @@ class FirstResponderBlocker:
     # Per-request check
     # ------------------------------------------------------------------
 
-    def process(self, host, ip, country, asn_name, survey_country, dnet='-', ua=''):
+    def process(self, host, ip, country, asn_name, survey_country, dnet='-', ua='', fingerprint=''):
         """
         Returns True if the request matches an active block action and a block_ip
         command has been (or was already) issued.  The session pipeline should then
         skip further processing of this request.
         """
+        # Fingerprint check first — most precise signal, no collateral damage.
+        # Catches 1-req-per-IP bots that never build a full session (invisible to predictor).
+        if fingerprint and fingerprint in self._fingerprints.get(host, set()):
+            if ip not in self._blocked_ips:
+                self._blocked_ips[ip] = True
+                self._send_block(host, ip, country, asn_name, 'block_fingerprint', dnet, ua)
+            return True
+
         ra = self._actions.get(host)
         if ra is None:
             return False

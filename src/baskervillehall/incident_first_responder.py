@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS first_responder_actions (
 );
 CREATE INDEX IF NOT EXISTS first_responder_actions_host_expires
     ON first_responder_actions (host, expires_at DESC);
+CREATE INDEX IF NOT EXISTS first_responder_actions_incident_created
+    ON first_responder_actions (incident_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS blocked_fingerprints (
     id           BIGSERIAL PRIMARY KEY,
@@ -1286,13 +1288,15 @@ class IncidentFirstResponder:
         if not filtered:
             self.logger.warning(
                 "[FIRST_RESPONDER] All block_asn targets were protected ASNs — "
-                "downgrading to raise_threshold"
+                "downgrading to monitor_only"
             )
-            rec['action'] = 'raise_threshold'
+            rec['action'] = 'monitor_only'
             rec['target'] = []
             rec['reasoning'] = (
                 rec.get('reasoning', '') +
-                ' [auto-downgraded: all targets were protected infrastructure ASNs]'
+                ' [auto-downgraded: all targets were protected infrastructure ASNs — '
+                'attack routes through cloud provider IPs that cannot be blocked. '
+                'Fingerprint blocking active if TLS uniformity >= 70%.]'
             )
         else:
             rec['target'] = filtered
@@ -1428,7 +1432,9 @@ class IncidentFirstResponder:
         incident_id = incident['id']
         host = incident['host']
 
-        # For active incidents: re-analyze only every 10 minutes
+        # For active incidents: re-analyze only every ttl_minutes (same as block TTL).
+        # Using TTL instead of a short interval avoids repeated LLM calls when the attack
+        # cannot be blocked (e.g. all ASNs are protected infrastructure).
         if incident['ended_at'] is None:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1438,7 +1444,7 @@ class IncidentFirstResponder:
                 last_action_at = cur.fetchone()[0]
             if last_action_at is not None:
                 age_minutes = (datetime.now(timezone.utc) - last_action_at).total_seconds() / 60
-                if age_minutes < 10:
+                if age_minutes < self.ttl_minutes:
                     return
 
         peak_count = incident.get('traffic_peak_count', 0)
@@ -1621,7 +1627,7 @@ class IncidentFirstResponder:
         if incident.get('source') == 'traffic_spike':
             return self._process_traffic_spike_incident(conn, incident)
 
-        # For active incidents: re-analyze only every 10 minutes
+        # For active incidents: re-analyze only every ttl_minutes (same as block TTL).
         if incident['ended_at'] is None:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1631,7 +1637,7 @@ class IncidentFirstResponder:
                 last_action_at = cur.fetchone()[0]
             if last_action_at is not None:
                 age_minutes = (datetime.now(timezone.utc) - last_action_at).total_seconds() / 60
-                if age_minutes < 10:
+                if age_minutes < self.ttl_minutes:
                     return
 
         if incident['spike_ratio'] < self.min_spike_ratio:
