@@ -164,8 +164,8 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "raise_threshold" | "monitor_only",
-  "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | [],
+  "action": "block_country" | "block_asn" | "block_ua" | "raise_threshold" | "monitor_only",
+  "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | ["Mozilla/5.0 (X11; Linux x86_64)..."] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 30,
   "reasoning": "brief explanation"
@@ -190,6 +190,10 @@ AVAILABLE SIGNALS (apply heuristics in this priority order):
    off sharply. A flat uniform distribution across several UAs is statistically impossible
    organically. The prompt will flag this with "UA distribution is SUSPICIOUSLY UNIFORM".
    Treat this as equivalent to a single-UA bot signal.
+   *** FAKE OR IMPOSSIBLE UA — CONCLUSIVE SIGNAL ***
+   User agents claiming browser versions that do not exist (e.g. Chrome/150, Chrome/149 when
+   current stable is ≤130), scripted tool signatures (curl/, python-requests/, go-http-client/,
+   aiohttp/), or malformed strings are definitive bot evidence regardless of other signals.
 
 3. *** COUNTRY CONCENTRATION ***
    If one country covers >80% of spike traffic AND is not the site's survey_country:
@@ -223,35 +227,47 @@ DECISION RULES:
    NEVER include survey_country in "target". survey_country is the site's primary audience.
    If the spike comes from survey_country, use raise_threshold — it may be organic traffic.
 
-8. Use block_country if: one country dominates (>60%) AND country != survey_country
+8. *** USE block_ua FIRST when a single UA dominates AND it is scripted or fake ***
+   Use block_ua if: one UA covers >70% of spike traffic AND the UA is either:
+   (a) a scripted tool: curl/, python-requests/, go-http-client/, aiohttp/, wget/, etc.
+   (b) a non-existent browser version: Chrome/140+, Chrome/15x, Firefox/200+, etc.
+       (current stable versions as of 2026: Chrome ≤ 130, Firefox ≤ 130, Safari ≤ 18)
+   (c) any UA that is absent from or rare in the normal traffic baseline (<1%).
+   block_ua is the most surgical action — it has ZERO collateral damage on legitimate users
+   with different UAs and works regardless of country or ASN.
+   Put the EXACT full UA string in "target". Set confidence=high for scripted/fake UAs.
+   Never include more than 3 UA strings.
+
+9. Use block_country if: one country dominates (>60%) AND country != survey_country
    AND (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80% OR spike_ratio >100x).
    Never include more than 2 countries in a single block_country action.
 
-9. Use block_asn if: specific ASNs dominate AND total ASNs <= 5 AND
-   (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80%).
-   Never include more than 3 ASNs. Prefer block_country for residential botnets spread
-   across many ASNs in the same country.
-   *** IMPORTANT ***: If a single specific ASN dominates the attack AND block_country
-   would be ruled out (dominant country has high normal traffic), always fall back to
-   block_asn for that specific ASN — do NOT fall back to raise_threshold or monitor_only
-   if the attacking ASN itself has low normal traffic (<{max_normal_pct}%).
+10. Use block_asn if: specific ASNs dominate AND total ASNs <= 5 AND
+    (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80%).
+    Never include more than 3 ASNs. Prefer block_country for residential botnets spread
+    across many ASNs in the same country.
+    *** IMPORTANT ***: If a single specific ASN dominates the attack AND block_country
+    would be ruled out (dominant country has high normal traffic), always fall back to
+    block_asn for that specific ASN — do NOT fall back to raise_threshold or monitor_only
+    if the attacking ASN itself has low normal traffic (<{max_normal_pct}%).
 
-10. Use raise_threshold if: traffic is geographically diverse (>3 countries each >15%),
+11. Use raise_threshold if: traffic is geographically diverse (>3 countries each >15%),
     OR dominant country == survey_country, OR immature_ratio < 50%, OR signals are ambiguous.
     raise_threshold buys time without blocking legitimate users.
 
-11. Use monitor_only if: spike is small (<50 req/min peak), signals are absent or
+12. Use monitor_only if: spike is small (<50 req/min peak), signals are absent or
     contradictory, or the site has no baseline yet.
 
-12. *** ABSOLUTE HARD RULE — NO EXCEPTIONS ***
+13. *** ABSOLUTE HARD RULE — NO EXCEPTIONS ***
     NEVER put these ASNs in "target": Google LLC, Cloudflare Inc., Amazon.com Inc.,
     Microsoft Corporation, Akamai Technologies, Fastly Inc., Meta Platforms Inc.,
     Facebook Inc., Apple Inc., Twitter Inc., X Corp., AT&T Enterprises LLC,
     Verizon Business, Deutsche Telekom AG.
     These are infrastructure providers — their IPs appear because traffic routes through them.
 
-13. Set confidence=high only when 2+ signals agree (e.g. fingerprint >70% AND country >80%,
-    or immature_ratio >90% AND country >80%). Set confidence=medium when 1 strong signal exists.
+14. Set confidence=high only when 2+ signals agree (e.g. fingerprint >70% AND country >80%,
+    or immature_ratio >90% AND country >80%, or scripted/fake UA >70%).
+    Set confidence=medium when 1 strong signal exists.
     Set confidence=low when signals conflict.
 """
 
