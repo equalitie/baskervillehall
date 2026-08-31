@@ -2183,9 +2183,18 @@ Reply JSON only, no markdown:
         # path returns early and would shadow banjax's bot_score signal.
         bot_score = session.get("bot_score", 0.0)
         bot_score_top_factor = session.get("bot_score_top_factor", "")
+        # gpu_renderer as top factor = headless browser (SwiftShader / missing GPU).
+        # Real browsers always report a real GPU renderer — this signal is highly reliable.
+        # Use a lower threshold than the default to catch these cases.
+        gpu_renderer_threshold = 0.15
+        effective_bot_score_threshold = (
+            gpu_renderer_threshold if bot_score_top_factor == 'gpu_renderer'
+            else self.bot_score_threshold
+        )
         if (
                 session.get("passed_challenge")
-                and bot_score > self.bot_score_threshold
+                and bot_score > 0  # exclude -1.0 (banjax score not available)
+                and bot_score > effective_bot_score_threshold
                 and bot_score_top_factor != "no_payload"
         ):
             if ip in pending_block_ip:
