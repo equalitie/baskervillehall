@@ -96,8 +96,9 @@ Output format:
 Decision rules (apply in order):
 1. Prefer block_asn over block_country — it causes less collateral damage.
 2. Use block_asn if datacenter ASNs account for the majority of the attack.
-3. Use block_country if a country accounts for >{min_attack_pct}% of the attack AND
-   represents <{max_normal_pct}% of the site's normal traffic.
+3. Use block_country ONLY if a country accounts for >{min_attack_pct}% of the attack AND
+   represents exactly 0% of the site's normal traffic (completely absent from baseline).
+   If the country has ANY normal traffic (even 0.1%), use block_asn or raise_threshold instead.
    Never include more than 3 countries in a single block_country action.
    If more than 3 countries would need to be blocked to cover the attack, use raise_threshold instead —
    blocking many countries causes excessive collateral damage and is a sign of a diffuse attack.
@@ -238,8 +239,9 @@ DECISION RULES:
    Put the EXACT full UA string in "target". Set confidence=high for scripted/fake UAs.
    Never include more than 3 UA strings.
 
-9. Use block_country if: one country dominates (>60%) AND country != survey_country
-   AND (UA uniformity >60% OR fingerprint uniformity >60% OR immature_ratio >80% OR spike_ratio >100x).
+9. Use block_country ONLY if: one country dominates (>60%) AND country != survey_country
+   AND the country has exactly 0% normal traffic baseline (completely absent from site's normal audience).
+   If the country has ANY normal traffic (even 0.1%), use block_asn or raise_threshold instead.
    Never include more than 2 countries in a single block_country action.
 
 10. Use block_asn if: specific ASNs dominate AND total ASNs <= 5 AND
@@ -1250,29 +1252,30 @@ class IncidentFirstResponder:
         if action == 'block_country':
             targets = rec.get('target', [])
 
-            # Code-level guard: never block a country that represents >= max_normal_pct of normal traffic
+            # Code-level guard: only block a country if it has exactly 0% normal traffic.
+            # Any presence in the baseline (even 0.1%) means potential legitimate audience.
             if normal_traffic and targets:
-                safe = [c for c in targets if normal_traffic.get(c, 0.0) < self.max_normal_pct]
+                safe = [c for c in targets if normal_traffic.get(c, 0.0) == 0.0]
                 removed_high = [c for c in targets if c not in safe]
                 if removed_high:
                     for c in removed_high:
                         self.logger.error(
                             f"[FIRST_RESPONDER] LLM tried to block {c} which has "
                             f"{normal_traffic.get(c, 0.0):.1f}% normal traffic "
-                            f"(>= max_normal_pct={self.max_normal_pct}%) — REMOVED"
+                            f"(must be 0% for block_country) — REMOVED"
                         )
                     targets = safe
                     rec['target'] = targets
                     rec['reasoning'] = (
                         rec.get('reasoning', '') +
-                        f' [auto-removed high-normal-traffic countries: {removed_high}]'
+                        f' [auto-removed: countries with any normal traffic cannot be blocked: {removed_high}]'
                     )
                 if not targets:
                     self.logger.warning(
-                        "[FIRST_RESPONDER] All block_country targets had high normal traffic — "
-                        "downgrading to monitor_only"
+                        "[FIRST_RESPONDER] All block_country targets have normal traffic > 0% — "
+                        "downgrading to raise_threshold"
                     )
-                    rec['action'] = 'monitor_only'
+                    rec['action'] = 'raise_threshold'
                     rec['confidence'] = 'low'
                     return rec
 
