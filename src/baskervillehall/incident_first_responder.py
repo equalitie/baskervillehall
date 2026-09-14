@@ -298,6 +298,7 @@ class IncidentFirstResponder:
             host_whitelist=None,
             min_traffic_peak_count=50,
             min_traffic_peak_req_min=50,
+            min_baseline_avg=5.0,
             min_incident_duration_minutes=10,
             logger=None,
     ):
@@ -320,6 +321,7 @@ class IncidentFirstResponder:
         self.fingerprint_max_ips = fingerprint_max_ips
         self.min_traffic_peak_count = min_traffic_peak_count
         self.min_traffic_peak_req_min = min_traffic_peak_req_min
+        self.min_baseline_avg = min_baseline_avg
         self.min_incident_duration_minutes = min_incident_duration_minutes
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
@@ -1501,6 +1503,27 @@ class IncidentFirstResponder:
                 'target': [],
                 'confidence': 'low',
                 'reasoning': f"Skipped: traffic_peak_count={peak_req_min} req/min below minimum {self.min_traffic_peak_req_min} req/min — spike is statistically significant but volume is too low to warrant blocking",
+                'ttl_minutes': self.ttl_minutes,
+            })
+            self._mark_processed(conn, incident_id)
+            return
+
+        baseline_avg = incident.get('baseline_avg', 0.0)
+        if self.min_baseline_avg > 0 and 0 < baseline_avg < self.min_baseline_avg:
+            self.logger.info(
+                f"[FIRST_RESPONDER] Skipping traffic_spike incident_id={incident_id} host={host} "
+                f"baseline_avg={baseline_avg:.2f} req/min < min={self.min_baseline_avg} — site has too little "
+                f"traffic history; spike_ratio is unreliable noise"
+            )
+            self._save_action(conn, incident_id, host, {
+                'action': 'monitor_only',
+                'target': [],
+                'confidence': 'low',
+                'reasoning': (
+                    f"Skipped: baseline_avg={baseline_avg:.2f} req/min is below minimum {self.min_baseline_avg} req/min. "
+                    f"Site has insufficient traffic history — spike_ratio is statistically unreliable noise, "
+                    f"not a real attack signal."
+                ),
                 'ttl_minutes': self.ttl_minutes,
             })
             self._mark_processed(conn, incident_id)
