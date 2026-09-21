@@ -593,7 +593,32 @@ Request sequence:
 Reply JSON only, no markdown:
 {{"label": "human" or "bot", "confidence": 0.0-1.0, "reasoning": "2-3 sentences"}}"""
 
-    def _call_llm(self, prompt: str, model: str, timeout: int = 30) -> str:
+    # Haiku 4.5 pricing ($/MTok): input $0.80, output $4.00
+    _LLM_COST_PER_INPUT_TOKEN  = 0.80 / 1_000_000
+    _LLM_COST_PER_OUTPUT_TOKEN = 4.00 / 1_000_000
+
+    def _log_token_usage(self, input_tokens: int, output_tokens: int,
+                         source: str, host: str = None):
+        """Write one row to llm_usage_log. Best-effort — never raises."""
+        try:
+            cost = (input_tokens * self._LLM_COST_PER_INPUT_TOKEN +
+                    output_tokens * self._LLM_COST_PER_OUTPUT_TOKEN)
+            conn = psycopg2.connect(**self.postgres_connection)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO llm_usage_log
+                       (source, provider, model, input_tokens, output_tokens, cost_usd, host)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (source, self._session_llm_provider, self._llm_model,
+                     input_tokens, output_tokens, cost, host),
+                )
+            conn.close()
+        except Exception as e:
+            self.logger.warning(f"[TOKEN_LOG] failed to log usage: {e!r}")
+
+    def _call_llm(self, prompt: str, model: str, timeout: int = 30,
+                  _log_source: str = 'predictor', _log_host: str = None) -> str:
         """Call LLM API (Anthropic or Ollama) and return raw text content."""
         if self._session_llm_provider == 'anthropic':
             response = http_requests.post(
@@ -614,6 +639,12 @@ Reply JSON only, no markdown:
             resp_json = response.json()
             if 'content' not in resp_json:
                 raise ValueError(f"Anthropic API error: {resp_json}")
+            usage = resp_json.get('usage', {})
+            self._log_token_usage(
+                input_tokens=usage.get('input_tokens', 0),
+                output_tokens=usage.get('output_tokens', 0),
+                source=_log_source, host=_log_host,
+            )
             return resp_json['content'][0]['text'].strip()
         else:
             response = http_requests.post(
@@ -631,7 +662,8 @@ Reply JSON only, no markdown:
     def _session_llm_score(self, session: dict, host: str) -> dict | None:
         try:
             prompt = self._build_session_llm_prompt(session, host)
-            content = self._call_llm(prompt, model=self._llm_model, timeout=30)
+            content = self._call_llm(prompt, model=self._llm_model, timeout=30,
+                                     _log_source='predictor_session', _log_host=host)
             # Strip markdown code blocks if model wraps JSON in them
             if content.startswith('```'):
                 content = content.split('```')[1]
@@ -1060,7 +1092,8 @@ Reply JSON only, no markdown:
 
             try:
                 prompt = self._build_cluster_llm_prompt(host, sessions, score)
-                content = self._call_llm(prompt, model=self._llm_model, timeout=30)
+                content = self._call_llm(prompt, model=self._llm_model, timeout=30,
+                                         _log_source='predictor_cluster', _log_host=host)
                 if content.startswith('```'):
                     content = content.split('```')[1]
                     if content.startswith('json'):

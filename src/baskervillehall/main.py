@@ -235,6 +235,7 @@ def main():
             min_traffic_peak_count=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_COUNT', '50')),
             min_traffic_peak_req_min=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN', '50')),
             min_incident_duration_minutes=int(os.environ.get('FIRST_RESPONDER_MIN_INCIDENT_DURATION_MINUTES', '10')),
+            llm_host_cooldown_minutes=int(os.environ.get('FIRST_RESPONDER_LLM_HOST_COOLDOWN_MINUTES', '10')),
             logger=logger,
         ).run()
     else:

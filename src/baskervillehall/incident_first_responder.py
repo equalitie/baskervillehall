@@ -72,6 +72,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS blocked_fingerprints_fp_host
     ON blocked_fingerprints (fingerprint, host);
 CREATE INDEX IF NOT EXISTS blocked_fingerprints_expires
     ON blocked_fingerprints (expires_at);
+
+CREATE TABLE IF NOT EXISTS llm_usage_log (
+    id           BIGSERIAL PRIMARY KEY,
+    ts           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source       TEXT NOT NULL,
+    provider     TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd     NUMERIC(10, 6) NOT NULL DEFAULT 0,
+    host         TEXT,
+    incident_id  BIGINT
+);
+CREATE INDEX IF NOT EXISTS llm_usage_log_ts ON llm_usage_log (ts DESC);
+CREATE INDEX IF NOT EXISTS llm_usage_log_host ON llm_usage_log (host, ts DESC);
 """
 
 NARRATIVE_SYSTEM_PROMPT = """You are a security analyst writing a brief incident summary for a report.
@@ -300,6 +315,7 @@ class IncidentFirstResponder:
             min_traffic_peak_req_min=50,
             min_baseline_avg=5.0,
             min_incident_duration_minutes=10,
+            llm_host_cooldown_minutes=10,
             logger=None,
     ):
         self.postgres_connection = postgres_connection or {}
@@ -323,6 +339,8 @@ class IncidentFirstResponder:
         self.min_traffic_peak_req_min = min_traffic_peak_req_min
         self.min_baseline_avg = min_baseline_avg
         self.min_incident_duration_minutes = min_incident_duration_minutes
+        self.llm_host_cooldown_minutes = llm_host_cooldown_minutes
+        self._llm_last_called: dict = {}  # host → timestamp of last LLM call
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
         self._producer_output = KafkaProducer(**kafka_connection_output) if kafka_connection_output else None
@@ -1026,7 +1044,32 @@ class IncidentFirstResponder:
 
         return "\n".join(lines)
 
-    def _call_llm(self, user_prompt, system_prompt=None):
+    # Haiku 4.5 pricing ($/MTok): input $0.80, output $4.00
+    _LLM_COST_PER_INPUT_TOKEN  = 0.80 / 1_000_000
+    _LLM_COST_PER_OUTPUT_TOKEN = 4.00 / 1_000_000
+
+    def _log_token_usage(self, input_tokens: int, output_tokens: int,
+                         source: str = 'first_responder',
+                         host: str = None, incident_id: int = None):
+        """Write one row to llm_usage_log. Best-effort — never raises."""
+        try:
+            cost = (input_tokens * self._LLM_COST_PER_INPUT_TOKEN +
+                    output_tokens * self._LLM_COST_PER_OUTPUT_TOKEN)
+            conn = self._pg_connect()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO llm_usage_log
+                       (source, provider, model, input_tokens, output_tokens, cost_usd, host, incident_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (source, self.llm_provider, self.openai_model,
+                     input_tokens, output_tokens, cost, host, incident_id),
+                )
+            conn.close()
+        except Exception as e:
+            self.logger.warning(f"[TOKEN_LOG] failed to log usage: {e!r}")
+
+    def _call_llm(self, user_prompt, system_prompt=None,
+                  _log_host=None, _log_incident_id=None, _log_source='first_responder'):
         if self.llm_provider == 'none':
             return None
         if system_prompt is None:
@@ -1059,7 +1102,14 @@ class IncidentFirstResponder:
                     timeout=120,
                 )
                 resp.raise_for_status()
-                content = resp.json()["content"][0]["text"].strip()
+                rj = resp.json()
+                content = rj["content"][0]["text"].strip()
+                usage = rj.get("usage", {})
+                self._log_token_usage(
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    source=_log_source, host=_log_host, incident_id=_log_incident_id,
+                )
             elif self.llm_provider == 'openai':
                 resp = requests.post(
                     "https://api.openai.com/v1/chat/completions",
@@ -1616,6 +1666,22 @@ class IncidentFirstResponder:
                 )
             return
 
+        # Per-host LLM cooldown: skip LLM call if we already analyzed this host recently.
+        # Sustained attacks (same host, many incidents) would otherwise call LLM every 30s.
+        import time as _time
+        _now = _time.time()
+        _cooldown_s = self.llm_host_cooldown_minutes * 60
+        _last = self._llm_last_called.get(host, 0)
+        if _now - _last < _cooldown_s:
+            self.logger.info(
+                f"[FIRST_RESPONDER] LLM cooldown active for host={host}, "
+                f"skipping incident_id={incident_id} "
+                f"(last call {(_now - _last) / 60:.1f}min ago, cooldown={self.llm_host_cooldown_minutes}min)"
+            )
+            self._mark_processed(conn, incident_id)
+            return
+        self._llm_last_called[host] = _now
+
         prompt = self._build_traffic_spike_prompt(
             incident, country_stats, asn_stats,
             normal_traffic, normal_asn_traffic,
@@ -1625,7 +1691,9 @@ class IncidentFirstResponder:
             f"[FIRST_RESPONDER] Calling LLM for traffic_spike incident_id={incident_id}"
         )
 
-        rec = self._call_llm(prompt, system_prompt=TRAFFIC_SPIKE_SYSTEM_PROMPT)
+        rec = self._call_llm(prompt, system_prompt=TRAFFIC_SPIKE_SYSTEM_PROMPT,
+                             _log_host=host, _log_incident_id=incident_id,
+                             _log_source='first_responder_traffic_spike')
         if rec is None:
             self.logger.error(
                 f"[FIRST_RESPONDER] LLM returned no response for traffic_spike incident_id={incident_id}"
@@ -1795,7 +1863,9 @@ class IncidentFirstResponder:
         )
         self.logger.info(f"[FIRST_RESPONDER] Calling LLM for incident_id={incident_id}")
 
-        rec = self._call_llm(prompt)
+        rec = self._call_llm(prompt,
+                             _log_host=incident.get('host'), _log_incident_id=incident_id,
+                             _log_source='first_responder_challenge')
         if rec is None:
             self.logger.error(
                 f"[FIRST_RESPONDER] LLM returned no response for incident_id={incident_id}"
