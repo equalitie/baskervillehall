@@ -68,3 +68,31 @@ htmlcov/
 *.tmp
 *.bak
 *~
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
+kafkatest/
+
+# Generated documents
+*.pdf
+*.docx
+
+# WordPress
+wp-config.php
+
+# IDE
+.cursor/
+
+# Test/scratch scripts and URL lists
+urls_*.txt
+smart_bot*.py
+realistic_ddos_bot.py
+simple_bot_example.py
+
+# Internal scratch files
+bask2.md
+config
+deployment/vpn_asn/

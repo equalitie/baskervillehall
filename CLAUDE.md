@@ -87,3 +87,151 @@ Core Python dependencies (from `requirements.txt`):
 - `psycopg2-binary` - PostgreSQL connection
 - `boto3` - S3 model storage
 - `kubernetes==27.2.0` - K8s integration
+
+---
+
+## Analyst Guide
+
+This section is for security analysts working with incident data, generating reports, and investigating attacks. No code changes needed — all work happens via kubectl and PostgreSQL queries.
+
+### Connecting to PostgreSQL
+
+The database is Kubernetes-internal. Use kubectl exec:
+
+```bash
+kubectl exec $(kubectl get pod -l app=postgres-baskervillehall -o jsonpath='{.items[0].metadata.name}') -- \
+  psql -U postgres -d baskerville -c "<SQL HERE>"
+```
+
+### Key Concepts
+
+**Incident** — created when traffic to a site spikes above its rolling baseline (default threshold: 4×). Each incident tracks the spike magnitude, attack volume, geographic distribution, and the AI's response.
+
+**spike_ratio** — how many times larger the attack traffic was vs the normal baseline. 10× = 10 times normal. 500× = extreme attack.
+
+**baseline_avg** — average normal traffic (req/min) for the site in recent history. If artificially low (e.g. near zero), spike_ratio may be unreliable.
+
+**challenge_count** — how many bot sessions were scored by ML during the incident. Low values (0–50) mean bots were evading ML by sending only 1 request per IP.
+
+**immature_ratio** — fraction of bot sessions too short for ML scoring. >0.8 means 80%+ of attack traffic is single-request bots — cache-busting pattern, very hard to score.
+
+**first_responder_actions** — AI LLM decisions: `block_asn`, `block_ua`, `block_ip`, `block_country`, `raise_threshold`, `monitor_only`. Each has `reasoning` explaining the decision.
+
+### Common Analysis Queries
+
+**Recent incidents for a specific site:**
+```sql
+SELECT id, started_at, ended_at,
+       ROUND(spike_ratio::numeric,1) AS spike_ratio,
+       ROUND(baseline_avg::numeric,0) AS baseline,
+       traffic_peak_count AS peak_req_min,
+       challenge_count
+FROM incidents
+WHERE host = 'example.org'
+  AND started_at >= NOW() - INTERVAL '7 days'
+ORDER BY started_at DESC;
+```
+
+**What did the AI do for an incident:**
+```sql
+SELECT action, target, confidence, reasoning, created_at
+FROM first_responder_actions
+WHERE incident_id = <ID>
+ORDER BY created_at;
+```
+
+**Attack breakdown (country/ASN/UA/fingerprint) for an incident:**
+```sql
+SELECT 'country' AS type, country AS key, cmd_count FROM incident_country_stats WHERE incident_id = <ID>
+UNION ALL
+SELECT 'asn', asn_name, cmd_count FROM incident_asn_stats WHERE incident_id = <ID>
+UNION ALL
+SELECT 'ua', ua, cmd_count FROM incident_ua_stats WHERE incident_id = <ID>
+UNION ALL
+SELECT 'fingerprint', fingerprint, cmd_count FROM incident_fingerprint_stats WHERE incident_id = <ID>
+ORDER BY type, cmd_count DESC;
+```
+
+**Most attacked sites last 7 days:**
+```sql
+SELECT host, COUNT(*) AS incidents,
+       ROUND(MAX(spike_ratio)::numeric,0) AS max_spike,
+       SUM(challenge_count) AS total_challenges,
+       MAX(traffic_peak_count) AS max_peak_req_min
+FROM incidents
+WHERE started_at >= NOW() - INTERVAL '7 days'
+GROUP BY host
+ORDER BY incidents DESC
+LIMIT 20;
+```
+
+**Sites currently under attack (open incidents):**
+```sql
+SELECT id, host, started_at,
+       ROUND(spike_ratio::numeric,1) AS spike_ratio,
+       traffic_peak_count AS peak_req_min,
+       challenge_count
+FROM incidents
+WHERE ended_at IS NULL
+ORDER BY started_at DESC;
+```
+
+**AI actions summary for a site over a period:**
+```sql
+SELECT a.action, a.target, a.confidence,
+       i.started_at, i.spike_ratio::numeric(8,1),
+       a.reasoning
+FROM first_responder_actions a
+JOIN incidents i ON i.id = a.incident_id
+WHERE i.host = 'example.org'
+  AND i.started_at >= NOW() - INTERVAL '7 days'
+  AND a.action NOT IN ('monitor_only', 'raise_threshold')
+ORDER BY i.started_at DESC;
+```
+
+**LLM cost today by source:**
+```sql
+SELECT source, COUNT(*) AS calls,
+       SUM(input_tokens) AS input_tokens,
+       ROUND(SUM(cost_usd)::numeric, 4) AS cost_usd
+FROM llm_usage_log
+WHERE ts >= NOW() - INTERVAL '24 hours'
+GROUP BY source ORDER BY cost_usd DESC;
+```
+
+### Checking Pod/System Status
+
+```bash
+# Are all pipelines running?
+kubectl get pods | grep baskervillehall
+
+# First responder logs (AI decisions in real time)
+kubectl logs deployment/incident-first-responder --tail=50
+
+# Active incidents count
+kubectl exec $(kubectl get pod -l app=postgres-baskervillehall -o jsonpath='{.items[0].metadata.name}') -- \
+  psql -U postgres -d baskerville -c "SELECT COUNT(*) FROM incidents WHERE ended_at IS NULL;"
+```
+
+### Generating Incident Reports
+
+When a customer or team asks for an incident report:
+
+1. Query incidents for the site and time period
+2. For each significant incident, get the breakdown (country/ASN/UA/fingerprint)
+3. Get first_responder_actions to show what was blocked and why
+4. Structure report as: Summary → Attack Profile → Timeline → AI Response → Result
+
+See existing reports in this repo (`INCIDENT_REPORT_*.md`) as templates.
+
+### Attack Pattern Reference
+
+| Signal | Meaning |
+|---|---|
+| `challenge_count = 0` + `spike_ratio > 10` | Single-request bots, cache-busting, ML can't score |
+| `spike_ratio > 100` | Extreme volumetric attack |
+| TLS fingerprint uniformity > 80% | Single tool/operator |
+| UA distribution flat (all UAs ~equal %) | Bot UA rotation, not organic |
+| All attacks from residential ISPs | Hired botnet (compromised home routers) |
+| `block_criteria` empty in action | No stable fingerprint to block by |
+| `action = monitor_only` | AI skipped — volume too low or cooldown active |

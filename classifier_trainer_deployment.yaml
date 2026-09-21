@@ -1,0 +1,74 @@
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "baskervillehall-classifier-trainer"
+  namespace: "default"
+  labels:
+    app: "baskervillehall-classifier-trainer"
+spec:
+  replicas: 1
+  serviceName: "baskervillehall-classifier-trainer"
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: "baskervillehall-classifier-trainer"
+  template:
+    metadata:
+      labels:
+        app: "baskervillehall-classifier-trainer"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nodepool
+                    operator: In
+                    values:
+                      - postgres
+      containers:
+      - name: "baskervillehall-classifier-trainer"
+        image: "equalitie/baskervillehall:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "10m"
+          limits:
+            memory: "24Gi"
+            cpu: "4000m"
+        command:
+          - python
+        args:
+          - /usr/bin/baskervillehall/src/baskervillehall/main.py
+          - classifier_train
+        envFrom:
+          - configMapRef:
+              name: baskervillehall
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: S3_ACCESS
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_access
+        - name: S3_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_secret
+        - name: S3_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_endpoint
+        - name: S3_REGION
+          valueFrom:
+            secretKeyRef:
+              name: baskerville-secrets
+              key: s3_region
