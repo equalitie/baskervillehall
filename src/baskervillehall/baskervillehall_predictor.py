@@ -41,11 +41,12 @@ CLUSTER_MIN_SESSIONS = 10       # minimum sessions to analyze
 CLUSTER_MIN_UNIQUE_IPS = 3      # minimum unique IPs — single crawler never triggers an incident
 CLUSTER_ALERT_THRESHOLD = 0.55  # uniformity score → warning log + cluster_alerts
 CLUSTER_LLM_THRESHOLD = 0.85    # uniformity score → trigger cluster LLM analysis
-CLUSTER_LLM_COOLDOWN = 1800     # seconds between LLM calls per host (30 min)
+CLUSTER_LLM_COOLDOWN = int(os.environ.get('CLUSTER_LLM_COOLDOWN', '3600'))  # configurable, default 1h per pod
 CLUSTER_BUFFER_MAXLEN = 500     # max sessions kept per host
 CLUSTER_IP_CONCENTRATION = 0.50     # single IP fraction → UA-rotation scraper detection
 CLUSTER_SUBNET_CONCENTRATION = 0.70 # single /24 subnet fraction → scraper detection
 CLUSTER_SUBNET16_CONCENTRATION = 0.70 # single /16 subnet fraction → distributed scraper detection
+CLUSTER_MIN_SESSIONS = 30           # minimum cluster size before concentration checks fire
 
 
 class RebalanceLogger(ConsumerRebalanceListener):
@@ -224,6 +225,8 @@ class BaskervillehallPredictor(object):
             session_llm_queue_size=200,
             session_llm_provider='ollama',
             openai_api_key='',
+            cluster_llm_provider='ollama',
+            cluster_llm_model=None,
     ):
         super().__init__()
 
@@ -351,8 +354,11 @@ class BaskervillehallPredictor(object):
         self._session_llm_queue_size: int = session_llm_queue_size
         self._session_llm_provider: str = session_llm_provider  # 'ollama' or 'openai'
         self._openai_api_key: str = openai_api_key
+        self._cluster_llm_provider: str = cluster_llm_provider
+        self._cluster_llm_model: str = cluster_llm_model or llm_model
         self._session_llm_queue: Queue = None   # initialized in run()
         self._session_llm_cache: TTLCache = None  # ip → verdict, initialized in run()
+        self._typesafe_client = None  # initialized lazily in worker
         self._cluster_llm_queue: Queue = None   # initialized in run()
 
     def _refresh_attack_response(self):
@@ -618,9 +624,11 @@ Reply JSON only, no markdown:
             self.logger.warning(f"[TOKEN_LOG] failed to log usage: {e!r}")
 
     def _call_llm(self, prompt: str, model: str, timeout: int = 30,
-                  _log_source: str = 'predictor', _log_host: str = None) -> str:
+                  _log_source: str = 'predictor', _log_host: str = None,
+                  provider: str = None) -> str:
         """Call LLM API (Anthropic or Ollama) and return raw text content."""
-        if self._session_llm_provider == 'anthropic':
+        effective_provider = provider or self._session_llm_provider
+        if effective_provider == 'anthropic':
             response = http_requests.post(
                 'https://api.anthropic.com/v1/messages',
                 headers={
@@ -659,7 +667,86 @@ Reply JSON only, no markdown:
             )
             return response.json()['choices'][0]['message']['content'].strip()
 
+    def _build_session_jev_state(self, session: dict, host: str) -> str:
+        requests_raw = sorted(
+            session.get('requests', []),
+            key=lambda r: r.get('ts', ''),
+        )[:10]
+        lines = []
+        for r in requests_raw:
+            url = r.get('url', '/')
+            query = r.get('query', '') or ''
+            ctype = r.get('type', 'text/html').split(';')[0].strip()
+            method = r.get('method', 'GET')
+            q_str = f'?{query[:80]}' if query else ''
+            lines.append(f"  {method} {url}{q_str}  [{ctype}]")
+
+        num_req = len(session.get('requests', []))
+        duration = session.get('duration', 0)
+        ua = session.get('ua', '')[:120]
+        country = session.get('survey_country', '')
+        asn = session.get('asn_name', '')
+        request_rate = round(num_req / max(duration / 60.0, 0.1), 1)
+        all_paths = [r.get('url', '/') for r in requests_raw]
+        unique_path_rate = round(len(set(all_paths)) / max(len(all_paths), 1), 2)
+
+        google_referer = session.get('google_referer', False)
+        referer_str = ', search_engine_referer=True' if google_referer else ''
+
+        return (
+            f"ua={ua}, request_rate={request_rate}/min, "
+            f"unique_path_rate={unique_path_rate}, "
+            f"num_requests={num_req}, country={country}, asn={asn}, duration={duration:.0f}s{referer_str}\n"
+            f"requests:\n" + '\n'.join(lines)
+        )
+
+    def _session_jev_score(self, session: dict, host: str) -> dict | None:
+        try:
+            from typesafe_sdk import TypeSafeClient, Noul, Score, Choice
+            if self._typesafe_client is None:
+                self._typesafe_client = TypeSafeClient()
+            state = self._build_session_jev_state(session, host)
+            result = self._typesafe_client.system_one(
+                state,
+                {
+                    "is_bot": Noul(instructions="Is this web session automated (a bot or script), not a human user?"),
+                    "malice_score": Score(
+                        instructions="How malicious is this session?",
+                        criteria=["benign", "suspicious", "likely_malicious", "clearly_malicious"],
+                    ),
+                    "session_type": Choice(
+                        instructions="What best describes this session?",
+                        criteria={
+                            "legitimate_user": "Human browsing normally",
+                            "good_bot": "Legitimate crawler (Googlebot, etc.)",
+                            "scraper": "Automated scraping, not directly harmful",
+                            "ddos_bot": "Part of volumetric attack",
+                            "scanner": "Security scanner or vulnerability probe",
+                        },
+                    ),
+                },
+            )
+            is_bot = result.nouls["is_bot"].noul  # float 0–1
+            label = "bot" if is_bot >= 0.5 else "human"
+            confidence = is_bot if is_bot >= 0.5 else (1.0 - is_bot)
+            session_type = result.choices["session_type"].choice
+            malice_score = result.scores["malice_score"].score
+            return {
+                "label": label,
+                "confidence": float(confidence),
+                "reasoning": "",
+                "session_type": session_type,
+                "malice_score": float(malice_score),
+            }
+        except Exception:
+            self.logger.exception(
+                f"[JEV] Jev error for ip={session.get('ip')} host={host}"
+            )
+            return None
+
     def _session_llm_score(self, session: dict, host: str) -> dict | None:
+        if self._session_llm_provider == 'typesafe':
+            return self._session_jev_score(session, host)
         try:
             prompt = self._build_session_llm_prompt(session, host)
             content = self._call_llm(prompt, model=self._llm_model, timeout=30,
@@ -672,7 +759,7 @@ Reply JSON only, no markdown:
             return json.loads(content.strip())
         except Exception:
             self.logger.exception(
-                f"[SESSION_LLM] Error for ip={session.get('ip')} host={host}"
+                f"[JEV] Error for ip={session.get('ip')} host={host}"
             )
             return None
 
@@ -689,8 +776,9 @@ Reply JSON only, no markdown:
                 cur.execute(
                     """INSERT INTO session_llm_verdicts
                        (host, ip, session_id, baskerville_score, num_requests, duration,
-                        ua, llm_label, llm_confidence, llm_reasoning, url_sequence)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        ua, llm_label, llm_confidence, llm_reasoning, url_sequence,
+                        session_type, malice_score)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         host,
                         session.get('ip', ''),
@@ -703,15 +791,17 @@ Reply JSON only, no markdown:
                         float(verdict.get('confidence', 0.0)),
                         verdict.get('reasoning', ''),
                         url_sequence[:2000],
+                        verdict.get('session_type'),
+                        verdict.get('malice_score'),
                     ),
                 )
             conn.commit()
             conn.close()
         except Exception:
-            self.logger.exception(f"[SESSION_LLM] Failed to save verdict for ip={session.get('ip')} host={host}")
+            self.logger.exception(f"[JEV] Failed to save verdict for ip={session.get('ip')} host={host}")
 
     def _llm_session_worker(self):
-        self.logger.info("[SESSION_LLM] Worker started, model=%s", self._llm_model)
+        self.logger.info("[JEV] Worker started, model=%s", self._llm_model)
         producer = KafkaProducer(**self.kafka_connection)
         producer_output = KafkaProducer(**self.kafka_connection_output)
         pending_challenge = TTLCache(maxsize=50000, ttl=self.pending_ttl)
@@ -741,7 +831,7 @@ Reply JSON only, no markdown:
                 self._session_llm_cache[ip] = verdict
 
             self.logger.info(
-                f"[SESSION_LLM] host={host} ip={ip} baskerville_score={baskerville_score} "
+                f"[JEV] host={host} ip={ip} baskerville_score={baskerville_score} "
                 f"label={label} confidence={confidence:.2f} reasoning={reasoning}"
             )
 
@@ -755,7 +845,7 @@ Reply JSON only, no markdown:
                 payload = self.create_command(
                     command_name=command,
                     session=session,
-                    meta=f"session_llm [{command}] confidence={confidence:.2f}",
+                    meta=f"jev [{command}] type={verdict.get('session_type','')}",
                     prediction_if=False,
                     score_if=0.0,
                     shapley_if='',
@@ -773,8 +863,9 @@ Reply JSON only, no markdown:
                 producer.flush()
                 producer_output.flush()
                 self.logger.warning(
-                    f"[SESSION_LLM] {command} ip={ip} host={host} "
-                    f"confidence={confidence:.2f} reasoning={reasoning}"
+                    f"[JEV] {command} ip={ip} host={host} "
+                    f"confidence={confidence:.2f} type={verdict.get('session_type','')} "
+                    f"malice={verdict.get('malice_score',0):.1f}"
                 )
 
     # ------------------------------------------------------------------
@@ -901,7 +992,7 @@ Reply JSON only, no markdown:
         # block it directly regardless of UA/fingerprint diversity. This catches UA-rotation
         # scrapers that evade uniformity scoring by spoofing many different browser versions.
         ip_list_all = [s['ip'] for s in sessions if s.get('ip')]
-        if ip_list_all:
+        if ip_list_all and len(ip_list_all) >= CLUSTER_MIN_SESSIONS:
             ip_counts = Counter(ip_list_all)
             top_ip, top_ip_count = ip_counts.most_common(1)[0]
             ip_concentration = top_ip_count / len(ip_list_all)
@@ -1092,8 +1183,9 @@ Reply JSON only, no markdown:
 
             try:
                 prompt = self._build_cluster_llm_prompt(host, sessions, score)
-                content = self._call_llm(prompt, model=self._llm_model, timeout=30,
-                                         _log_source='predictor_cluster', _log_host=host)
+                content = self._call_llm(prompt, model=self._cluster_llm_model, timeout=30,
+                                         _log_source='predictor_cluster', _log_host=host,
+                                         provider=self._cluster_llm_provider)
                 if content.startswith('```'):
                     content = content.split('```')[1]
                     if content.startswith('json'):
@@ -1233,16 +1325,24 @@ Reply JSON only, no markdown:
         weights = [0.10, 0.50, 0.20, 0.15, 0.05]
         base_score = sum(s * w for s, w in zip(scores, weights))
 
-        # LLM signal: blend in bot_ratio from session_llm_cache when available.
+        # Jev signal: blend in attack_ratio from session_llm_cache when available.
         # Only grey-zone sessions have verdicts, so coverage is partial — we blend
-        # proportionally: LLM gets weight 0.30, existing metrics rescaled to 0.70.
+        # proportionally: Jev gets weight 0.30, existing metrics rescaled to 0.70.
+        # Use ddos_bot+scanner ratio when session_type is available (more precise),
+        # fall back to generic bot label otherwise.
         if self._session_llm_cache is not None:
             verdicts = [self._session_llm_cache.get(s['ip']) for s in sessions]
             verdicts_found = [v for v in verdicts if v is not None]
             if len(verdicts_found) >= 3:
-                bot_ratio = sum(1 for v in verdicts_found if v.get('label') == 'bot') / len(verdicts_found)
-                llm_weight = 0.30
-                return min(1.0, base_score * (1.0 - llm_weight) + bot_ratio * llm_weight)
+                if any(v.get('session_type') for v in verdicts_found):
+                    attack_ratio = sum(
+                        1 for v in verdicts_found
+                        if v.get('session_type') in ('ddos_bot', 'scanner')
+                    ) / len(verdicts_found)
+                else:
+                    attack_ratio = sum(1 for v in verdicts_found if v.get('label') == 'bot') / len(verdicts_found)
+                jev_weight = 0.30
+                return min(1.0, base_score * (1.0 - jev_weight) + attack_ratio * jev_weight)
 
         return base_score
 
@@ -1276,7 +1376,7 @@ Reply JSON only, no markdown:
             # originate from a single IP or /24 subnet (e.g. Tencent/Alibaba Cloud scrapers).
             if self._cluster_llm_queue is not None:
                 ip_list = [s['ip'] for s in sessions if s.get('ip')]
-                if ip_list:
+                if ip_list and len(ip_list) >= CLUSTER_MIN_SESSIONS:
                     ip_counts = Counter(ip_list)
                     top_ip, top_ip_count = ip_counts.most_common(1)[0]
                     ip_concentration = top_ip_count / len(ip_list)
@@ -1300,19 +1400,23 @@ Reply JSON only, no markdown:
                             f"sessions={len(sessions)} ua_diversity="
                             f"{len({s['ua'] for s in sessions})/len(sessions):.2f}"
                         )
-                        survey_country = next(
-                            (s.get('survey_country', '') for s in sessions if s.get('survey_country')),
-                            ''
-                        )
-                        try:
-                            self._cluster_llm_queue.put_nowait({
-                                'host': host,
-                                'sessions': sessions,
-                                'score': max(ip_concentration, subnet_concentration, subnet16_concentration),
-                                'survey_country': survey_country,
-                            })
-                        except Exception:
-                            pass
+                        last_llm = cluster_llm_ts.get(host)
+                        llm_on_cooldown = last_llm and (now - last_llm).total_seconds() < CLUSTER_LLM_COOLDOWN
+                        if not llm_on_cooldown:
+                            survey_country = next(
+                                (s.get('survey_country', '') for s in sessions if s.get('survey_country')),
+                                ''
+                            )
+                            try:
+                                self._cluster_llm_queue.put_nowait({
+                                    'host': host,
+                                    'sessions': sessions,
+                                    'score': max(ip_concentration, subnet_concentration, subnet16_concentration),
+                                    'survey_country': survey_country,
+                                })
+                                cluster_llm_ts[host] = now
+                            except Exception:
+                                pass
 
             score = self._compute_uniformity(sessions)
 
@@ -2052,7 +2156,7 @@ Reply JSON only, no markdown:
         # challenge_ip won't help — block directly.
         _top_url = self._get_top_url(session)
         _top_ratio = session.get('top_page_to_request_ratio', 0.0)
-        if ('wp-login' in (_top_url or '') and _top_ratio > 0.8 and _num_requests >= 5):
+        if ('wp-login' in (_top_url or '') and _top_ratio > 0.8 and _num_requests >= 10):
             if ip not in pending_block_ip:
                 pending_block_ip[ip] = True
                 self.logger.warning(
@@ -2359,6 +2463,35 @@ Reply JSON only, no markdown:
             self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
+        # security scanner — always block immediately, no challenge
+        security_scanner = session.get('security_scanner', '')
+        if security_scanner:
+            if ip not in pending_challenge_ip:
+                pending_challenge_ip[ip] = True
+                self.logger.warning(
+                    f"[SECURITY_SCANNER] block_ip scanner={security_scanner} ip={ip} host={host} "
+                    f"ua={session.get('ua', '')[:80]}"
+                )
+                payload = self.create_command(
+                    command_name='block_ip',
+                    session=session,
+                    meta=f"security_scanner:{security_scanner} [block_ip]",
+                    prediction_if=prediction_if,
+                    score_if=score_if,
+                    shapley_if=shapley_if,
+                    shapley_feature_if=shapley_feature_if,
+                    prediction_ae=prediction_ae,
+                    score_ae=score_ae,
+                    shapley_ae=shapley_ae,
+                    shapley_feature_ae=shapley_feature_ae,
+                    difficulty=0,
+                    scraper_name=scraper_name,
+                    threshold_ae=threshold_ae,
+                    baskerville_score=session.get('baskerville_score_3', 1),
+                )
+                self._send_command(payload, host)
+            return
+
         # weak_cipher / scraper meta rule
         meta = None
         if session.get("weak_cipher", False):
@@ -2634,7 +2767,7 @@ Reply JSON only, no markdown:
             self._session_llm_queue = Queue(maxsize=self._session_llm_queue_size)
             threading.Thread(target=self._llm_session_worker, daemon=True, name='session-llm').start()
             self.logger.info(
-                f"[SESSION_LLM] Enabled: provider={self._session_llm_provider} model={self._llm_model} "
+                f"[JEV] Enabled: provider={self._session_llm_provider} model={self._llm_model} "
                 f"score_range=[{self._session_llm_score_min},{self._session_llm_score_max}] "
                 f"min_requests={self._session_llm_min_requests}"
             )

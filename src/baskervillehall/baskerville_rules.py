@@ -20,6 +20,34 @@ SUSPICIOUS_PATH_PATTERNS = [
 
 compiled_path_patterns = [re.compile(p, re.IGNORECASE) for p in SUSPICIOUS_PATH_PATTERNS]
 
+# Security scanner / exploit tool UA patterns — always block, never challenge
+SECURITY_SCANNER_PATTERNS = {
+    "sqlmap":           r"\bsqlmap/",
+    "nikto":            r"\bnikto/",
+    "nmap":             r"\bnmap scripting engine",
+    "masscan":          r"\bmasscan",
+    "nuclei":           r"\bNuclei/",
+    "dirbuster":        r"\bdirbuster",
+    "gobuster":         r"\bgobuster",
+    "wfuzz":            r"\bwfuzz",
+    "hydra":            r"\bTHC-Hydra",
+    "zgrab":            r"\bzgrab",
+}
+
+compiled_scanner_patterns = {
+    name: re.compile(pattern, re.IGNORECASE)
+    for name, pattern in SECURITY_SCANNER_PATTERNS.items()
+}
+
+
+def detect_security_scanner(user_agent: str):
+    """Return scanner name if UA matches a known security/exploit tool, else None."""
+    for name, pattern in compiled_scanner_patterns.items():
+        if pattern.search(user_agent):
+            return name
+    return None
+
+
 # Define patterns for known scraping tools and bots
 SCRAPER_PATTERNS = {
     "scrapy":           r"\bScrapy/\d+\.\d+(?:\.\d+)?",
@@ -1145,6 +1173,16 @@ def get_baskerville_score_3(session: dict, verbose: bool = False, logger=None) -
             prev = baskerville_score_3
             baskerville_score_3 = max(1, baskerville_score_3 - 10)
             dbg(f"[SCORE] cipher_type={cipher_type} (legacy/mixed) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 12. Search engine referer (strong positive human signal)
+    # ----------------------------------------------------------------------
+    if session.get('google_referer', False):
+        prev = baskerville_score_3
+        # Boost to at least 60 unless strong bot flags are set
+        if not (session.get('bot_ua') or session.get('ai_bot_ua') or session.get('headless_ua')):
+            baskerville_score_3 = max(baskerville_score_3, 60)
+            dbg(f"[SCORE] google_referer=True (came from search engine) → {prev} → {baskerville_score_3}")
 
     # ----------------------------------------------------------------------
     # Clamp into [1, 99]

@@ -1,3 +1,5 @@
 FROM equalitie/baskervillehall:base
 
+RUN pip install typesafe-ai
+
 COPY ./src /usr/bin/baskervillehall/src

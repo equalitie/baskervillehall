@@ -1,4 +1,5 @@
 kafka-python==2.0.2
+typesafe-ai
 numpy
 scikit-learn==1.3.0
 boto3

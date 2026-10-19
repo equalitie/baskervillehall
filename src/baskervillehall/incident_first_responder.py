@@ -36,6 +36,15 @@ PROTECTED_ASNS = {
     "Space Exploration Technologies Corporation",
     "Space Exploration Technologies Corp.",
     "Space Exploration Technologies Corporati",
+    "Yandex LLC",
+    "YANDEX LLC",
+    "Yandex",
+}
+
+# UA substrings (case-insensitive) that must never be blocked or challenged.
+# Yandex is a legitimate search engine — blocking its UA causes search ranking damage.
+PROTECTED_UA_PATTERNS = {
+    "yandex",
 }
 
 CREATE_FIRST_RESPONDER_TABLES_SQL = """
@@ -101,7 +110,7 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "block_ua" | "raise_threshold" | "monitor_only",
+  "action": "block_country" | "block_asn" | "block_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
   "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 30,
@@ -125,9 +134,21 @@ Decision rules (apply in order):
    Blocking survey_country would take the site offline for its intended users — this is
    WORSE than the attack itself. If survey_country dominates the attack, use raise_threshold
    or monitor_only instead. There are NO exceptions to this rule.
-5. Use monitor_only if blocking would affect >{max_normal_pct}% of normal traffic
-   (collateral damage too high).
-   *** IMPORTANT EXCEPTION TO RULE 5 ***: If the attack is dominated by a SINGLE specific
+5. Use challenge_all when:
+   (a) ESCALATION: previous block_asn, block_ua, or block_subnet actions are already active
+       for this host but the attack is still ongoing — those blocks did not stop it.
+       challenge_all is a JS challenge wall for ALL visitors: humans solve it transparently,
+       bots fail. Use it when targeted blocking is insufficient.
+   (b) HIGH COLLATERAL: you would normally choose monitor_only because blocking would hurt
+       legitimate users (attack comes from survey_country, generic UAs, residential ASNs),
+       BUT the attack is significant (peak >5000 req/min or immature_ratio >80%).
+       challenge_all protects the origin without permanently blocking anyone.
+   challenge_all target must be [] (it applies to the whole host).
+   Do NOT use challenge_all for small attacks (<1000 req/min peak) or when targeted
+   blocking (block_asn, block_ua) is clearly sufficient.
+5a. Use monitor_only if blocking would affect >{max_normal_pct}% of normal traffic
+   (collateral damage too high) AND the attack is small enough that the origin can handle it.
+   *** IMPORTANT EXCEPTION TO RULE 5a ***: If the attack is dominated by a SINGLE specific
    residential/datacenter ASN that is absent from normal traffic (<{max_normal_pct}%),
    use block_asn targeting that ASN even if the country would be auto-removed.
    Example: attack is 100% US via Latitude.sh (0% normal baseline for Latitude.sh)
@@ -180,7 +201,7 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "block_ua" | "raise_threshold" | "monitor_only",
+  "action": "block_country" | "block_asn" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
   "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | ["Mozilla/5.0 (X11; Linux x86_64)..."] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 30,
@@ -207,9 +228,10 @@ AVAILABLE SIGNALS (apply heuristics in this priority order):
    organically. The prompt will flag this with "UA distribution is SUSPICIOUSLY UNIFORM".
    Treat this as equivalent to a single-UA bot signal.
    *** FAKE OR IMPOSSIBLE UA — CONCLUSIVE SIGNAL ***
-   User agents claiming browser versions that do not exist (e.g. Chrome/150, Chrome/149 when
-   current stable is ≤130), scripted tool signatures (curl/, python-requests/, go-http-client/,
-   aiohttp/), or malformed strings are definitive bot evidence regardless of other signals.
+   User agents claiming browser versions that are implausibly far ahead of the current stable
+   release (more than ~5 major versions ahead), scripted tool signatures (curl/, python-requests/,
+   go-http-client/, aiohttp/), or malformed strings are definitive bot evidence regardless of
+   other signals. As of Sep 2026: Chrome stable is ~150, Firefox ~130, Safari ~18.
 
 3. *** COUNTRY CONCENTRATION ***
    If one country covers >80% of spike traffic AND is not the site's survey_country:
@@ -243,16 +265,19 @@ DECISION RULES:
    NEVER include survey_country in "target". survey_country is the site's primary audience.
    If the spike comes from survey_country, use raise_threshold — it may be organic traffic.
 
-8. *** USE block_ua FIRST when a single UA dominates AND it is scripted or fake ***
+8. *** USE block_ua OR challenge_ua when UA dominates the attack ***
    Use block_ua if: one UA covers >70% of spike traffic AND the UA is either:
    (a) a scripted tool: curl/, python-requests/, go-http-client/, aiohttp/, wget/, etc.
-   (b) a non-existent browser version: Chrome/140+, Chrome/15x, Firefox/200+, etc.
-       (current stable versions as of 2026: Chrome ≤ 130, Firefox ≤ 130, Safari ≤ 18)
-   (c) any UA that is absent from or rare in the normal traffic baseline (<1%).
-   block_ua is the most surgical action — it has ZERO collateral damage on legitimate users
-   with different UAs and works regardless of country or ASN.
+   (b) an implausibly future browser version (>5 major versions ahead of current stable)
+   (c) any UA that is absent from or rare in the normal traffic baseline (<1%)
+   block_ua is the most surgical action — ZERO collateral damage on users with different UAs.
+
+   Use challenge_ua (softer) instead of block_ua if: one UA covers >70% of spike traffic
+   but the UA is a real browser version that also appears in normal traffic (>1% baseline).
+   challenge_ua issues a JS challenge — real users pass it, bots without JavaScript fail.
+
    Put the EXACT full UA string in "target". Set confidence=high for scripted/fake UAs.
-   Never include more than 3 UA strings.
+   Never include more than 3 UA strings in a single action.
 
 9. Use block_country ONLY if: one country dominates (>60%) AND country != survey_country
    AND the country has exactly 0% normal traffic baseline (completely absent from site's normal audience).
@@ -272,10 +297,22 @@ DECISION RULES:
     OR dominant country == survey_country, OR immature_ratio < 50%, OR signals are ambiguous.
     raise_threshold buys time without blocking legitimate users.
 
-12. Use monitor_only if: spike is small (<50 req/min peak), signals are absent or
-    contradictory, or the site has no baseline yet.
+12. Use challenge_all when:
+    (a) ESCALATION: previous block_asn, block_ua, or block_subnet actions are already active
+        for this host but the attack is still ongoing. Those targeted blocks did not stop it.
+        challenge_all is a JS challenge wall: humans solve it transparently, bots fail.
+        Use when targeted actions have been tried and the attack continues.
+    (b) HIGH COLLATERAL: you would choose monitor_only because the attack comes from
+        survey_country, widely-used UAs, or residential ASNs (collateral damage too high),
+        BUT the attack is significant (peak >5000 req/min OR immature_ratio >80%).
+        challenge_all stops bots without permanently blocking anyone.
+    challenge_all target must be [] (it applies to the whole host, no specific target).
+    Do NOT use challenge_all for small attacks (<1000 req/min peak).
 
-13. *** ABSOLUTE HARD RULE — NO EXCEPTIONS ***
+13. Use monitor_only if: spike is small (<50 req/min peak), signals are absent or
+    contradictory, the site has no baseline yet, OR challenge_all is not warranted.
+
+14. *** ABSOLUTE HARD RULE — NO EXCEPTIONS ***
     NEVER put these ASNs in "target": Google LLC, Cloudflare Inc., Amazon.com Inc.,
     Microsoft Corporation, Akamai Technologies, Fastly Inc., Meta Platforms Inc.,
     Facebook Inc., Apple Inc., Twitter Inc., X Corp., AT&T Enterprises LLC,
@@ -313,9 +350,13 @@ class IncidentFirstResponder:
             host_whitelist=None,
             min_traffic_peak_count=50,
             min_traffic_peak_req_min=50,
+            min_traffic_peak_req_min_multiplier=10.0,
             min_baseline_avg=5.0,
             min_incident_duration_minutes=10,
             llm_host_cooldown_minutes=10,
+            challenge_all_spike_ratio=50.0,
+            challenge_all_immature_ratio=0.80,
+            challenge_all_ttl_minutes=30,
             logger=None,
     ):
         self.postgres_connection = postgres_connection or {}
@@ -337,10 +378,15 @@ class IncidentFirstResponder:
         self.fingerprint_max_ips = fingerprint_max_ips
         self.min_traffic_peak_count = min_traffic_peak_count
         self.min_traffic_peak_req_min = min_traffic_peak_req_min
+        self.min_traffic_peak_req_min_multiplier = min_traffic_peak_req_min_multiplier
         self.min_baseline_avg = min_baseline_avg
         self.min_incident_duration_minutes = min_incident_duration_minutes
         self.llm_host_cooldown_minutes = llm_host_cooldown_minutes
-        self._llm_last_called: dict = {}  # host → timestamp of last LLM call
+        self.challenge_all_spike_ratio = challenge_all_spike_ratio
+        self.challenge_all_immature_ratio = challenge_all_immature_ratio
+        self.challenge_all_ttl_minutes = challenge_all_ttl_minutes
+        self._llm_last_called: dict = {}   # host → timestamp of last LLM call
+        self._llm_last_action: dict = {}   # host → last LLM action (for extended cooldown)
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
         self._producer_output = KafkaProducer(**kafka_connection_output) if kafka_connection_output else None
@@ -514,6 +560,40 @@ class IncidentFirstResponder:
             rows = cur.fetchall()
         return {r[0]: float(r[1]) for r in rows}
 
+    def _send_subnet_command(self, incident, cidr, command_name, reason):
+        """Send a single block_subnet or challenge_subnet command for an IPv4 CIDR (e.g. 1.2.3.0/24)."""
+        if self._producer is None and self._producer_output is None:
+            self.logger.warning(f"[CLUSTER_RESPONDER] No Kafka producer — {command_name} skipped")
+            return
+        host = incident['host']
+        dnet = '-'
+        meta = f'cluster_responder [{command_name}] {reason}'
+        command = {
+            'Name': command_name,
+            'value': cidr,
+            'host': host,
+            'dnet': dnet,
+            'source': meta,
+            'meta': meta,
+            'ttl': self.ttl_minutes * 60,
+        }
+        encoded = json.dumps(command).encode('utf-8')
+        key = bytearray(host, encoding='utf-8')
+        partition = self.dnet_partition_map.get(dnet, -1)
+        if self._producer is not None:
+            self._producer.send(topic=self.topic_commands, value=encoded, key=key)
+        if partition < 0:
+            if self._producer_output is not None:
+                self._producer_output.send(topic=self.topic_commands, value=encoded, key=key)
+        else:
+            if self._producer_output is not None:
+                self._producer_output.send(topic=self.topic_commands, value=encoded, partition=partition)
+        if self._producer_output is not None:
+            self._producer_output.flush()
+        self.logger.warning(
+            f"[CLUSTER_RESPONDER] {command_name} sent: cidr={cidr} host={host} ttl={self.ttl_minutes * 60}s reason={reason}"
+        )
+
     def _send_ip_commands(self, incident, ips, command_name, reason):
         """Send block_ip or challenge_ip Kafka commands for a list of IPs."""
         if self._producer is None and self._producer_output is None:
@@ -528,7 +608,7 @@ class IncidentFirstResponder:
         for ip in ips:
             command = {
                 'Name': command_name,
-                'Value': ip,
+                'value': ip,
                 'host': host,
                 'dnet': dnet,
                 'source': meta,
@@ -556,6 +636,178 @@ class IncidentFirstResponder:
         """Send block_ip Kafka commands for a list of IPs (used by _block_fingerprint_ips)."""
         return self._send_ip_commands(incident, ips, 'block_ip', reason)
 
+    def _send_banjax_command(self, host, command_name, value, ttl_seconds, reason):
+        """Send a single non-IP banjax command (block_ua, challenge_ua, challenge_all) to Kafka."""
+        if self._producer is None and self._producer_output is None:
+            self.logger.warning(
+                f"[FIRST_RESPONDER] No Kafka producer — {command_name} skipped"
+            )
+            return
+        command = {
+            'Name': command_name,
+            'ttl': ttl_seconds,
+            'source': 'first_responder',
+            'meta': f'first_responder [{command_name}] {reason}',
+        }
+        if command_name in ('block_ua', 'challenge_ua'):
+            command['ua'] = value
+            command['host'] = host
+        elif command_name == 'challenge_all':
+            command['host'] = host
+        else:
+            command['value'] = value
+        encoded = json.dumps(command).encode('utf-8')
+        key = bytearray(host, encoding='utf-8')
+        dnet = '-'
+        partition = self.dnet_partition_map.get(dnet, -1)
+        if self._producer is not None:
+            self._producer.send(topic=self.topic_commands, value=encoded, key=key)
+        if partition < 0:
+            if self._producer_output is not None:
+                self._producer_output.send(topic=self.topic_commands, value=encoded, key=key)
+        else:
+            if self._producer_output is not None:
+                self._producer_output.send(topic=self.topic_commands, value=encoded, partition=partition)
+        self.logger.warning(
+            f"[FIRST_RESPONDER] {command_name} sent to Kafka: value={value!r} host={host} ttl={ttl_seconds}s reason={reason}"
+        )
+
+    def _dispatch_banjax_action(self, host, rec, incident_id):
+        """Send block_ua / challenge_ua / challenge_all actions directly to banjax via Kafka.
+
+        block_asn and block_country are not native banjax commands — they are implemented
+        by the predictor matching sessions and sending block_ip per IP as before.
+        block_subnet / challenge_subnet ARE native banjax commands (added Oct 2026) and are
+        sent directly via _send_subnet_command from the cluster responder.
+        """
+        action = rec.get('action')
+        ttl_sec = rec.get('ttl_minutes', self.ttl_minutes) * 60
+        if action == 'challenge_all':
+            self._send_banjax_command(
+                host=host,
+                command_name='challenge_all',
+                value=host,
+                ttl_seconds=ttl_sec,
+                reason=f'incident_id={incident_id} llm_escalation',
+            )
+            return
+        if action not in ('block_ua', 'challenge_ua'):
+            return
+        targets = rec.get('target') or []
+        for ua in targets:
+            if any(p in ua.lower() for p in PROTECTED_UA_PATTERNS):
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] Skipping {action} for protected UA: {ua!r}"
+                )
+                continue
+            self._send_banjax_command(
+                host=host,
+                command_name=action,
+                value=ua,
+                ttl_seconds=ttl_sec,
+                reason=f'incident_id={incident_id}',
+            )
+
+    def _has_followup_incident(self, conn, incident_id, host, ended_at, window_minutes=10):
+        """Return True if another incident for this host started within window_minutes of ended_at.
+
+        If True, the incident closed because detection rolled over to a new one —
+        not because the attack stopped. Don't declare mitigation effective in that case.
+        """
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1 FROM incidents
+                WHERE host = %s
+                  AND id != %s
+                  AND started_at >= %s - INTERVAL '2 minutes'
+                  AND started_at <= %s + INTERVAL '10 minutes'
+                LIMIT 1
+            """, (host, incident_id, ended_at, ended_at))
+            return cur.fetchone() is not None
+
+    def _get_active_actions(self, conn, host):
+        """Return list of active (not-yet-expired) actions for this host, excluding monitor_only."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT action, target, created_at
+                FROM first_responder_actions
+                WHERE host = %s
+                  AND expires_at > NOW()
+                  AND action NOT IN ('monitor_only', 'raise_threshold')
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (host,))
+            rows = cur.fetchall()
+        return [{'action': r[0], 'target': r[1], 'created_at': r[2]} for r in rows]
+
+    # ------------------------------------------------------------------
+    # Subnet concentration helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _subnet24(ip: str):
+        """Return the /24 prefix (e.g. '202.46.62') for an IP, or None."""
+        parts = ip.split('.')
+        return '.'.join(parts[:3]) if len(parts) >= 4 else None
+
+    def _detect_subnet_concentration(self, conn, incident_id):
+        """Compute /24 distribution for IPs in this cluster incident.
+        Returns (top_prefix, pct, total_ips) or (None, 0.0, 0).
+        """
+        with conn.cursor() as cur:
+            cur.execute("SELECT ip FROM incident_ips WHERE incident_id = %s", (incident_id,))
+            ips = [r[0] for r in cur.fetchall()]
+        if len(ips) < 5:
+            return None, 0.0, 0
+        counts = {}
+        for ip in ips:
+            p = self._subnet24(ip)
+            if p:
+                counts[p] = counts.get(p, 0) + 1
+        if not counts:
+            return None, 0.0, 0
+        top = max(counts, key=counts.get)
+        pct = counts[top] * 100.0 / len(ips)
+        return top, pct, len(ips)
+
+    def _get_all_subnet_ips(self, conn, host, subnet_prefix, hours=4):
+        """Return all distinct IPs from subnet_prefix.x attacking host in recent cluster incidents."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ii.ip
+                FROM incident_ips ii
+                JOIN incidents i ON i.id = ii.incident_id
+                WHERE i.host = %s
+                  AND i.source = 'cluster_analysis'
+                  AND ii.ip LIKE %s
+                  AND i.started_at >= NOW() - INTERVAL '1 hour' * %s
+            """, (host, subnet_prefix + '.%', hours))
+            return [r[0] for r in cur.fetchall()]
+
+    def _get_asn_for_subnet(self, conn, host, ips):
+        """Look up ASN name for IPs from sessions table. Returns list of ASN names (best-effort)."""
+        if not ips:
+            return []
+        sample = ips[:30]
+        placeholders = ','.join(['%s'] * len(sample))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT datacenter_asn, COUNT(*) AS n
+                    FROM sessions
+                    WHERE ip IN ({placeholders})
+                      AND host_name = %s
+                      AND datacenter_asn IS NOT NULL
+                      AND datacenter_asn != ''
+                    GROUP BY datacenter_asn
+                    ORDER BY n DESC
+                    LIMIT 3
+                """, sample + [host])
+                rows = cur.fetchall()
+            return [r[0] for r in rows]
+        except Exception as e:
+            self.logger.debug(f"[CLUSTER_RESPONDER] ASN lookup from sessions failed: {e}")
+            return []
 
     def _apply_block_criterion(self, conn, incident, criterion):
         """Apply one blocking criterion from cluster_analysis incident.
@@ -731,6 +983,105 @@ class IncidentFirstResponder:
             except Exception:
                 self.logger.exception(f"[CLUSTER_RESPONDER] botnet overlap check failed for incident_id={incident_id}")
 
+        # Persistent cluster attack: if 5+ cluster_analysis incidents for this host
+        # in the last 30 minutes, trigger challenge_all (JS wall for all visitors).
+        # This catches sustained cluster attacks that block_ip alone can't stop.
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM incidents
+                    WHERE host = %s
+                      AND source = 'cluster_analysis'
+                      AND started_at >= NOW() - INTERVAL '30 minutes'
+                """, (host,))
+                recent_cluster_count = cur.fetchone()[0]
+
+            if recent_cluster_count >= 5 and host not in self.host_whitelist:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT 1 FROM first_responder_actions
+                        WHERE host = %s AND action = 'challenge_all'
+                          AND expires_at > NOW()
+                        LIMIT 1
+                    """, (host,))
+                    challenge_all_active = cur.fetchone() is not None
+
+                if not challenge_all_active:
+                    ttl_sec = self.challenge_all_ttl_minutes * 60
+                    self.logger.warning(
+                        f"[CLUSTER_RESPONDER] challenge_all triggered: host={host} "
+                        f"persistent_cluster_incidents={recent_cluster_count} in last 30min"
+                    )
+                    self._save_action(conn, incident_id, host, {
+                        'action': 'challenge_all',
+                        'target': [host],
+                        'confidence': 'high',
+                        'reasoning': (
+                            f"Persistent cluster attack: {recent_cluster_count} cluster_analysis "
+                            f"incidents in the last 30 minutes — sustained bot activity that "
+                            f"per-IP blocking cannot stop. JS challenge wall deployed."
+                        ),
+                        'ttl_minutes': self.challenge_all_ttl_minutes,
+                    })
+                    self._send_banjax_command(
+                        host=host,
+                        command_name='challenge_all',
+                        value=host,
+                        ttl_seconds=ttl_sec,
+                        reason=f'incident_id={incident_id} persistent_cluster={recent_cluster_count}',
+                    )
+        except Exception:
+            self.logger.exception(
+                f"[CLUSTER_RESPONDER] Persistent cluster check failed for incident_id={incident_id}"
+            )
+
+        # Subnet concentration: if ≥70% of cluster IPs are from the same /24,
+        # send a single block_subnet CIDR command — stops /24 IP-rotation attacks.
+        try:
+            subnet_prefix, subnet_pct, total_ips = self._detect_subnet_concentration(conn, incident_id)
+            if subnet_prefix and subnet_pct >= 70.0 and total_ips >= 5:
+                cidr = f'{subnet_prefix}.0/24'
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT 1 FROM first_responder_actions
+                        WHERE host = %s
+                          AND action = 'block_subnet'
+                          AND target::text LIKE %s
+                          AND expires_at > NOW()
+                        LIMIT 1
+                    """, (host, f'%{subnet_prefix}%'))
+                    already_blocked = cur.fetchone() is not None
+
+                if not already_blocked:
+                    self._send_subnet_command(
+                        incident, cidr, 'block_subnet',
+                        f'subnet_concentration={subnet_pct:.0f}% ({subnet_prefix}.x)'
+                    )
+                    self._save_action(conn, incident_id, host, {
+                        'action': 'block_subnet',
+                        'target': [cidr],
+                        'confidence': 'high',
+                        'reasoning': (
+                            f"Subnet {subnet_prefix}.x covers {subnet_pct:.0f}% of cluster IPs. "
+                            f"Rotating through /24 to evade per-IP blocking — "
+                            f"block_subnet {cidr} sent to banjax."
+                        ),
+                        'ttl_minutes': self.ttl_minutes,
+                    })
+                    self.logger.warning(
+                        f"[CLUSTER_RESPONDER] block_subnet host={host} "
+                        f"cidr={cidr} pct={subnet_pct:.0f}% total_ips={total_ips}"
+                    )
+                else:
+                    self.logger.info(
+                        f"[CLUSTER_RESPONDER] block_subnet already active for host={host} "
+                        f"cidr={cidr} — skipping"
+                    )
+        except Exception:
+            self.logger.exception(
+                f"[CLUSTER_RESPONDER] Subnet concentration check failed for incident_id={incident_id}"
+            )
+
         self._mark_processed(conn, incident_id)
 
     def _get_fingerprint_stats(self, conn, incident):
@@ -784,7 +1135,7 @@ class IncidentFirstResponder:
         for ip in ips:
             command = {
                 'Name': 'block_ip',
-                'Value': ip,
+                'value': ip,
                 'host': host,
                 'dnet': dnet,
                 'source': meta,
@@ -884,7 +1235,7 @@ class IncidentFirstResponder:
     def _build_prompt(self, incident, country_stats, asn_stats, normal_traffic,
                       normal_asn_traffic=None, url_stats=None, ua_stats=None,
                       normal_url_traffic=None, normal_ua_traffic=None,
-                      fingerprint_stats=None):
+                      fingerprint_stats=None, has_followup=False, active_actions=None):
         host = incident['host']
         survey_country = incident['survey_country']
         normal_asn_traffic = normal_asn_traffic or {}
@@ -901,12 +1252,31 @@ class IncidentFirstResponder:
         traffic_close_count = incident.get('traffic_close_count', 0)
         traffic_recent_count = incident.get('traffic_recent_count', 0)
 
+        baseline_avg = incident['baseline_avg']
+        spike_ratio = incident['spike_ratio']
+        synthetic_baseline = (
+            baseline_avg < 1000 and
+            traffic_peak_count > 0 and
+            traffic_peak_count > 10 * baseline_avg
+        )
+        baseline_line = (
+            f"Baseline avg: {baseline_avg:.1f}  "
+            f"Spike ratio: {spike_ratio:.1f}x"
+        )
+        if synthetic_baseline:
+            baseline_line += (
+                f"\n⚠ SYNTHETIC BASELINE: baseline_avg={baseline_avg:.0f} is likely a manual override, "
+                f"not the site's real organic traffic level. "
+                f"spike_ratio={spike_ratio:.0f}x means traffic/{baseline_avg:.0f}, "
+                f"NOT {spike_ratio:.0f}× real normal traffic. "
+                f"Do not use spike_ratio alone to gauge severity — "
+                f"use traffic_peak_count ({traffic_peak_count} req/min) as the absolute measure."
+            )
+
         lines = [
             f"=== ATTACK on {host} ===",
             f"Started: {incident['started_at']}",
-            f"Challenge count: {incident['challenge_count']}  "
-            f"Baseline avg: {incident['baseline_avg']:.1f}  "
-            f"Spike ratio: {incident['spike_ratio']:.1f}x",
+            f"Challenge count: {incident['challenge_count']}  " + baseline_line,
             f"Site primary audience (survey_country): {survey_country or 'unknown'}",
         ]
 
@@ -918,7 +1288,9 @@ class IncidentFirstResponder:
                 close_str = f"at close={traffic_close:.1f}x"
                 if traffic_close_count > 0:
                     close_str += f" ({traffic_close_count} req/min)"
-                if traffic_close < 1.5:
+                if has_followup:
+                    effectiveness = "⚠ incident closed but attack continued — new incident opened immediately after"
+                elif traffic_close < 1.5 and traffic_close_count <= 5 * baseline_avg:
                     effectiveness = "✅ traffic returned to normal — mitigation effective"
                 elif traffic_close < traffic_peak * 0.5:
                     effectiveness = "⚠ traffic reduced but still elevated"
@@ -937,6 +1309,24 @@ class IncidentFirstResponder:
                 lines.append(f"Raw traffic spike: {peak_str} baseline{recent_str} (ongoing)")
         else:
             lines.append("Raw traffic spike: not detected (challenge spike only, or traffic monitor warming up)")
+
+        if active_actions:
+            lines.append("\n⚠ ACTIVE MITIGATIONS (already applied, attack is still ongoing):")
+            for a in active_actions:
+                lines.append(f"  {a['action']} → {a['target']} (applied {a['created_at'].strftime('%H:%M UTC')})")
+            has_challenge_all = any(a['action'] == 'challenge_all' for a in active_actions)
+            if has_challenge_all:
+                lines.append(
+                    "  ⚠ challenge_all IS ALREADY ACTIVE but the attack continues —"
+                    " bots are solving the JS/SHA challenge. challenge_all is INEFFECTIVE here."
+                    " Do NOT issue challenge_all again. Escalate to block_ua (if single UA >70%)"
+                    " or block_subnet (if datacenter ASNs dominate)."
+                )
+            else:
+                lines.append(
+                    "  These actions did not stop the attack. Consider challenge_all as escalation"
+                    " if targeted blocks have failed and attack is significant (>5000 req/min)."
+                )
 
         if incident['botnet_info']:
             lines.append(f"Botnet overlap with previous incidents:\n{incident['botnet_info']}")
@@ -1136,7 +1526,8 @@ class IncidentFirstResponder:
             self.logger.error(f"LLM call failed: {e!r}")
             return None
 
-    def _build_narrative_prompt(self, incident, country_stats, asn_stats, action_rec):
+    def _build_narrative_prompt(self, incident, country_stats, asn_stats, action_rec,
+                                url_stats=None, normal_url_traffic=None, has_followup=False):
         host = incident['host']
         started_at = incident['started_at'].strftime('%Y-%m-%d %H:%M UTC')
         spike = incident['spike_ratio']
@@ -1182,7 +1573,9 @@ class IncidentFirstResponder:
 
         # Traffic outcome
         if traffic_peak > 0 and traffic_close > 0:
-            if traffic_close < 1.5:
+            if has_followup:
+                outcome = f"incident closed but attack continued — a new incident opened immediately after (traffic at close: {traffic_close:.1f}x baseline)"
+            elif traffic_close < 1.5:
                 outcome = f"traffic returned to normal at close ({traffic_close:.1f}x baseline)"
             elif traffic_close < traffic_peak * 0.5:
                 outcome = f"traffic reduced but still elevated at close ({traffic_close:.1f}x baseline)"
@@ -1193,6 +1586,37 @@ class IncidentFirstResponder:
         else:
             outcome = "traffic monitor data unavailable"
 
+        # URL breakdown — helps LLM avoid misreading bot-flooded error pages as site outages
+        error_page_patterns = ('/502', '/503', '/504', '/404', '/error', '/offline')
+        url_lines = []
+        all_error_pages = False
+        if url_stats:
+            top_urls = url_stats[:5]
+            for s in top_urls:
+                url = s['url']
+                normal_pct = (normal_url_traffic or {}).get(url, 0.0)
+                is_error = any(url.startswith(p) for p in error_page_patterns)
+                flag = '  ← ERROR PAGE' if is_error else (
+                    '  ← NOT in normal traffic' if normal_pct == 0.0 and normal_url_traffic else ''
+                )
+                url_lines.append(f"  {url[:60]:60s}  attack: {s['pct']:5.1f}%  normal: {normal_pct:.1f}%{flag}")
+            top_pcts = [s['pct'] for s in top_urls]
+            error_pct = sum(
+                s['pct'] for s in top_urls
+                if any(s['url'].startswith(p) for p in error_page_patterns)
+            )
+            all_error_pages = error_pct >= 70.0
+
+        url_section = ""
+        if url_lines:
+            url_section = "Top attacked URLs:\n" + "\n".join(url_lines) + "\n"
+            if all_error_pages:
+                url_section += (
+                    "NOTE: attack traffic is concentrated on error pages (e.g. /502.html). "
+                    "Bots requested these pages directly — the site itself was NOT returning errors to real users. "
+                    "Do NOT write that the site was 'down' or 'returning 502 errors'.\n"
+                )
+
         return (
             f"Write a 2-3 sentence incident summary:\n"
             f"Site: {host}\n"
@@ -1202,6 +1626,7 @@ class IncidentFirstResponder:
             f"Top attack ASNs: {top_asns}\n"
             f"Response: {action_str}\n"
             f"Outcome: {outcome}\n"
+            + (url_section if url_section else "")
         )
 
     def _generate_narrative(self, prompt):
@@ -1259,7 +1684,7 @@ class IncidentFirstResponder:
 
     def _validate_response(self, rec):
         """Basic validation of LLM response before saving."""
-        valid_actions = {'block_country', 'block_asn', 'block_ua', 'raise_threshold', 'monitor_only'}
+        valid_actions = {'block_country', 'block_asn', 'block_ua', 'challenge_ua', 'challenge_all', 'raise_threshold', 'monitor_only', 'block_subnet'}
         valid_confidence = {'high', 'medium', 'low'}
         if not isinstance(rec, dict):
             return False
@@ -1380,7 +1805,7 @@ class IncidentFirstResponder:
 
     def _build_traffic_spike_prompt(self, incident, country_stats, asn_stats,
                                     normal_traffic, normal_asn_traffic,
-                                    ua_stats, fingerprint_stats):
+                                    ua_stats, fingerprint_stats, active_actions=None):
         host = incident['host']
         survey_country = incident.get('survey_country') or 'unknown'
         spike_ratio = incident.get('spike_ratio', 0.0) or incident.get('traffic_peak_ratio', 0.0)
@@ -1412,6 +1837,24 @@ class IncidentFirstResponder:
                 f"Immature session ratio: {immature_pct:.1f}% of sessions had exactly 1 request"
                 + (immature_tag if immature_ratio is not None else "")
             )
+
+        if active_actions:
+            lines.append("\n⚠ ACTIVE MITIGATIONS (already applied, attack is still ongoing):")
+            for a in active_actions:
+                lines.append(f"  {a['action']} → {a['target']} (applied {a['created_at'].strftime('%H:%M UTC')})")
+            has_challenge_all = any(a['action'] == 'challenge_all' for a in active_actions)
+            if has_challenge_all:
+                lines.append(
+                    "  ⚠ challenge_all IS ALREADY ACTIVE but the attack continues —"
+                    " bots are solving the JS/SHA challenge. challenge_all is INEFFECTIVE here."
+                    " Do NOT issue challenge_all again. Escalate to block_ua (if single UA >70%)"
+                    " or block_subnet (if datacenter ASNs dominate)."
+                )
+            else:
+                lines.append(
+                    "  These actions did not stop the attack. Consider challenge_all as escalation"
+                    " if targeted blocks have failed and attack is significant (>5000 req/min)."
+                )
 
         lines.append("\n--- Traffic country distribution ---")
         if country_stats:
@@ -1543,16 +1986,23 @@ class IncidentFirstResponder:
             return
 
         peak_req_min = incident.get('traffic_peak_count', 0)
-        if peak_req_min < self.min_traffic_peak_req_min:
+        baseline_for_check = incident.get('baseline_avg', 0.0) or 0.0
+        # Pass if peak exceeds relative threshold (spike on a small site), even if below absolute floor.
+        relative_ok = baseline_for_check > 0 and peak_req_min >= self.min_traffic_peak_req_min_multiplier * baseline_for_check
+        if peak_req_min < self.min_traffic_peak_req_min and not relative_ok:
             self.logger.info(
                 f"[FIRST_RESPONDER] Skipping traffic_spike incident_id={incident_id} host={host} "
-                f"traffic_peak_count={peak_req_min} req/min < min={self.min_traffic_peak_req_min} — low-volume noise"
+                f"traffic_peak_count={peak_req_min} req/min < min={self.min_traffic_peak_req_min} "
+                f"and < {self.min_traffic_peak_req_min_multiplier}x baseline={baseline_for_check:.1f} — low-volume noise"
             )
             self._save_action(conn, incident_id, host, {
                 'action': 'monitor_only',
                 'target': [],
                 'confidence': 'low',
-                'reasoning': f"Skipped: traffic_peak_count={peak_req_min} req/min below minimum {self.min_traffic_peak_req_min} req/min — spike is statistically significant but volume is too low to warrant blocking",
+                'reasoning': (
+                    f"Skipped: traffic_peak_count={peak_req_min} req/min below minimum {self.min_traffic_peak_req_min} req/min "
+                    f"and below {self.min_traffic_peak_req_min_multiplier}x baseline ({baseline_for_check:.1f} req/min) — low-volume noise"
+                ),
                 'ttl_minutes': self.ttl_minutes,
             })
             self._mark_processed(conn, incident_id)
@@ -1643,6 +2093,8 @@ class IncidentFirstResponder:
         normal_traffic = self._get_normal_traffic(conn, host)
         normal_asn_traffic = self._get_normal_asn_traffic(conn, host)
         ua_stats = self._get_ua_stats(conn, incident_id)
+        url_stats = self._get_url_stats(conn, incident_id)
+        normal_url_traffic = self._get_normal_url_traffic(conn, host)
         fingerprint_stats = self._get_fingerprint_stats(conn, incident)
 
         if not country_stats and not asn_stats:
@@ -1666,11 +2118,66 @@ class IncidentFirstResponder:
                 )
             return
 
+        # challenge_all: rule-based trigger, no LLM needed.
+        # Fires when the botnet is too distributed to block by ASN/UA and ML can't score sessions.
+        # Condition: spike_ratio high + almost all sessions are single-request bots + ML blind.
+        spike_ratio = max(incident.get('traffic_peak_ratio', 0.0) or 0.0, incident.get('spike_ratio', 0.0) or 0.0)
+        immature_ratio = incident.get('immature_ratio')
+        if (
+            self.challenge_all_spike_ratio > 0
+            and spike_ratio >= self.challenge_all_spike_ratio
+            and immature_ratio is not None
+            and immature_ratio >= self.challenge_all_immature_ratio
+            and host not in self.host_whitelist
+        ):
+            # Check if challenge_all is already active for this host (avoid duplicate commands).
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM first_responder_actions
+                    WHERE host = %s AND action = 'challenge_all'
+                      AND expires_at > NOW()
+                    LIMIT 1
+                """, (host,))
+                already_active = cur.fetchone() is not None
+            if not already_active:
+                ttl_sec = self.challenge_all_ttl_minutes * 60
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] challenge_all triggered: host={host} "
+                    f"spike={spike_ratio:.1f}x immature={immature_ratio*100:.0f}% "
+                    f"challenge_count={incident.get('challenge_count', 0)} "
+                    f"ttl={self.challenge_all_ttl_minutes}min"
+                )
+                self._save_action(conn, incident_id, host, {
+                    'action': 'challenge_all',
+                    'target': [host],
+                    'confidence': 'high',
+                    'reasoning': (
+                        f"Distributed single-request botnet: spike={spike_ratio:.1f}x, "
+                        f"immature_ratio={immature_ratio*100:.0f}% — ML cannot score 1-req-per-IP bots. "
+                        f"Too distributed to block by ASN/UA — JS wall for all traffic."
+                    ),
+                    'ttl_minutes': self.challenge_all_ttl_minutes,
+                })
+                self._send_banjax_command(
+                    host=host,
+                    command_name='challenge_all',
+                    value=host,
+                    ttl_seconds=ttl_sec,
+                    reason=f'incident_id={incident_id} spike={spike_ratio:.1f}x immature={immature_ratio*100:.0f}%',
+                )
+                self._mark_processed(conn, incident_id)
+                return
+
         # Per-host LLM cooldown: skip LLM call if we already analyzed this host recently.
         # Sustained attacks (same host, many incidents) would otherwise call LLM every 30s.
+        # Extended cooldown: if last action was monitor_only, wait 2x longer before re-analyzing.
+        # Rationale: monitor_only means "nothing actionable" — unlikely to change in the next hour.
         import time as _time
         _now = _time.time()
         _cooldown_s = self.llm_host_cooldown_minutes * 60
+        _last_action = self._llm_last_action.get(host, '')
+        if _last_action == 'monitor_only':
+            _cooldown_s *= 2
         _last = self._llm_last_called.get(host, 0)
         if _now - _last < _cooldown_s:
             self.logger.info(
@@ -1682,10 +2189,12 @@ class IncidentFirstResponder:
             return
         self._llm_last_called[host] = _now
 
+        active_actions = self._get_active_actions(conn, host)
         prompt = self._build_traffic_spike_prompt(
             incident, country_stats, asn_stats,
             normal_traffic, normal_asn_traffic,
             ua_stats, fingerprint_stats,
+            active_actions=active_actions,
         )
         self.logger.info(
             f"[FIRST_RESPONDER] Calling LLM for traffic_spike incident_id={incident_id}"
@@ -1713,11 +2222,18 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
+        self._llm_last_action[host] = rec.get('action', '')
         self._save_action(conn, incident_id, host, rec)
+        self._dispatch_banjax_action(host, rec, incident_id)
         if incident.get('ended_at') is not None:
             self._mark_processed(conn, incident_id)
+            has_followup = self._has_followup_incident(
+                conn, incident_id, host, incident['ended_at']
+            )
             narrative_prompt = self._build_narrative_prompt(
-                incident, country_stats, asn_stats, rec
+                incident, country_stats, asn_stats, rec,
+                url_stats=url_stats, normal_url_traffic=normal_url_traffic,
+                has_followup=has_followup,
             )
             narrative = self._generate_narrative(narrative_prompt)
             if narrative:
@@ -1856,10 +2372,12 @@ class IncidentFirstResponder:
             )
             self._block_fingerprint_ips(conn, incident, dominant_fp)
 
+        active_actions = self._get_active_actions(conn, host)
         prompt = self._build_prompt(
             incident, country_stats, asn_stats, normal_traffic, normal_asn_traffic,
             url_stats, ua_stats, normal_url_traffic, normal_ua_traffic,
             fingerprint_stats=fingerprint_stats,
+            active_actions=active_actions,
         )
         self.logger.info(f"[FIRST_RESPONDER] Calling LLM for incident_id={incident_id}")
 
@@ -1886,12 +2404,18 @@ class IncidentFirstResponder:
             normal_traffic=normal_traffic,
         )
         self._save_action(conn, incident_id, host, rec)
+        self._dispatch_banjax_action(host, rec, incident_id)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
         if incident.get('ended_at') is not None:
             self._mark_processed(conn, incident_id)
             # Generate a short narrative summary at incident close
+            has_followup = self._has_followup_incident(
+                conn, incident_id, host, incident['ended_at']
+            )
             narrative_prompt = self._build_narrative_prompt(
-                incident, country_stats, asn_stats, rec
+                incident, country_stats, asn_stats, rec,
+                url_stats=url_stats, normal_url_traffic=normal_url_traffic,
+                has_followup=has_followup,
             )
             narrative = self._generate_narrative(narrative_prompt)
             if narrative:
@@ -1948,7 +2472,16 @@ class IncidentFirstResponder:
         self.logger.info(f"[FIRST_RESPONDER] Backfilling narrative for incident_id={incident_id} host={host}")
         country_stats = self._get_country_stats(conn, incident_id)
         asn_stats = self._get_asn_stats(conn, incident_id)
-        narrative_prompt = self._build_narrative_prompt(incident, country_stats, asn_stats, action_rec)
+        url_stats = self._get_url_stats(conn, incident_id)
+        normal_url_traffic = self._get_normal_url_traffic(conn, host)
+        has_followup = self._has_followup_incident(
+            conn, incident_id, host, incident['ended_at']
+        )
+        narrative_prompt = self._build_narrative_prompt(
+            incident, country_stats, asn_stats, action_rec,
+            url_stats=url_stats, normal_url_traffic=normal_url_traffic,
+            has_followup=has_followup,
+        )
         narrative = self._generate_narrative(narrative_prompt)
         if narrative:
             self._save_narrative(conn, incident_id, narrative)

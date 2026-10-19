@@ -26,9 +26,14 @@ from baskervillehall.tor_exit_scanner import TorExitScanner
 import json as _json_std
 from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
-from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka.errors import NoBrokersAvailable
 from kafka.consumer.subscription_state import ConsumerRebalanceListener
+
+try:
+    from kubernetes import client as k8s_client, config as k8s_config
+    _K8S_AVAILABLE = True
+except ImportError:
+    _K8S_AVAILABLE = False
 
 # Fast JSON / ISO date parsing
 try:
@@ -284,6 +289,8 @@ class BaskervillehallSession(object):
 
         self.topic_traffic_stats = topic_traffic_stats
         self.traffic_stats_interval = traffic_stats_interval
+        self.internal_ips = set()
+        self._internal_ips_refreshed_at = 0.0  # epoch seconds, 0 = never
         self.host_request_counts = defaultdict(int)
         self.host_country_counts = defaultdict(lambda: defaultdict(int))
         self.host_asn_counts = defaultdict(lambda: defaultdict(int))
@@ -341,6 +348,36 @@ class BaskervillehallSession(object):
 
     def _t(self):
         return time_module.time()
+
+    def _refresh_node_ips(self, refresh_interval=3600):
+        """Fetch all cluster node external IPs from Kubernetes API.
+
+        Used to whitelist our own infrastructure (e.g. DeflectHealthCheck) by
+        requiring both a known node IP AND the expected UA — prevents UA spoofing.
+        Refreshes at most once per refresh_interval seconds (default 1h).
+        """
+        if not _K8S_AVAILABLE:
+            return
+        now = time_module.time()
+        if now - self._internal_ips_refreshed_at < refresh_interval:
+            return
+        try:
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                k8s_config.load_kube_config()
+            v1 = k8s_client.CoreV1Api()
+            nodes = v1.list_node()
+            ips = set()
+            for node in nodes.items:
+                for addr in (node.status.addresses or []):
+                    if addr.type in ('ExternalIP', 'InternalIP'):
+                        ips.add(addr.address)
+            self.internal_ips = ips
+            self._internal_ips_refreshed_at = now
+            self.logger.info(f"[SESSION] Refreshed node IPs: {ips}")
+        except Exception as e:
+            self.logger.warning(f"[SESSION] Could not refresh node IPs: {e}")
 
     def _acc(self, key, t0):
         self.profile_stats[key] += (time_module.time() - t0)
@@ -721,6 +758,7 @@ class BaskervillehallSession(object):
         bot_score = -1.0
         bot_score_top_factor = ''
         deflect_password = False
+        google_referer_count = 0
 
         # Compute baskerville scores only once (they're based on first request)
         if 'baskerville_score_1' not in session:
@@ -751,9 +789,12 @@ class BaskervillehallSession(object):
                 bot_score_top_factor = r['bot_score_top_factor']
             if r['deflect_password']:
                 deflect_password = True
+            if r.get('google_referer'):
+                google_referer_count += 1
             requests_formatted.append(rf)
 
         scraper_name = baskerville_rules.detect_scraper(session['ua'])
+        security_scanner = baskerville_rules.detect_security_scanner(session['ua'])
         session_final = {
             'host': session['host'],
             'dnet': session['dnet'],
@@ -773,6 +814,7 @@ class BaskervillehallSession(object):
             'bot_score': bot_score,
             'bot_score_top_factor': bot_score_top_factor,
             'deflect_password': deflect_password,
+            'google_referer': google_referer_count > 0,
             'verified_bot': session['verified_bot'],
             'verified_bot_name': session.get('verified_bot_name', ''),
             'verified_ai_bot': session.get('verified_ai_bot', False),
@@ -798,6 +840,7 @@ class BaskervillehallSession(object):
             'timezone': session['timezone'],
             'scraper_name': scraper_name if scraper_name else '',
             'is_scraper': scraper_name is not None,
+            'security_scanner': security_scanner if security_scanner else '',
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
             'immature_session': session.get('immature_session', False),
@@ -1174,6 +1217,8 @@ class BaskervillehallSession(object):
 
             while True:
 
+                self._refresh_node_ips()
+
                 if (datetime.utcnow() - ts_assign_report).total_seconds() > 30:
                     log_partition_assignment(consumer, self.logger)
                     ts_assign_report = datetime.utcnow()
@@ -1278,6 +1323,15 @@ class BaskervillehallSession(object):
                         t_ext = self._t()
                         ip = data['client_ip']
                         ua = data.get('client_ua', data.get('client_user_agent', ''))
+
+                        # Skip internal health checker: IP must be a known Deflect node
+                        # AND UA must match — double check prevents UA spoofing.
+                        if (self.internal_ips and ip in self.internal_ips
+                                and 'deflecthealthcheck' in ua.lower()):
+                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                            self.profile_stats['message_count'] += 1
+                            continue
+
                         if 'cloudflareProperties' in data:
                             prop = data['cloudflareProperties']
                             verified_bot = prop.get('botManagement', {}).get('verifiedBot', False)
@@ -1450,6 +1504,18 @@ class BaskervillehallSession(object):
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         t_build = self._t()
+                        # Check for search engine referer (strong human signal)
+                        referer = data.get('referer', '') or \
+                            data.get('networkRequestAgent', {}).get('agent', {}).get('referrers', '')
+                        refererdomain = data.get('refererdomain', '')
+                        _ref_check = refererdomain or referer
+                        google_referer = bool(_ref_check) and any(
+                            s in _ref_check for s in (
+                                'google.', 'bing.com', 'duckduckgo.com',
+                                'yahoo.com', 'yandex.', 'baidu.com', 'ecosia.org',
+                            )
+                        )
+
                         request = {
                             'ts': ts_event,
                             'dnet': dnet,
@@ -1466,7 +1532,8 @@ class BaskervillehallSession(object):
                             'bot_score': bot_score,
                             'bot_score_top_factor': bot_score_top_factor,
                             'deflect_password': deflect_password,
-                            'http_protocol': data.get('http_request_version', '')
+                            'http_protocol': data.get('http_request_version', ''),
+                            'google_referer': google_referer,
                         }
                         # Get cipher from different possible locations
                         cipher = data.get('ssl_cipher', '')

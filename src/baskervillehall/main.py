@@ -193,6 +193,8 @@ def main():
             'ollama_url': os.environ.get('OLLAMA_URL', 'http://localhost:11434'),
             'llm_model': os.environ.get('SESSION_LLM_MODEL', os.environ.get('LLM_MODEL', 'qwen2.5:7b')),
             'openai_api_key': os.environ.get('ANTHROPIC_API_KEY', os.environ.get('OPENAI_API_KEY', '')),
+            'cluster_llm_provider': os.environ.get('CLUSTER_LLM_PROVIDER', 'ollama'),
+            'cluster_llm_model': os.environ.get('CLUSTER_LLM_MODEL') or None,
             'session_llm_score_min': int(os.environ.get('SESSION_LLM_SCORE_MIN', '20')),
             'session_llm_score_max': int(os.environ.get('SESSION_LLM_SCORE_MAX', '80')),
             'session_llm_min_requests': int(os.environ.get('SESSION_LLM_MIN_REQUESTS', '5')),
@@ -234,8 +236,12 @@ def main():
             host_whitelist=[h for h in os.environ.get('FIRST_RESPONDER_HOST_WHITELIST', '').split(',') if h.strip()],
             min_traffic_peak_count=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_COUNT', '50')),
             min_traffic_peak_req_min=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN', '50')),
+            min_traffic_peak_req_min_multiplier=float(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN_MULTIPLIER', '10.0')),
             min_incident_duration_minutes=int(os.environ.get('FIRST_RESPONDER_MIN_INCIDENT_DURATION_MINUTES', '10')),
             llm_host_cooldown_minutes=int(os.environ.get('FIRST_RESPONDER_LLM_HOST_COOLDOWN_MINUTES', '10')),
+            challenge_all_spike_ratio=float(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_SPIKE_RATIO', '50.0')),
+            challenge_all_immature_ratio=float(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_IMMATURE_RATIO', '0.80')),
+            challenge_all_ttl_minutes=int(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_TTL_MINUTES', '30')),
             logger=logger,
         ).run()
     else:

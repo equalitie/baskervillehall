@@ -13,6 +13,8 @@ SELECT host_name,
 FROM sessions
 WHERE session_end > NOW() - INTERVAL '3 days'
   AND country != ''
+  AND passed_challenge = 0
+  AND hits > 0
 GROUP BY host_name, country
 ON CONFLICT (host, country) DO UPDATE
     SET pct = EXCLUDED.pct,
@@ -30,6 +32,8 @@ SELECT host_name,
 FROM sessions
 WHERE session_end > NOW() - INTERVAL '3 days'
   AND asn_name != ''
+  AND passed_challenge = 0
+  AND hits > 0
 GROUP BY host_name, asn_name
 ON CONFLICT (host, asn_name) DO UPDATE
     SET pct = EXCLUDED.pct,
@@ -47,6 +51,8 @@ SELECT host_name,
 FROM sessions
 WHERE session_end > NOW() - INTERVAL '3 days'
   AND top_url IS NOT NULL AND top_url != ''
+  AND passed_challenge = 0
+  AND hits > 0
 GROUP BY host_name, top_url
 ON CONFLICT (host, url) DO UPDATE
     SET pct = EXCLUDED.pct,
@@ -64,6 +70,8 @@ SELECT host_name,
 FROM sessions
 WHERE session_end > NOW() - INTERVAL '3 days'
   AND user_agent IS NOT NULL AND user_agent != ''
+  AND passed_challenge = 0
+  AND hits > 0
 GROUP BY host_name, user_agent
 ON CONFLICT (host, ua) DO UPDATE
     SET pct = EXCLUDED.pct,

@@ -111,3 +111,9 @@ CREATE INDEX IF NOT EXISTS session_llm_verdicts_created_at
     ON session_llm_verdicts (created_at DESC);
 CREATE INDEX IF NOT EXISTS session_llm_verdicts_host_label
     ON session_llm_verdicts (host, llm_label, created_at DESC);
+ALTER TABLE session_llm_verdicts ADD COLUMN IF NOT EXISTS session_type TEXT;
+ALTER TABLE session_llm_verdicts ADD COLUMN IF NOT EXISTS malice_score FLOAT;
+
+CREATE INDEX IF NOT EXISTS origin_health_is_down_checked
+    ON origin_health (checked_at DESC)
+    WHERE is_down = true;
