@@ -298,7 +298,10 @@ class BaskervillehallSession(object):
         self.host_session_counts = defaultdict(int)
         self.host_immature_counts = defaultdict(int)
         self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
+        self.host_dnet: dict = {}  # host → most recently seen dnet
         self.ts_traffic_flush = time_module.time()
+        self._ts_host_dnet_flush = 0.0
+        self._postgres_connection = postgres_connection
 
         self.primary_collect_cooldown_sec = 2.0
         self._last_primary_collect = {}
@@ -469,6 +472,28 @@ class BaskervillehallSession(object):
                 )
             except Exception as e:
                 self.logger.warning(f'[TRAFFIC_STATS] Failed to send for {host}: {e}')
+
+    def _flush_host_dnet_to_db(self):
+        """Upsert host → dnet mapping to DB so first_responder can route commands correctly."""
+        if not self.host_dnet or not self._postgres_connection:
+            return
+        snapshot = dict(self.host_dnet)
+        self.host_dnet.clear()
+        try:
+            import psycopg2
+            conn = psycopg2.connect(**self._postgres_connection)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO host_dnet (host, dnet, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (host) DO UPDATE SET dnet = EXCLUDED.dnet, updated_at = NOW()""",
+                    [(h, d) for h, d in snapshot.items()]
+                )
+            conn.close()
+            self.logger.debug(f'[HOST_DNET] flushed {len(snapshot)} host→dnet mappings')
+        except Exception as e:
+            self.logger.warning(f'[HOST_DNET] flush failed: {e}')
 
     def create_kafka_connections(self, max_retries=10, initial_delay=5):
         consumer = None
@@ -1266,6 +1291,10 @@ class BaskervillehallSession(object):
                     self._flush_traffic_stats()
                     self.ts_traffic_flush = time_module.time()
 
+                if time_module.time() - self._ts_host_dnet_flush >= 300:
+                    self._flush_host_dnet_to_db()
+                    self._ts_host_dnet_flush = time_module.time()
+
                 for topic_partition, messages in raw_messages.items():
                     if (datetime.utcnow() - ts_lag_report).total_seconds() > 5:
 
@@ -1440,6 +1469,8 @@ class BaskervillehallSession(object):
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
                         survey_country = data.get('survey_country', '')
                         dnet = data.get('dnet', '-')
+                        if dnet != '-':
+                            self.host_dnet[host] = dnet
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
 
                         if self.country_blocker.process(host, ip, country, dnet):

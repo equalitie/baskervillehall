@@ -166,6 +166,7 @@ def main():
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
             'bot_score_threshold': float(os.environ.get('BOT_SCORE_THRESHOLD', 0.8)),
+            'gpu_renderer_threshold': float(os.environ.get('GPU_RENDERER_THRESHOLD', 0.4)),
             'challenge_scrapers': os.environ.get('CHALLENGE_SCRAPERS') == 'True',
             'block_commercial_crawlers': os.environ.get('BLOCK_COMMERCIAL_CRAWLERS', 'True') == 'True',
             'worker_chunk_size': int(os.environ.get('WORKER_CHUNK_SIZE', 1000)),

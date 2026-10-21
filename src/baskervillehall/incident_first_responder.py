@@ -110,8 +110,8 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "block_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
-  "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
+  "action": "block_country" | "block_asn" | "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
+  "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | ["203.0.113.0/24"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 30,
   "reasoning": "brief explanation"
@@ -184,10 +184,17 @@ Decision rules (apply in order):
     have <1% in normal traffic. Put the exact UA strings in "target". This works for any UA —
     scripted (python-requests, curl) or disguised (fake browser strings unique to the attack).
     Set confidence=high if the top UA alone exceeds {min_attack_pct}% of attack traffic.
-13. If the attack concentrates on URLs that are NOT in the site's normal top URLs (0% normal
+12a. Use challenge_ua (softer than block_ua) if the UA covers >70% of attack traffic but
+    appears in normal baseline traffic (>1%) — real users with that UA get a JS challenge
+    instead of a hard block. Put the exact UA string in "target".
+13. Use block_subnet when the attack concentrates in a narrow IP range (e.g. one /24 subnet
+    covers >70% of attack IPs). Put CIDR ranges in "target" (e.g. "203.0.113.0/24").
+    block_subnet blocks the whole /24 in one command — more efficient than block_ip per IP.
+    IPv4 only; maximum range /16. Never include more than 3 subnets.
+14. If the attack concentrates on URLs that are NOT in the site's normal top URLs (0% normal
     traffic) — especially /wp-admin/, /xmlrpc.php, /api/ endpoints — this strengthens
     confidence in the block recommendation.
-14. URL and UA data is from sessions only (static-file-only bots are not included).
+15. URL and UA data is from sessions only (static-file-only bots are not included).
     Do not use absence of URL/UA data as a reason to downgrade confidence if ASN/country
     data is already conclusive.
 """
@@ -201,8 +208,8 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
-  "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | ["Mozilla/5.0 (X11; Linux x86_64)..."] | [],
+  "action": "block_country" | "block_asn" | "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
+  "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | ["203.0.113.0/24"] | ["Mozilla/5.0 (X11; Linux x86_64)..."] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 30,
   "reasoning": "brief explanation"
@@ -292,6 +299,11 @@ DECISION RULES:
     would be ruled out (dominant country has high normal traffic), always fall back to
     block_asn for that specific ASN — do NOT fall back to raise_threshold or monitor_only
     if the attacking ASN itself has low normal traffic (<{max_normal_pct}%).
+
+10a. Use block_subnet when the attack concentrates in a narrow IP range (e.g. one /24 subnet
+    covers >70% of attacking IPs and is shown in the data). Put CIDR ranges in "target"
+    (e.g. "203.0.113.0/24"). IPv4 only; maximum range /16. Never include more than 3 subnets.
+    block_subnet is more precise than block_asn when the attack comes from a single /24.
 
 11. Use raise_threshold if: traffic is geographically diverse (>3 countries each >15%),
     OR dominant country == survey_country, OR immature_ratio < 50%, OR signals are ambiguous.
@@ -560,13 +572,25 @@ class IncidentFirstResponder:
             rows = cur.fetchall()
         return {r[0]: float(r[1]) for r in rows}
 
+    def _get_host_dnet(self, conn, host):
+        """Return the dnet for a host from host_dnet table (populated by session pipeline).
+        Returns '-' if unknown — caller falls back to key-based routing."""
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT dnet FROM host_dnet WHERE host = %s", (host,))
+                row = cur.fetchone()
+            return row[0] if row else '-'
+        except Exception as e:
+            self.logger.warning(f"[FIRST_RESPONDER] host_dnet lookup failed for {host}: {e}")
+            return '-'
+
     def _send_subnet_command(self, incident, cidr, command_name, reason):
         """Send a single block_subnet or challenge_subnet command for an IPv4 CIDR (e.g. 1.2.3.0/24)."""
         if self._producer is None and self._producer_output is None:
             self.logger.warning(f"[CLUSTER_RESPONDER] No Kafka producer — {command_name} skipped")
             return
         host = incident['host']
-        dnet = '-'
+        dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
         command = {
             'Name': command_name,
@@ -602,7 +626,7 @@ class IncidentFirstResponder:
             )
             return 0
         host = incident['host']
-        dnet = '-'
+        dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
         sent = 0
         for ip in ips:
@@ -636,8 +660,12 @@ class IncidentFirstResponder:
         """Send block_ip Kafka commands for a list of IPs (used by _block_fingerprint_ips)."""
         return self._send_ip_commands(incident, ips, 'block_ip', reason)
 
-    def _send_banjax_command(self, host, command_name, value, ttl_seconds, reason):
-        """Send a single non-IP banjax command (block_ua, challenge_ua, challenge_all) to Kafka."""
+    def _send_banjax_command(self, host, command_name, value, ttl_seconds, reason, conn=None):
+        """Send a single non-IP banjax command (block_ua, challenge_ua, challenge_all) to Kafka.
+
+        Routes to the correct dnet partition using the host_dnet table (populated by session pipeline).
+        Falls back to key-based routing if dnet is unknown.
+        """
         if self._producer is None and self._producer_output is None:
             self.logger.warning(
                 f"[FIRST_RESPONDER] No Kafka producer — {command_name} skipped"
@@ -658,21 +686,22 @@ class IncidentFirstResponder:
             command['value'] = value
         encoded = json.dumps(command).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
-        dnet = '-'
-        partition = self.dnet_partition_map.get(dnet, -1)
         if self._producer is not None:
             self._producer.send(topic=self.topic_commands, value=encoded, key=key)
-        if partition < 0:
-            if self._producer_output is not None:
+        dnet = self._get_host_dnet(conn, host) if conn is not None else '-'
+        if self._producer_output is not None:
+            partition = self.dnet_partition_map.get(dnet, -1)
+            if partition < 0:
                 self._producer_output.send(topic=self.topic_commands, value=encoded, key=key)
-        else:
-            if self._producer_output is not None:
+            else:
                 self._producer_output.send(topic=self.topic_commands, value=encoded, partition=partition)
+            self._producer_output.flush()
         self.logger.warning(
-            f"[FIRST_RESPONDER] {command_name} sent to Kafka: value={value!r} host={host} ttl={ttl_seconds}s reason={reason}"
+            f"[FIRST_RESPONDER] {command_name} sent to Kafka: value={value!r} host={host} "
+            f"dnet={dnet} ttl={ttl_seconds}s reason={reason}"
         )
 
-    def _dispatch_banjax_action(self, host, rec, incident_id):
+    def _dispatch_banjax_action(self, host, rec, incident_id, conn=None):
         """Send block_ua / challenge_ua / challenge_all actions directly to banjax via Kafka.
 
         block_asn and block_country are not native banjax commands — they are implemented
@@ -689,7 +718,19 @@ class IncidentFirstResponder:
                 value=host,
                 ttl_seconds=ttl_sec,
                 reason=f'incident_id={incident_id} llm_escalation',
+                conn=conn,
             )
+            return
+        if action == 'block_subnet':
+            targets = rec.get('target') or []
+            dnet = self._get_host_dnet(conn, host) if conn is not None else '-'
+            for cidr in targets:
+                self._send_subnet_command(
+                    incident={'host': host, '_dnet': dnet},
+                    cidr=cidr,
+                    command_name='block_subnet',
+                    reason=f'incident_id={incident_id} llm_decision',
+                )
             return
         if action not in ('block_ua', 'challenge_ua'):
             return
@@ -706,6 +747,7 @@ class IncidentFirstResponder:
                 value=ua,
                 ttl_seconds=ttl_sec,
                 reason=f'incident_id={incident_id}',
+                conn=conn,
             )
 
     def _has_followup_incident(self, conn, incident_id, host, ended_at, window_minutes=10):
@@ -915,6 +957,7 @@ class IncidentFirstResponder:
         incident_id = incident['id']
         host = incident['host']
         block_criteria = incident.get('block_criteria') or []
+        incident['_dnet'] = self._get_host_dnet(conn, host)
 
         if host in self.host_whitelist:
             self.logger.info(
@@ -1029,6 +1072,7 @@ class IncidentFirstResponder:
                         value=host,
                         ttl_seconds=ttl_sec,
                         reason=f'incident_id={incident_id} persistent_cluster={recent_cluster_count}',
+                        conn=conn,
                     )
         except Exception:
             self.logger.exception(
@@ -1053,6 +1097,7 @@ class IncidentFirstResponder:
                     already_blocked = cur.fetchone() is not None
 
                 if not already_blocked:
+                    incident['_dnet'] = self._get_host_dnet(conn, host)
                     self._send_subnet_command(
                         incident, cidr, 'block_subnet',
                         f'subnet_concentration={subnet_pct:.0f}% ({subnet_prefix}.x)'
@@ -1129,7 +1174,7 @@ class IncidentFirstResponder:
             ips = [r[0] for r in cur.fetchall()]
 
         host = incident['host']
-        dnet = '-'
+        dnet = incident.get('_dnet') or self._get_host_dnet(conn, host)
         meta = f'first_responder [block_fingerprint] [block_ip]'
         blocked = 0
         for ip in ips:
@@ -2164,6 +2209,7 @@ class IncidentFirstResponder:
                     value=host,
                     ttl_seconds=ttl_sec,
                     reason=f'incident_id={incident_id} spike={spike_ratio:.1f}x immature={immature_ratio*100:.0f}%',
+                    conn=conn,
                 )
                 self._mark_processed(conn, incident_id)
                 return
@@ -2224,7 +2270,7 @@ class IncidentFirstResponder:
         )
         self._llm_last_action[host] = rec.get('action', '')
         self._save_action(conn, incident_id, host, rec)
-        self._dispatch_banjax_action(host, rec, incident_id)
+        self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
         if incident.get('ended_at') is not None:
             self._mark_processed(conn, incident_id)
             has_followup = self._has_followup_incident(
@@ -2404,7 +2450,7 @@ class IncidentFirstResponder:
             normal_traffic=normal_traffic,
         )
         self._save_action(conn, incident_id, host, rec)
-        self._dispatch_banjax_action(host, rec, incident_id)
+        self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
         if incident.get('ended_at') is not None:
             self._mark_processed(conn, incident_id)

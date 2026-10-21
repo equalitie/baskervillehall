@@ -117,3 +117,10 @@ ALTER TABLE session_llm_verdicts ADD COLUMN IF NOT EXISTS malice_score FLOAT;
 CREATE INDEX IF NOT EXISTS origin_health_is_down_checked
     ON origin_health (checked_at DESC)
     WHERE is_down = true;
+
+-- host → dnet mapping, updated by session pipeline, queried by first_responder
+CREATE TABLE IF NOT EXISTS host_dnet (
+    host       TEXT NOT NULL PRIMARY KEY,
+    dnet       TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

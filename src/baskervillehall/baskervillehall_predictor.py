@@ -200,6 +200,7 @@ class BaskervillehallPredictor(object):
             ip_sessions_ttl_in_minutes=30,
             max_requests_in_command=20,
             bot_score_threshold=0.5,
+            gpu_renderer_threshold=0.4,
             challenge_scrapers=True,
             block_commercial_crawlers=True,
             rate_limit_hits=20,
@@ -281,6 +282,7 @@ class BaskervillehallPredictor(object):
         self.ip_sessions_ttl_in_minutes = ip_sessions_ttl_in_minutes
         self.max_requests_in_command = max_requests_in_command
         self.bot_score_threshold = bot_score_threshold
+        self.gpu_renderer_threshold = gpu_renderer_threshold
         self.challenge_scrapers = challenge_scrapers
         self.block_commercial_crawlers = block_commercial_crawlers
         self.rate_limit_hits = rate_limit_hits,
@@ -2322,10 +2324,12 @@ Reply JSON only, no markdown:
         bot_score_top_factor = session.get("bot_score_top_factor", "")
         # gpu_renderer as top factor = headless browser (SwiftShader / missing GPU).
         # Real browsers always report a real GPU renderer — this signal is highly reliable.
-        # Use a lower threshold than the default to catch these cases.
-        gpu_renderer_threshold = 0.15
+        # Privacy browsers (Tor, Brave fingerprint protection) also mask GPU renderer,
+        # so threshold must be high enough to avoid false positives on real users.
+        # Configurable via GPU_RENDERER_THRESHOLD (default 0.4). Real headless bots
+        # score 0.99+, privacy browser users typically score 0.15-0.35.
         effective_bot_score_threshold = (
-            gpu_renderer_threshold if bot_score_top_factor == 'gpu_renderer'
+            self.gpu_renderer_threshold if bot_score_top_factor == 'gpu_renderer'
             else self.bot_score_threshold
         )
         if (
