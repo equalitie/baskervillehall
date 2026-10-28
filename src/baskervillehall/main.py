@@ -155,6 +155,7 @@ def main():
             'white_list_refresh_period': int(os.environ.get('WHITELIST_REFRESH_IN_MINUTES', 5)),
             'ip_whitelist_url': os.environ.get('DEFLECT_CONFIG_URL_IP_WHITELIST', None),
             'ip_whitelist_auth': os.environ.get('DEFLECT_CONFIG_AUTH_IP_WHITELIST', None),
+            'static_ip_whitelist': [ip.strip() for ip in os.environ.get('STATIC_IP_WHITELIST', '').split(',') if ip.strip()],
             'global_allowlist_url': os.environ.get('DEFLECT_CONFIG_URL_GLOBAL_ALLOWLIST', None),
             'global_allowlist_auth': os.environ.get('DEFLECT_CONFIG_AUTH_GLOBAL_ALLOWLIST', None),
             'origin_ips_url': os.environ.get('DEFLECT_CONFIG_URL_ORIGIN_IPS', None),

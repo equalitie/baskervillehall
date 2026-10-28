@@ -1,0 +1,114 @@
+# Final postgres:16 deployment.
+# Apply this after migration job completes successfully.
+# This replaces deployment/postgres/postgres-baskervillehall.yaml.
+#
+# Full procedure:
+#   1. kubectl apply -f 1-postgres-pg16-pvc.yaml
+#   2. kubectl apply -f 2-postgres-pg16-init.yaml && kubectl rollout status deployment/postgres-pg16-init
+#   3. Scale down writers:
+#        kubectl scale statefulset baskervillehall-storage --replicas=0
+#        kubectl scale deployment incident-first-responder --replicas=0
+#        kubectl scale statefulset alerts --replicas=0
+#   4. kubectl apply -f 3-postgres-migrate-job.yaml && kubectl logs -f job/postgres-migrate-pg16
+#   5. kubectl scale deployment postgres-baskervillehall --replicas=0
+#      kubectl delete -f 2-postgres-pg16-init.yaml   # MUST delete init BEFORE applying final (same PVC!)
+#      kubectl apply -f 4-postgres-baskervillehall-pg16.yaml
+#      kubectl rollout status deployment/postgres-baskervillehall
+#   6. Scale writers back up:
+#        kubectl scale statefulset baskervillehall-storage --replicas=1
+#        kubectl scale deployment incident-first-responder --replicas=1
+#        kubectl scale statefulset alerts --replicas=3
+#   7. kubectl delete -f 2-postgres-pg16-init.yaml && kubectl delete job postgres-migrate-pg16
+#   8. Verify, then: kubectl delete pvc postgres-baskervillehall-pvc2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-baskervillehall
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres-baskervillehall
+  template:
+    metadata:
+      labels:
+        app: postgres-baskervillehall
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: postgres-node-73f188
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "postgres"
+          effect: "NoSchedule"
+
+      initContainers:
+        - name: prestart-clean-shm
+          image: busybox:1.36
+          command: ["sh", "-c", "rm -f /dev/shm/PostgreSQL.* || true"]
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: dshm
+
+      volumes:
+        - name: postgres-pv-storage
+          persistentVolumeClaim:
+            claimName: postgres-baskervillehall-pvc-pg16
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-baskervillehall-secret
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "500m"
+              memory: "2Gi"
+
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-pv-storage
+            - mountPath: /dev/shm
+              name: dshm
+
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6

@@ -188,6 +188,7 @@ class BaskervillehallPredictor(object):
             global_allowlist_auth=None,
             origin_ips_url=None,
             origin_ips_auth=None,
+            static_ip_whitelist=None,
             white_list_refresh_period=5,
             bad_bot_challenge=True,
             debug_ip=None,
@@ -311,6 +312,7 @@ class BaskervillehallPredictor(object):
                 global_allowlist_auth=global_allowlist_auth,
                 origin_ips_url=origin_ips_url,
                 origin_ips_auth=origin_ips_auth,
+                static_ip_whitelist=static_ip_whitelist,
                 logger=self.logger,
                 refresh_period_in_seconds=60 * self.white_list_refresh_period,
             )

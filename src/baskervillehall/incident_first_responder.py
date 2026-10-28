@@ -113,7 +113,7 @@ Output format:
   "action": "block_country" | "block_asn" | "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
   "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | ["203.0.113.0/24"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
   "confidence": "high" | "medium" | "low",
-  "ttl_minutes": 30,
+  "ttl_minutes": 60,
   "reasoning": "brief explanation"
 }}
 
@@ -156,7 +156,7 @@ Decision rules (apply in order):
    Always prefer the more precise tool: ASN blocking over country blocking.
 6. Use raise_threshold as a fallback when the attack is diffuse across many sources.
 7. Set confidence=high only when a single pattern dominates (>70% of attack).
-8. ttl_minutes should be 30 unless there is a strong reason to differ.
+8. ttl_minutes should be 60 unless there is a strong reason to differ.
 9. *** ABSOLUTE HARD RULE — NO EXCEPTIONS WHATSOEVER ***
    NEVER put any of the following ASNs in "target", under any circumstances,
    regardless of their attack share percentage:
@@ -180,9 +180,17 @@ Decision rules (apply in order):
 11. For block_asn: only include ASNs that appear in the attack AND have <{max_normal_pct}%
     in the normal traffic baseline. If an ASN has significant normal traffic, skip it.
     Never include more than 3 ASNs in a single block_asn action.
-12. Use block_ua when one or more User Agents account for a large share of the attack AND
-    have <1% in normal traffic. Put the exact UA strings in "target". This works for any UA —
-    scripted (python-requests, curl) or disguised (fake browser strings unique to the attack).
+12. *** block_ua IS THE HIGHEST-PRIORITY SURGICAL ACTION — PREFER IT OVER block_asn ***
+    Use block_ua when one or more User Agents account for >70% of the attack AND the UA
+    has <1% in normal traffic. Put the exact UA strings in "target".
+    *** CRITICAL: block_ua targets the EXACT UA string — it does NOT affect any user with
+    a different UA string. "Mozilla/5.0 Chrome/154.0.0.0" is different from
+    "Mozilla/5.0 Chrome/153.0.0.0". Blocking one exact version has ZERO collateral damage
+    on users of other versions. When UA uniformity >70% with a specific bot UA string,
+    block_ua is always more precise than block_asn.
+    *** When BOTH block_ua AND block_asn are viable, ALWAYS choose block_ua first.
+    Exception: only choose block_asn instead if the attacking UA is a real browser version
+    that also appears in normal traffic (>1%), in which case blocking it WOULD hurt real users.
     Set confidence=high if the top UA alone exceeds {min_attack_pct}% of attack traffic.
 12a. Use challenge_ua (softer than block_ua) if the UA covers >70% of attack traffic but
     appears in normal baseline traffic (>1%) — real users with that UA get a JS challenge
@@ -211,7 +219,7 @@ Output format:
   "action": "block_country" | "block_asn" | "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
   "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | ["203.0.113.0/24"] | ["Mozilla/5.0 (X11; Linux x86_64)..."] | [],
   "confidence": "high" | "medium" | "low",
-  "ttl_minutes": 30,
+  "ttl_minutes": 60,
   "reasoning": "brief explanation"
 }}
 
@@ -238,7 +246,7 @@ AVAILABLE SIGNALS (apply heuristics in this priority order):
    User agents claiming browser versions that are implausibly far ahead of the current stable
    release (more than ~5 major versions ahead), scripted tool signatures (curl/, python-requests/,
    go-http-client/, aiohttp/), or malformed strings are definitive bot evidence regardless of
-   other signals. As of Sep 2026: Chrome stable is ~150, Firefox ~130, Safari ~18.
+   other signals. As of Oct 2026: Chrome stable is ~155, Firefox ~131, Safari ~18.
 
 3. *** COUNTRY CONCENTRATION ***
    If one country covers >80% of spike traffic AND is not the site's survey_country:
@@ -272,14 +280,21 @@ DECISION RULES:
    NEVER include survey_country in "target". survey_country is the site's primary audience.
    If the spike comes from survey_country, use raise_threshold — it may be organic traffic.
 
-8. *** USE block_ua OR challenge_ua when UA dominates the attack ***
-   Use block_ua if: one UA covers >70% of spike traffic AND the UA is either:
-   (a) a scripted tool: curl/, python-requests/, go-http-client/, aiohttp/, wget/, etc.
+8. *** USE block_ua OR challenge_ua when UA dominates the attack — PREFER OVER block_asn ***
+   Use block_ua if: one UA covers >70% of spike traffic AND the UA has <1% in normal traffic.
+   This covers all cases:
+   (a) scripted tools: curl/, python-requests/, go-http-client/, aiohttp/, wget/
    (b) an implausibly future browser version (>5 major versions ahead of current stable)
-   (c) any UA that is absent from or rare in the normal traffic baseline (<1%)
-   block_ua is the most surgical action — ZERO collateral damage on users with different UAs.
+   (c) any specific browser UA string absent from the site's normal traffic baseline
+   *** CRITICAL: block_ua targets the EXACT UA string — it does NOT affect users with any
+   other UA string. "Chrome/154.0.0.0" and "Chrome/153.0.0.0" are DIFFERENT UAs.
+   If the attacking UA is a specific minor-version string (e.g. "Chrome/154.0.7849.46")
+   it will NOT appear in the site's normal baseline — block_ua has ZERO collateral damage.
+   *** When BOTH block_ua AND block_asn are applicable, ALWAYS choose block_ua first.
+   Exception: use block_asn only if the attacking UA also has >1% in normal baseline.
+   block_ua is always more precise and surgical than block_asn.
 
-   Use challenge_ua (softer) instead of block_ua if: one UA covers >70% of spike traffic
+   Use challenge_ua (softer) instead of block_ua ONLY if: one UA covers >70% of spike traffic
    but the UA is a real browser version that also appears in normal traffic (>1% baseline).
    challenge_ua issues a JS challenge — real users pass it, bots without JavaScript fail.
 
@@ -584,7 +599,7 @@ class IncidentFirstResponder:
             self.logger.warning(f"[FIRST_RESPONDER] host_dnet lookup failed for {host}: {e}")
             return '-'
 
-    def _send_subnet_command(self, incident, cidr, command_name, reason):
+    def _send_subnet_command(self, incident, cidr, command_name, reason, ttl_minutes=None):
         """Send a single block_subnet or challenge_subnet command for an IPv4 CIDR (e.g. 1.2.3.0/24)."""
         if self._producer is None and self._producer_output is None:
             self.logger.warning(f"[CLUSTER_RESPONDER] No Kafka producer — {command_name} skipped")
@@ -592,6 +607,7 @@ class IncidentFirstResponder:
         host = incident['host']
         dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
+        ttl_sec = (ttl_minutes if ttl_minutes is not None else self.ttl_minutes) * 60
         command = {
             'Name': command_name,
             'value': cidr,
@@ -599,7 +615,7 @@ class IncidentFirstResponder:
             'dnet': dnet,
             'source': meta,
             'meta': meta,
-            'ttl': self.ttl_minutes * 60,
+            'ttl': ttl_sec,
         }
         encoded = json.dumps(command).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
@@ -615,7 +631,7 @@ class IncidentFirstResponder:
         if self._producer_output is not None:
             self._producer_output.flush()
         self.logger.warning(
-            f"[CLUSTER_RESPONDER] {command_name} sent: cidr={cidr} host={host} ttl={self.ttl_minutes * 60}s reason={reason}"
+            f"[CLUSTER_RESPONDER] {command_name} sent: cidr={cidr} host={host} ttl={ttl_sec}s reason={reason}"
         )
 
     def _send_ip_commands(self, incident, ips, command_name, reason):
@@ -724,12 +740,14 @@ class IncidentFirstResponder:
         if action == 'block_subnet':
             targets = rec.get('target') or []
             dnet = self._get_host_dnet(conn, host) if conn is not None else '-'
+            ttl_override = rec.get('ttl_minutes', self.ttl_minutes)
             for cidr in targets:
                 self._send_subnet_command(
                     incident={'host': host, '_dnet': dnet},
                     cidr=cidr,
                     command_name='block_subnet',
                     reason=f'incident_id={incident_id} llm_decision',
+                    ttl_minutes=ttl_override,
                 )
             return
         if action not in ('block_ua', 'challenge_ua'):
@@ -812,44 +830,6 @@ class IncidentFirstResponder:
         pct = counts[top] * 100.0 / len(ips)
         return top, pct, len(ips)
 
-    def _get_all_subnet_ips(self, conn, host, subnet_prefix, hours=4):
-        """Return all distinct IPs from subnet_prefix.x attacking host in recent cluster incidents."""
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT DISTINCT ii.ip
-                FROM incident_ips ii
-                JOIN incidents i ON i.id = ii.incident_id
-                WHERE i.host = %s
-                  AND i.source = 'cluster_analysis'
-                  AND ii.ip LIKE %s
-                  AND i.started_at >= NOW() - INTERVAL '1 hour' * %s
-            """, (host, subnet_prefix + '.%', hours))
-            return [r[0] for r in cur.fetchall()]
-
-    def _get_asn_for_subnet(self, conn, host, ips):
-        """Look up ASN name for IPs from sessions table. Returns list of ASN names (best-effort)."""
-        if not ips:
-            return []
-        sample = ips[:30]
-        placeholders = ','.join(['%s'] * len(sample))
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f"""
-                    SELECT datacenter_asn, COUNT(*) AS n
-                    FROM sessions
-                    WHERE ip IN ({placeholders})
-                      AND host_name = %s
-                      AND datacenter_asn IS NOT NULL
-                      AND datacenter_asn != ''
-                    GROUP BY datacenter_asn
-                    ORDER BY n DESC
-                    LIMIT 3
-                """, sample + [host])
-                rows = cur.fetchall()
-            return [r[0] for r in rows]
-        except Exception as e:
-            self.logger.debug(f"[CLUSTER_RESPONDER] ASN lookup from sessions failed: {e}")
-            return []
 
     def _apply_block_criterion(self, conn, incident, criterion):
         """Apply one blocking criterion from cluster_analysis incident.
@@ -1090,10 +1070,10 @@ class IncidentFirstResponder:
                         SELECT 1 FROM first_responder_actions
                         WHERE host = %s
                           AND action = 'block_subnet'
-                          AND target::text LIKE %s
+                          AND target @> %s::jsonb
                           AND expires_at > NOW()
                         LIMIT 1
-                    """, (host, f'%{subnet_prefix}%'))
+                    """, (host, json.dumps([cidr])))
                     already_blocked = cur.fetchone() is not None
 
                 if not already_blocked:
