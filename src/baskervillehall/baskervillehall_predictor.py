@@ -46,6 +46,8 @@ CLUSTER_BUFFER_MAXLEN = 500     # max sessions kept per host
 CLUSTER_IP_CONCENTRATION = 0.50     # single IP fraction → UA-rotation scraper detection
 CLUSTER_SUBNET_CONCENTRATION = 0.70 # single /24 subnet fraction → scraper detection
 CLUSTER_SUBNET16_CONCENTRATION = 0.70 # single /16 subnet fraction → distributed scraper detection
+CLUSTER_CONCENTRATION_MIN_UAS = 3     # distinct UAs needed to block (not challenge) a concentrated IP/subnet —
+                                      # an editor on a low-traffic site has 1–2 UAs, a UA-rotation scraper has many
 CLUSTER_MIN_SESSIONS = 30           # minimum cluster size before concentration checks fire
 
 
@@ -995,20 +997,30 @@ Reply JSON only, no markdown:
         # IP concentration — if a single IP or /24 subnet generates the majority of sessions,
         # block it directly regardless of UA/fingerprint diversity. This catches UA-rotation
         # scrapers that evade uniformity scoring by spoofing many different browser versions.
+        # Block only on evidence of UA rotation; otherwise challenge. On a low-traffic site a
+        # single editor easily produces 50% of sessions, and block_ip is global in banjax.
+        def _concentration_action(target_ips, block_confidence):
+            target = set(target_ips)
+            n_uas = len({s['ua'] for s in sessions if s.get('ip') in target and s.get('ua')})
+            if n_uas >= CLUSTER_CONCENTRATION_MIN_UAS:
+                return 'block', block_confidence, n_uas
+            return 'challenge', 'medium', n_uas
+
         ip_list_all = [s['ip'] for s in sessions if s.get('ip')]
         if ip_list_all and len(ip_list_all) >= CLUSTER_MIN_SESSIONS:
             ip_counts = Counter(ip_list_all)
             top_ip, top_ip_count = ip_counts.most_common(1)[0]
             ip_concentration = top_ip_count / len(ip_list_all)
             if ip_concentration >= CLUSTER_IP_CONCENTRATION:
-                # Single IP dominates → block it directly
+                # Single IP dominates → block if it rotates UAs, else challenge
                 if top_ip not in hard_bot_ips and top_ip not in soft_bot_ips:
+                    action, confidence, n_uas = _concentration_action([top_ip], 'high')
                     criteria.append({
                         'type': 'ip_list',
-                        'action': 'block',
+                        'action': action,
                         'ips': [top_ip],
-                        'reason': f'ip_concentration={ip_concentration:.0%} (single IP dominates cluster)',
-                        'confidence': 'high',
+                        'reason': f'ip_concentration={ip_concentration:.0%} uas={n_uas} (single IP dominates cluster)',
+                        'confidence': confidence,
                     })
             else:
                 subnet_counts = Counter('.'.join(ip.split('.')[:3]) for ip in ip_list_all)
@@ -1019,12 +1031,13 @@ Reply JSON only, no markdown:
                     subnet_ips = [ip for ip in ip_counts if ip.startswith(top_subnet + '.')
                                   and ip not in hard_bot_ips and ip not in soft_bot_ips]
                     if subnet_ips:
+                        action, confidence, n_uas = _concentration_action(subnet_ips, 'high')
                         criteria.append({
                             'type': 'ip_list',
-                            'action': 'block',
+                            'action': action,
                             'ips': subnet_ips,
-                            'reason': f'subnet_concentration={subnet_concentration:.0%} ({top_subnet}.x dominates cluster)',
-                            'confidence': 'high',
+                            'reason': f'subnet_concentration={subnet_concentration:.0%} uas={n_uas} ({top_subnet}.x dominates cluster)',
+                            'confidence': confidence,
                         })
                 else:
                     # /16 subnet — catches distributed scrapers rotating across multiple /24s
@@ -1035,12 +1048,13 @@ Reply JSON only, no markdown:
                         subnet16_ips = [ip for ip in ip_counts if ip.startswith(top_subnet16 + '.')
                                         and ip not in hard_bot_ips and ip not in soft_bot_ips]
                         if subnet16_ips:
+                            action, confidence, n_uas = _concentration_action(subnet16_ips, 'medium')
                             criteria.append({
                                 'type': 'ip_list',
-                                'action': 'block',
+                                'action': action,
                                 'ips': subnet16_ips,
-                                'reason': f'subnet16_concentration={subnet16_concentration:.0%} ({top_subnet16}.x.x dominates cluster)',
-                                'confidence': 'medium',
+                                'reason': f'subnet16_concentration={subnet16_concentration:.0%} uas={n_uas} ({top_subnet16}.x.x dominates cluster)',
+                                'confidence': confidence,
                             })
 
         # UA — two tiers:
@@ -1216,6 +1230,25 @@ Reply JSON only, no markdown:
     # ------------------------------------------------------------------
     # Cluster analysis — uniformity scoring
     # ------------------------------------------------------------------
+
+    def _add_to_cluster_buffer(self, buf: deque, index: Dict[str, dict], session: dict):
+        """Append session features to buf, or update the existing entry for the same session_id."""
+        entry = self._extract_cluster_features(session)
+        session_id = session.get('session_id')
+        if not session_id or session_id == '-':
+            buf.append(entry)
+            return
+        existing = index.get(session_id)
+        if existing is not None:
+            existing.update(entry)
+            return
+        buf.append(entry)
+        index[session_id] = entry
+        # Drop ids of entries evicted by deque maxlen
+        if len(index) > 2 * CLUSTER_BUFFER_MAXLEN:
+            live = {id(e) for e in buf}
+            for sid in [sid for sid, e in index.items() if id(e) not in live]:
+                del index[sid]
 
     def _extract_cluster_features(self, session: dict) -> dict:
         """Extract lightweight per-session data for cluster_buffer."""
@@ -2780,6 +2813,9 @@ Reply JSON only, no markdown:
 
         # Cluster analysis — uniformity scoring + LLM incident creation
         cluster_buffer: Dict[str, deque] = defaultdict(lambda: deque(maxlen=CLUSTER_BUFFER_MAXLEN))
+        # session_id → buffer entry, so repeated updates of one session replace it in place
+        # instead of being counted as new sessions (inflated ip_concentration for editors).
+        cluster_buffer_index: Dict[str, Dict[str, dict]] = defaultdict(dict)
         cluster_alerts: TTLCache = TTLCache(maxsize=500, ttl=600)  # TTL 10 min
         cluster_check_ts: Dict[str, datetime] = {}
         cluster_llm_ts: Dict[str, datetime] = {}
@@ -2875,7 +2911,8 @@ Reply JSON only, no markdown:
                         if (not session.get('verified_bot', False)
                                 and not session.get('verified_ai_bot', False)
                                 and not session.get('ai_spoofer', False)):
-                            cluster_buffer[host].append(self._extract_cluster_features(session))
+                            self._add_to_cluster_buffer(
+                                cluster_buffer[host], cluster_buffer_index[host], session)
                         batch[(host, human)].append(session)
                         predicting_total += 1
 
