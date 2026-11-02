@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -75,6 +76,27 @@ def is_protected_ua(ua: str, host: str = '') -> bool:
         site = site[4:] if site.startswith('www.') else site
         return site in ua_lower
     return False
+
+# A UA that looks like an ordinary browser is shared by many real people: Chrome/156 on
+# Windows is the most common UA on the internet. Blocking it by UA blocks the site's readers
+# and editors along with the bots (the session pipeline turns every match into a block_ip,
+# and block_ip is global across Deflect sites).
+_BROWSER_ENGINE_RE = re.compile(r'(Chrome|CriOS|Firefox|FxiOS|Version|Edg|OPR)/\d')
+_NON_BROWSER_RE = re.compile(
+    r'bot|crawl|spider|slurp|headless|lighthouse|compatible;|https?://|python|curl|wget',
+    re.IGNORECASE,
+)
+
+
+def is_browser_ua(ua: str) -> bool:
+    """True if the UA looks like a real desktop/mobile browser rather than a tool or crawler."""
+    return (
+        ua.startswith('Mozilla/5.0 (')
+        and ('Safari/' in ua or 'Gecko/' in ua)
+        and bool(_BROWSER_ENGINE_RE.search(ua))
+        and not _NON_BROWSER_RE.search(ua)
+    )
+
 
 # Deflect's own block page — requests to it are the result of our blocks, not probing.
 DEFLECT_BLOCK_PAGE = '/403.html'
@@ -802,9 +824,9 @@ class IncidentFirstResponder:
             return
         targets = rec.get('target') or []
         for ua in targets:
-            if is_protected_ua(ua, host):
+            if is_protected_ua(ua, host) or is_browser_ua(ua):
                 self.logger.warning(
-                    f"[FIRST_RESPONDER] Skipping {action} for protected UA: {ua!r}"
+                    f"[FIRST_RESPONDER] Skipping {action} for protected or browser UA: {ua!r}"
                 )
                 continue
             self._send_banjax_command(
@@ -1836,15 +1858,34 @@ class IncidentFirstResponder:
                 f' [auto-removed {len(protected)} protected service UA(s): never block]'
             )
             resolved = [ua for ua in resolved if ua not in protected]
+        browser = [ua for ua in resolved if is_browser_ua(ua)]
+        if browser:
+            self.logger.warning(
+                f"[FIRST_RESPONDER] Dropping {rec['action']} for browser UA(s) host={host}: {browser}"
+            )
+            resolved = [ua for ua in resolved if ua not in browser]
         rec['target'] = list(dict.fromkeys(resolved))
         if dropped:
             rec['reasoning'] = (
                 rec.get('reasoning', '') +
                 f' [auto-removed {len(dropped)} UA target(s) not matching exactly one full incident UA]'
             )
-        if not rec['target']:
+        if not rec['target'] and browser:
+            # The attack hides behind real-browser UAs: challenge the site instead —
+            # people pass the JS challenge, 1-request bots don't.
+            rec['action'] = 'challenge_all'
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [auto-changed to challenge_all: {len(browser)} browser UA(s) are shared by real users]'
+            )
+        elif not rec['target']:
             rec['action'] = 'monitor_only'
             rec['confidence'] = 'low'
+        elif browser:
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [auto-removed {len(browser)} browser UA(s): shared by real users]'
+            )
         return rec
 
     def _sanitize_response(self, rec, survey_country=None, normal_traffic=None):

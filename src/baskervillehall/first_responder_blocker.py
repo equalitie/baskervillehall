@@ -83,8 +83,10 @@ class FirstResponderBlocker:
                 if host in seen_hosts:
                     continue  # take the most recent action per host
                 seen_hosts.add(host)  # mark as seen regardless of action type
-                # monitor_only / raise_threshold cancel any previous block action
-                if action not in ('block_asn', 'block_country', 'block_ua'):
+                # monitor_only / raise_threshold cancel any previous block action.
+                # block_ua is enforced natively by banjax (sent by first_responder, host-scoped);
+                # turning UA matches into block_ip here would block those IPs on every site.
+                if action not in ('block_asn', 'block_country'):
                     continue
                 targets = {t.strip() for t in (target_str or '').split('|') if t.strip()}
                 if targets:

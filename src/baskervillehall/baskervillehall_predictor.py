@@ -442,7 +442,8 @@ class BaskervillehallPredictor(object):
             new_responder = {}
             for host, action, target_str in action_rows:
                 if host not in new_responder:  # keep most recent per host
-                    if action not in ('block_asn', 'block_country', 'block_ua'):
+                    # block_ua is enforced natively by banjax; block_ip here would be global
+                    if action not in ('block_asn', 'block_country'):
                         continue
                     targets = {t.strip() for t in target_str.split('|') if t.strip()}
                     new_responder[host] = {'action': action, 'target': targets}
