@@ -98,6 +98,13 @@ def is_browser_ua(ua: str) -> bool:
     )
 
 
+# A browser UA is blocked only together with the attack's TLS fingerprints
+# (first_responder_blocker matches both). A fingerprint counts as the attack's if it covers
+# at least this share of the incident's fingerprinted traffic.
+UA_FINGERPRINT_MIN_PCT = 20.0
+UA_FINGERPRINT_MAX = 3
+FINGERPRINT_TARGET_PREFIX = 'fp:'
+
 # Deflect's own block page — requests to it are the result of our blocks, not probing.
 DEFLECT_BLOCK_PAGE = '/403.html'
 
@@ -820,9 +827,14 @@ class IncidentFirstResponder:
                     ttl_minutes=ttl_override,
                 )
             return
-        if action not in ('block_ua', 'challenge_ua'):
+        if action == 'block_ua_fingerprint':
+            # Browser UAs (and fp: targets) are enforced by first_responder_blocker as
+            # UA + fingerprint; only tool/bot UAs go to banjax as native block_ua.
+            action = 'block_ua'
+        elif action not in ('block_ua', 'challenge_ua'):
             return
-        targets = rec.get('target') or []
+        targets = [t for t in rec.get('target') or []
+                   if not t.startswith(FINGERPRINT_TARGET_PREFIX)]
         for ua in targets:
             if is_protected_ua(ua, host) or is_browser_ua(ua):
                 self.logger.warning(
@@ -1823,13 +1835,18 @@ class IncidentFirstResponder:
             rec['reasoning'] = rec.get('reasoning', '') + f' [auto-downgraded: {reason}]'
         return rec
 
-    def _resolve_ua_targets(self, rec, ua_stats, host=''):
+    def _resolve_ua_targets(self, rec, ua_stats, host='', fingerprint_stats=None):
         """Map block_ua / challenge_ua targets to full UA strings from the incident.
 
         Banjax matches UAs exactly, so a shortened UA blocks nothing. A target that is a prefix
         of exactly one incident UA is expanded to it. Ambiguous prefixes (e.g. the generic
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)")
         and unknown strings are dropped.
+
+        A browser UA is shared by real users, so block_ua on it becomes block_ua_fingerprint:
+        only requests with that UA AND one of the attack's dominant TLS fingerprints are blocked.
+        Without a dominant fingerprint the browser UA is dropped; if nothing is left, the site
+        gets challenge_all instead.
         """
         if rec.get('action') not in ('block_ua', 'challenge_ua'):
             return rec
@@ -1859,6 +1876,24 @@ class IncidentFirstResponder:
             )
             resolved = [ua for ua in resolved if ua not in protected]
         browser = [ua for ua in resolved if is_browser_ua(ua)]
+        attack_fps = [
+            s['fingerprint'] for s in fingerprint_stats or []
+            if s.get('fingerprint') and s.get('pct', 0) >= UA_FINGERPRINT_MIN_PCT
+        ][:UA_FINGERPRINT_MAX]
+        if browser and attack_fps and rec['action'] == 'block_ua':
+            rec['action'] = 'block_ua_fingerprint'
+            rec['target'] = list(dict.fromkeys(resolved)) + [
+                FINGERPRINT_TARGET_PREFIX + fp for fp in attack_fps
+            ]
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [browser UA(s) blocked only with attack fingerprint(s) {attack_fps}]'
+            )
+            if dropped:
+                rec['reasoning'] += (
+                    f' [auto-removed {len(dropped)} UA target(s) not matching exactly one full incident UA]'
+                )
+            return rec
         if browser:
             self.logger.warning(
                 f"[FIRST_RESPONDER] Dropping {rec['action']} for browser UA(s) host={host}: {browser}"
@@ -2237,7 +2272,8 @@ class IncidentFirstResponder:
                         cur.execute("""
                             SELECT action FROM first_responder_actions
                             WHERE incident_id = %s
-                              AND action IN ('block_country', 'block_asn', 'block_ua')
+                              AND action IN ('block_country', 'block_asn', 'block_ua',
+                                             'block_ua_fingerprint')
                             ORDER BY created_at DESC LIMIT 1
                         """, (incident_id,))
                         existing_block = cur.fetchone()
@@ -2416,7 +2452,7 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
-        rec = self._resolve_ua_targets(rec, ua_stats, host)
+        rec = self._resolve_ua_targets(rec, ua_stats, host, fingerprint_stats)
         rec = self._enforce_consistency(rec, active_actions)
         self._llm_last_action[host] = rec.get('action', '')
         self._save_action(conn, incident_id, host, rec)
@@ -2602,7 +2638,7 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
-        rec = self._resolve_ua_targets(rec, ua_stats, host)
+        rec = self._resolve_ua_targets(rec, ua_stats, host, fingerprint_stats)
         rec = self._enforce_consistency(rec, active_actions)
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)

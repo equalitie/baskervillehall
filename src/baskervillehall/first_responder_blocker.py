@@ -7,6 +7,8 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaProducer
 
+from baskervillehall.incident_first_responder import FINGERPRINT_TARGET_PREFIX
+
 
 class FirstResponderBlocker:
     """
@@ -86,11 +88,18 @@ class FirstResponderBlocker:
                 # monitor_only / raise_threshold cancel any previous block action.
                 # block_ua is enforced natively by banjax (sent by first_responder, host-scoped);
                 # turning UA matches into block_ip here would block those IPs on every site.
-                if action not in ('block_asn', 'block_country'):
+                # block_ua_fingerprint: browser UAs, blocked only with the attack's fingerprints.
+                if action not in ('block_asn', 'block_country', 'block_ua_fingerprint'):
                     continue
                 targets = {t.strip() for t in (target_str or '').split('|') if t.strip()}
+                fingerprints = {t[len(FINGERPRINT_TARGET_PREFIX):] for t in targets
+                                if t.startswith(FINGERPRINT_TARGET_PREFIX)}
+                targets -= {FINGERPRINT_TARGET_PREFIX + fp for fp in fingerprints}
+                if action == 'block_ua_fingerprint' and not fingerprints:
+                    continue
                 if targets:
-                    new_actions[host] = {'action': action, 'target': targets}
+                    new_actions[host] = {'action': action, 'target': targets,
+                                         'fingerprints': fingerprints}
 
             if new_actions != self._actions:
                 if new_actions:
@@ -153,9 +162,9 @@ class FirstResponderBlocker:
         target = ra['target']
         hit = False
 
-        if action == 'block_ua':
-            # UA matching: exact string match against target list
-            if ua and ua in target:
+        if action == 'block_ua_fingerprint':
+            # Browser UA shared by real users: block only together with the attack's fingerprint
+            if ua and ua in target and fingerprint and fingerprint in ra['fingerprints']:
                 hit = True
         else:
             # Survey-country protection: never block the site's primary audience
