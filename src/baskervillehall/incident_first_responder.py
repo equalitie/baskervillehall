@@ -43,9 +43,38 @@ PROTECTED_ASNS = {
 
 # UA substrings (case-insensitive) that must never be blocked or challenged.
 # Yandex is a legitimate search engine — blocking its UA causes search ranking damage.
+# Deflect's own health check, uptime monitors, Facebook link previews and the WP Rocket cache
+# preloader are service traffic: absence from the baseline does not make blocking them harmless.
 PROTECTED_UA_PATTERNS = {
     "yandex",
+    "deflecthealthcheck",
+    "projectshield",
+    "uptimerobot",
+    "uptime-kuma",
+    "sentryuptimebot",
+    "digitalocean uptime probe",
+    "siteuptime",
+    "whatap url monitoring",
+    "check_http/",
+    "facebookexternalhit",
+    "wp rocket",
 }
+
+
+def is_protected_ua(ua: str, host: str = '') -> bool:
+    """True if the UA must never be blocked or challenged on this host.
+
+    WordPress UAs are protected only for the site's requests to itself
+    ("WordPress/6.x; https://<host>"): pingback floods use the same UA from other sites.
+    """
+    ua_lower = ua.lower()
+    if any(p in ua_lower for p in PROTECTED_UA_PATTERNS):
+        return True
+    if host and ua_lower.startswith('wordpress/'):
+        site = host.lower()
+        site = site[4:] if site.startswith('www.') else site
+        return site in ua_lower
+    return False
 
 CREATE_FIRST_RESPONDER_TABLES_SQL = """
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS first_responder_processed BOOLEAN DEFAULT FALSE;
@@ -244,11 +273,11 @@ AVAILABLE SIGNALS (apply heuristics in this priority order):
    off sharply. A flat uniform distribution across several UAs is statistically impossible
    organically. The prompt will flag this with "UA distribution is SUSPICIOUSLY UNIFORM".
    Treat this as equivalent to a single-UA bot signal.
-   *** FAKE OR IMPOSSIBLE UA — CONCLUSIVE SIGNAL ***
-   User agents claiming browser versions that are implausibly far ahead of the current stable
-   release (more than ~5 major versions ahead), scripted tool signatures (curl/, python-requests/,
-   go-http-client/, aiohttp/), or malformed strings are definitive bot evidence regardless of
-   other signals. As of Oct 2026: Chrome stable is ~155, Firefox ~131, Safari ~18.
+   *** SCRIPTED OR MALFORMED UA — CONCLUSIVE SIGNAL ***
+   Scripted tool signatures (curl/, python-requests/, go-http-client/, aiohttp/) or malformed
+   strings are definitive bot evidence regardless of other signals.
+   Do NOT judge a browser version as fake or impossible — your knowledge of current browser
+   versions is outdated. A high version number is never evidence of a bot.
 
 3. *** COUNTRY CONCENTRATION ***
    If one country covers >80% of spike traffic AND is not the site's survey_country:
@@ -288,8 +317,7 @@ DECISION RULES:
    the version or edit it. Banjax matches the full string; a partial UA matches nothing.
    This covers all cases:
    (a) scripted tools: curl/, python-requests/, go-http-client/, aiohttp/, wget/
-   (b) an implausibly future browser version (>5 major versions ahead of current stable)
-   (c) any specific browser UA string absent from the site's normal traffic baseline
+   (b) any specific browser UA string absent from the site's normal traffic baseline
    *** CRITICAL: block_ua targets the EXACT UA string — it does NOT affect users with any
    other UA string. "Chrome/154.0.0.0" and "Chrome/153.0.0.0" are DIFFERENT UAs.
    If the attacking UA is a specific minor-version string (e.g. "Chrome/154.0.7849.46")
@@ -758,7 +786,7 @@ class IncidentFirstResponder:
             return
         targets = rec.get('target') or []
         for ua in targets:
-            if any(p in ua.lower() for p in PROTECTED_UA_PATTERNS):
+            if is_protected_ua(ua, host):
                 self.logger.warning(
                     f"[FIRST_RESPONDER] Skipping {action} for protected UA: {ua!r}"
                 )
@@ -894,6 +922,11 @@ class IncidentFirstResponder:
             pct = criterion.get('pct', 0.0)
             is_scripted = criterion.get('is_scripted', False)
             if not ua:
+                return
+            if is_protected_ua(ua, host):
+                self.logger.warning(
+                    f"[CLUSTER_RESPONDER] Skipping ua_exact for protected UA host={host}: {ua!r}"
+                )
                 return
             command_name = 'block_ip' if action == 'block' else 'challenge_ip'
             # Step 1: act on current cluster IPs immediately via banjax
@@ -1725,7 +1758,7 @@ class IncidentFirstResponder:
             return False
         return True
 
-    def _resolve_ua_targets(self, rec, ua_stats):
+    def _resolve_ua_targets(self, rec, ua_stats, host=''):
         """Map block_ua / challenge_ua targets to full UA strings from the incident.
 
         Banjax matches UAs exactly, so a shortened UA blocks nothing. A target that is a prefix
@@ -1750,6 +1783,16 @@ class IncidentFirstResponder:
                     f"[FIRST_RESPONDER] Dropping {rec['action']} target {target!r} — "
                     f"matches {len(matches)} incident UAs (need exactly one)"
                 )
+        protected = [ua for ua in resolved if is_protected_ua(ua, host)]
+        if protected:
+            self.logger.warning(
+                f"[FIRST_RESPONDER] Dropping {rec['action']} for protected UA(s) host={host}: {protected}"
+            )
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [auto-removed {len(protected)} protected service UA(s): never block]'
+            )
+            resolved = [ua for ua in resolved if ua not in protected]
         rec['target'] = list(dict.fromkeys(resolved))
         if dropped:
             rec['reasoning'] = (
@@ -2288,7 +2331,7 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
-        rec = self._resolve_ua_targets(rec, ua_stats)
+        rec = self._resolve_ua_targets(rec, ua_stats, host)
         self._llm_last_action[host] = rec.get('action', '')
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
@@ -2470,7 +2513,7 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
-        rec = self._resolve_ua_targets(rec, ua_stats)
+        rec = self._resolve_ua_targets(rec, ua_stats, host)
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
