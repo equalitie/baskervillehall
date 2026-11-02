@@ -77,7 +77,6 @@ class FirstResponderBlocker:
                     ORDER BY created_at DESC
                 """)
                 rows = cur.fetchall()
-            conn.close()
 
             new_actions: dict = {}
             seen_hosts: set = set()
@@ -119,6 +118,7 @@ class FirstResponderBlocker:
                     WHERE expires_at > NOW()
                 """)
                 fp_rows = cur.fetchall()
+            conn.close()
 
             new_fingerprints: dict = {}
             for host, fp in fp_rows:
