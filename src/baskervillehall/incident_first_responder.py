@@ -449,6 +449,7 @@ class IncidentFirstResponder:
             dnet_partition_map=None,
             fingerprint_min_pct=40.0,
             fingerprint_max_ips=500,
+            fingerprint_block_enabled=False,
             host_whitelist=None,
             min_traffic_peak_count=50,
             min_traffic_peak_req_min=50,
@@ -479,6 +480,10 @@ class IncidentFirstResponder:
         self.host_whitelist = set(h.strip() for h in (host_whitelist or []) if h.strip())
         self.fingerprint_min_pct = fingerprint_min_pct
         self.fingerprint_max_ips = fingerprint_max_ips
+        # Blocking by a TLS fingerprint alone (no UA) is off: a common browser's fingerprint is
+        # shared by many real users and every match becomes a global block_ip.
+        # Browser UA + fingerprint (block_ua_fingerprint) is not affected.
+        self.fingerprint_block_enabled = fingerprint_block_enabled
         self.min_traffic_peak_count = min_traffic_peak_count
         self.min_traffic_peak_req_min = min_traffic_peak_req_min
         self.min_traffic_peak_req_min_multiplier = min_traffic_peak_req_min_multiplier
@@ -930,6 +935,11 @@ class IncidentFirstResponder:
             ips = criterion.get('ips', [])
             pct = criterion.get('pct', 0.0)
             if not fp:
+                return
+            if not self.fingerprint_block_enabled:
+                self.logger.info(
+                    f"[CLUSTER_RESPONDER] fingerprint-only blocking disabled, skipping fp={fp} host={host}"
+                )
                 return
             command_name = 'block_ip' if action == 'block' else 'challenge_ip'
             if ips:
@@ -1535,8 +1545,9 @@ class IncidentFirstResponder:
             if top_pct >= self.fingerprint_min_pct:
                 lines.append(
                     f"  ⚠ Single fingerprint covers {top_pct:.1f}% of attack sessions — "
-                    f"same tool/library across all IPs. IPs with this fingerprint will be "
-                    f"blocked directly (separate from this LLM decision)."
+                    f"same tool/library across all IPs."
+                    + (" IPs with this fingerprint will be blocked directly "
+                       "(separate from this LLM decision)." if self.fingerprint_block_enabled else "")
                 )
 
         lines.append(
@@ -2018,8 +2029,7 @@ class IncidentFirstResponder:
             rec['reasoning'] = (
                 rec.get('reasoning', '') +
                 ' [auto-downgraded: all targets were protected infrastructure ASNs — '
-                'attack routes through cloud provider IPs that cannot be blocked. '
-                'Fingerprint blocking active if TLS uniformity >= 70%.]'
+                'attack routes through cloud provider IPs that cannot be blocked.]'
             )
         else:
             rec['target'] = filtered
@@ -2476,7 +2486,7 @@ class IncidentFirstResponder:
                 )
 
         # Block dominant fingerprints directly in predictor (for long sessions via protected ASNs)
-        if fingerprint_stats:
+        if fingerprint_stats and self.fingerprint_block_enabled:
             for fp_stat in fingerprint_stats:
                 fp_hash = fp_stat.get('fingerprint', '')
                 fp_pct = fp_stat.get('pct', 0.0)
@@ -2598,7 +2608,8 @@ class IncidentFirstResponder:
             return
 
         # Fingerprint blocking: if one fingerprint dominates, block known IPs directly
-        if fingerprint_stats and fingerprint_stats[0]['pct'] >= self.fingerprint_min_pct:
+        if self.fingerprint_block_enabled and fingerprint_stats \
+                and fingerprint_stats[0]['pct'] >= self.fingerprint_min_pct:
             dominant_fp = fingerprint_stats[0]['fingerprint']
             self.logger.warning(
                 f"[FIRST_RESPONDER] incident_id={incident_id} host={host} "

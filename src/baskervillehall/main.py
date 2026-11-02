@@ -236,6 +236,8 @@ def main():
             dnet_partition_map=json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
             fingerprint_min_pct=float(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MIN_PCT', '40.0')),
             fingerprint_max_ips=int(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MAX_IPS', '500')),
+            fingerprint_block_enabled=os.environ.get(
+                'FIRST_RESPONDER_FINGERPRINT_BLOCK_ENABLED', 'false').lower() == 'true',
             host_whitelist=[h for h in os.environ.get('FIRST_RESPONDER_HOST_WHITELIST', '').split(',') if h.strip()],
             min_traffic_peak_count=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_COUNT', '50')),
             min_traffic_peak_req_min=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN', '50')),
