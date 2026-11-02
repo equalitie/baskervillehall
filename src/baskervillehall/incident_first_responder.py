@@ -183,6 +183,8 @@ Decision rules (apply in order):
 12. *** block_ua IS THE HIGHEST-PRIORITY SURGICAL ACTION — PREFER IT OVER block_asn ***
     Use block_ua when one or more User Agents account for >70% of the attack AND the UA
     has <1% in normal traffic. Put the exact UA strings in "target".
+    *** Copy each UA COMPLETELY and EXACTLY as shown between the quotes — never shorten, trim
+    the version or edit it. Banjax matches the full string; a partial UA matches nothing.
     *** CRITICAL: block_ua targets the EXACT UA string — it does NOT affect any user with
     a different UA string. "Mozilla/5.0 Chrome/154.0.0.0" is different from
     "Mozilla/5.0 Chrome/153.0.0.0". Blocking one exact version has ZERO collateral damage
@@ -282,6 +284,8 @@ DECISION RULES:
 
 8. *** USE block_ua OR challenge_ua when UA dominates the attack — PREFER OVER block_asn ***
    Use block_ua if: one UA covers >70% of spike traffic AND the UA has <1% in normal traffic.
+   *** Copy each UA COMPLETELY and EXACTLY as shown between the quotes — never shorten, trim
+   the version or edit it. Banjax matches the full string; a partial UA matches nothing.
    This covers all cases:
    (a) scripted tools: curl/, python-requests/, go-http-client/, aiohttp/, wget/
    (b) an implausibly future browser version (>5 major versions ahead of current stable)
@@ -1432,7 +1436,7 @@ class IncidentFirstResponder:
                 tag = self._classify_ua(s['ua'])
                 tag_str = f"  {tag}" if tag else ""
                 lines.append(
-                    f"  {s['ua'][:60]:60s}  attack: {s['pct']:5.1f}%  "
+                    f"  \"{s['ua']}\"  attack: {s['pct']:5.1f}%  "
                     f"normal traffic: {normal_pct:.1f}%{tag_str}"
                 )
         else:
@@ -1721,6 +1725,42 @@ class IncidentFirstResponder:
             return False
         return True
 
+    def _resolve_ua_targets(self, rec, ua_stats):
+        """Map block_ua / challenge_ua targets to full UA strings from the incident.
+
+        Banjax matches UAs exactly, so a shortened UA blocks nothing. A target that is a prefix
+        of exactly one incident UA is expanded to it. Ambiguous prefixes (e.g. the generic
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)")
+        and unknown strings are dropped.
+        """
+        if rec.get('action') not in ('block_ua', 'challenge_ua'):
+            return rec
+        known = [s['ua'] for s in ua_stats or [] if s.get('ua')]
+        resolved, dropped = [], []
+        for target in rec.get('target', []):
+            if target in known:
+                resolved.append(target)
+                continue
+            matches = [ua for ua in known if ua.startswith(target)]
+            if len(matches) == 1:
+                resolved.append(matches[0])
+            else:
+                dropped.append(target)
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] Dropping {rec['action']} target {target!r} — "
+                    f"matches {len(matches)} incident UAs (need exactly one)"
+                )
+        rec['target'] = list(dict.fromkeys(resolved))
+        if dropped:
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [auto-removed {len(dropped)} UA target(s) not matching exactly one full incident UA]'
+            )
+        if not rec['target']:
+            rec['action'] = 'monitor_only'
+            rec['confidence'] = 'low'
+        return rec
+
     def _sanitize_response(self, rec, survey_country=None, normal_traffic=None):
         """
         - Remove protected ASNs from block_asn targets.
@@ -1932,7 +1972,7 @@ class IncidentFirstResponder:
                 tag = self._classify_ua(s['ua'])
                 tag_str = f"  {tag}" if tag else ""
                 lines.append(
-                    f"  {s['ua'][:70]:70s}  {s['pct']:5.1f}%{tag_str}"
+                    f"  \"{s['ua']}\"  {s['pct']:5.1f}%{tag_str}"
                 )
         else:
             lines.append("  (no UA data — all requests were 1-hit sessions not sent to predictor)")
@@ -2248,6 +2288,7 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
+        rec = self._resolve_ua_targets(rec, ua_stats)
         self._llm_last_action[host] = rec.get('action', '')
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
@@ -2429,6 +2470,7 @@ class IncidentFirstResponder:
             survey_country=incident.get('survey_country'),
             normal_traffic=normal_traffic,
         )
+        rec = self._resolve_ua_targets(rec, ua_stats)
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
