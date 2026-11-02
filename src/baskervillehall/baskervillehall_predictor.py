@@ -1255,7 +1255,8 @@ Reply JSON only, no markdown:
         requests = session.get('requests', [])
         sorted_reqs = sorted(requests, key=lambda x: x.get('ts', ''))[:20]
 
-        url_paths = [r.get('url', '/') for r in sorted_reqs[:10]]
+        # /403.html is Deflect's own block page — hits on it are our blocks, not probing
+        url_paths = [u for u in (r.get('url', '/') for r in sorted_reqs[:10]) if u != '/403.html']
 
         # Compute inter-request intervals from raw timestamps
         intervals = []

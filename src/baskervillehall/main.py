@@ -229,6 +229,7 @@ def main():
             ttl_minutes=int(os.environ.get('FIRST_RESPONDER_TTL_MINUTES', '30')),
             min_spike_ratio=float(os.environ.get('FIRST_RESPONDER_MIN_SPIKE_RATIO', '3.0')),
             min_challenge_count=int(os.environ.get('FIRST_RESPONDER_MIN_CHALLENGE_COUNT', '50')),
+            challenge_count_bypass_spike_ratio=float(os.environ.get('FIRST_RESPONDER_CHALLENGE_COUNT_BYPASS_SPIKE_RATIO', '8.0')),
             kafka_connection=kafka_connection,
             kafka_connection_output=kafka_connection_output,
             topic_commands=os.environ.get('TOPIC_COMMANDS', 'banjax_command_topic'),

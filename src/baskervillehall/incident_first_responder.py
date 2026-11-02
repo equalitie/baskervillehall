@@ -76,6 +76,9 @@ def is_protected_ua(ua: str, host: str = '') -> bool:
         return site in ua_lower
     return False
 
+# Deflect's own block page — requests to it are the result of our blocks, not probing.
+DEFLECT_BLOCK_PAGE = '/403.html'
+
 CREATE_FIRST_RESPONDER_TABLES_SQL = """
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS first_responder_processed BOOLEAN DEFAULT FALSE;
 
@@ -139,12 +142,17 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
-  "target": ["CN", "RU"] | ["Hetzner Online GmbH", "OVH SAS"] | ["203.0.113.0/24"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
+  "action": "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
+  "target": ["203.0.113.0/24"] | ["python-requests/2.31.0", "curl/7.81.0"] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 60,
   "reasoning": "brief explanation"
 }}
+
+*** block_asn AND block_country ARE NOT AVAILABLE — the edge (banjax) cannot enforce them.
+Never return them. Where a rule below suggests block_asn or block_country, use instead:
+block_ua / challenge_ua (uniform UA), block_subnet (narrow IP range), challenge_all
+(large attack with no stable fingerprint), or monitor_only.
 
 Decision rules (apply in order):
 1. Prefer block_asn over block_country — it causes less collateral damage.
@@ -247,12 +255,17 @@ Respond with a JSON object only — no explanation outside the JSON.
 
 Output format:
 {{
-  "action": "block_country" | "block_asn" | "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
-  "target": ["CN", "RU"] | ["China Mobile", "CHINA UNICOM"] | ["203.0.113.0/24"] | ["Mozilla/5.0 (X11; Linux x86_64)..."] | [],
+  "action": "block_subnet" | "block_ua" | "challenge_ua" | "challenge_all" | "raise_threshold" | "monitor_only",
+  "target": ["203.0.113.0/24"] | ["<full UA string copied exactly>"] | [],
   "confidence": "high" | "medium" | "low",
   "ttl_minutes": 60,
   "reasoning": "brief explanation"
 }}
+
+*** block_asn AND block_country ARE NOT AVAILABLE — the edge (banjax) cannot enforce them.
+Never return them. Where a rule below suggests block_asn or block_country, use instead:
+block_ua / challenge_ua (uniform UA), block_subnet (narrow IP range), challenge_all
+(large attack with no stable fingerprint), or monitor_only.
 
 AVAILABLE SIGNALS (apply heuristics in this priority order):
 
@@ -400,6 +413,7 @@ class IncidentFirstResponder:
             ttl_minutes=30,
             min_spike_ratio=3.0,
             min_challenge_count=50,
+            challenge_count_bypass_spike_ratio=8.0,
             kafka_connection=None,
             kafka_connection_output=None,
             topic_commands='banjax_command_topic',
@@ -430,6 +444,7 @@ class IncidentFirstResponder:
         self.ttl_minutes = ttl_minutes
         self.min_spike_ratio = min_spike_ratio
         self.min_challenge_count = min_challenge_count
+        self.challenge_count_bypass_spike_ratio = challenge_count_bypass_spike_ratio
         self.topic_commands = topic_commands
         self.dnet_partition_map = dnet_partition_map or {}
         self.host_whitelist = set(h.strip() for h in (host_whitelist or []) if h.strip())
@@ -579,9 +594,10 @@ class IncidentFirstResponder:
                        ROUND(cmd_count * 100.0 / NULLIF(SUM(cmd_count) OVER (), 0), 1) AS pct
                 FROM incident_url_stats
                 WHERE incident_id = %s
+                  AND url <> %s
                 ORDER BY cmd_count DESC
                 LIMIT 15
-            """, (incident_id,))
+            """, (incident_id, DEFLECT_BLOCK_PAGE))
             rows = cur.fetchall()
         return [{'url': r[0], 'pct': float(r[1] or 0)} for r in rows]
 
@@ -1758,6 +1774,33 @@ class IncidentFirstResponder:
             return False
         return True
 
+    def _enforce_consistency(self, rec, active_actions):
+        """Downgrade to monitor_only decisions that cannot have an effect.
+
+        - Targeted actions with an empty target (e.g. block_subnet with no CIDR).
+        - block_asn / block_country: banjax cannot enforce them (the predictor only blocks
+          IPs of sessions that reach it, a few per day).
+        - challenge_all while challenge_all is already active: the prompt tells the model
+          not to repeat it, and re-issuing does not change anything on the edge.
+        """
+        action = rec.get('action')
+        reason = None
+        if action in ('block_asn', 'block_country'):
+            reason = f'{action} is not supported by banjax'
+        elif action in ('block_subnet', 'block_ua', 'challenge_ua') \
+                and not rec.get('target'):
+            reason = f'{action} with empty target'
+        elif action == 'challenge_all' and any(
+                a['action'] == 'challenge_all' for a in active_actions or []):
+            reason = 'challenge_all is already active'
+        if reason:
+            self.logger.warning(f"[FIRST_RESPONDER] Downgrading to monitor_only: {reason}")
+            rec['action'] = 'monitor_only'
+            rec['target'] = []
+            rec['confidence'] = 'low'
+            rec['reasoning'] = rec.get('reasoning', '') + f' [auto-downgraded: {reason}]'
+        return rec
+
     def _resolve_ua_targets(self, rec, ua_stats, host=''):
         """Map block_ua / challenge_ua targets to full UA strings from the incident.
 
@@ -2145,7 +2188,8 @@ class IncidentFirstResponder:
             if started_at is not None:
                 duration_sec = (ended_at - started_at).total_seconds()
                 duration_min = duration_sec / 60.0
-                if duration_min < self.min_incident_duration_minutes:
+                if (duration_min < self.min_incident_duration_minutes
+                        and not self._has_followup_incident(conn, incident_id, host, ended_at)):
                     # If a blocking action was already applied during the active phase,
                     # do NOT override it with monitor_only — the block was justified.
                     with conn.cursor() as cur:
@@ -2332,6 +2376,7 @@ class IncidentFirstResponder:
             normal_traffic=normal_traffic,
         )
         rec = self._resolve_ua_targets(rec, ua_stats, host)
+        rec = self._enforce_consistency(rec, active_actions)
         self._llm_last_action[host] = rec.get('action', '')
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
@@ -2408,7 +2453,10 @@ class IncidentFirstResponder:
             self._mark_processed(conn, incident_id)
             return
 
-        if incident['challenge_count'] < self.min_challenge_count:
+        # Low challenge_count means ML scored few sessions (e.g. single-request bots), not
+        # that there is no attack — a strong spike is analysed regardless.
+        if (incident['challenge_count'] < self.min_challenge_count
+                and incident['spike_ratio'] < self.challenge_count_bypass_spike_ratio):
             self.logger.info(
                 f"[FIRST_RESPONDER] Skipping incident_id={incident_id} host={host} "
                 f"challenge_count={incident['challenge_count']} < min={self.min_challenge_count}"
@@ -2514,6 +2562,7 @@ class IncidentFirstResponder:
             normal_traffic=normal_traffic,
         )
         rec = self._resolve_ua_targets(rec, ua_stats, host)
+        rec = self._enforce_consistency(rec, active_actions)
         self._save_action(conn, incident_id, host, rec)
         self._dispatch_banjax_action(host, rec, incident_id, conn=conn)
         # Mark processed only when incident is closed — active incidents are re-analyzed each cycle
