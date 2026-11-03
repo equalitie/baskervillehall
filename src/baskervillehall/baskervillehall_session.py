@@ -1448,13 +1448,17 @@ class BaskervillehallSession(object):
                             self.host_request_counts[host] += 1
                             _geoip = data.get('geoip', {})
                             _country = _geoip.get('country_code2', _geoip.get('country_code', '')) or 'XX'
-                            _ua_key = ua[:150] if ua else ''
+                            # Full UA up to 512: banjax and FirstResponderBlocker match UAs exactly,
+                            # a UA cut at 150 in incident stats could never be blocked.
+                            _ua_key = ua[:512] if ua else ''
                             self.host_country_counts[host][_country] += 1
                             if asn_name:
                                 self.host_asn_counts[host][asn_name] += 1
-                            if _ua_key:
+                            # Verified crawlers stay out of the UA/fingerprint breakdown: the first
+                            # responder must not see real Googlebot traffic as part of an attack.
+                            if _ua_key and not verified_bot:
                                 self.host_ua_counts[host][_ua_key] += 1
-                            if _fp_hash:
+                            if _fp_hash and not verified_bot:
                                 self.host_fingerprint_counts[host][_fp_hash] += 1
                         session_id = self.get_session_cookie(data)
                         self._acc('data_extraction', t_ext)
@@ -1478,7 +1482,10 @@ class BaskervillehallSession(object):
                             self.profile_stats['message_count'] += 1
                             continue
 
-                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country, dnet, ua, _fp_hash):
+                        # None = crawler verification skipped under lag: don't treat as unverified
+                        _verified = True if verified_bot else (None if self.skip_expensive_ops else False)
+                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country,
+                                                                dnet, ua, _fp_hash, verified_bot=_verified):
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                             self.profile_stats['message_count'] += 1
                             continue

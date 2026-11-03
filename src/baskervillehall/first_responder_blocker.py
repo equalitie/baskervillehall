@@ -7,7 +7,9 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaProducer
 
-from baskervillehall.incident_first_responder import FINGERPRINT_TARGET_PREFIX
+from baskervillehall.incident_first_responder import (
+    FINGERPRINT_TARGET_PREFIX, is_browser_ua, is_verifiable_crawler_ua,
+)
 
 
 class FirstResponderBlocker:
@@ -85,20 +87,22 @@ class FirstResponderBlocker:
                     continue  # take the most recent action per host
                 seen_hosts.add(host)  # mark as seen regardless of action type
                 # monitor_only / raise_threshold cancel any previous block action.
-                # block_ua is enforced natively by banjax (sent by first_responder, host-scoped);
-                # turning UA matches into block_ip here would block those IPs on every site.
-                # block_ua_fingerprint: browser UAs, blocked only with the attack's fingerprints.
-                if action not in ('block_asn', 'block_country', 'block_ua_fingerprint'):
+                # Tool/bot UAs of block_ua are enforced natively by banjax. Here:
+                # - verifiable crawler UAs (Googlebot, Bingbot...): only from unverified IPs;
+                # - block_ua_fingerprint: browser UAs only together with the attack's fingerprints.
+                if action not in ('block_asn', 'block_country', 'block_ua', 'block_ua_fingerprint'):
                     continue
                 targets = {t.strip() for t in (target_str or '').split('|') if t.strip()}
                 fingerprints = {t[len(FINGERPRINT_TARGET_PREFIX):] for t in targets
                                 if t.startswith(FINGERPRINT_TARGET_PREFIX)}
                 targets -= {FINGERPRINT_TARGET_PREFIX + fp for fp in fingerprints}
-                if action == 'block_ua_fingerprint' and not fingerprints:
-                    continue
-                if targets:
+                crawlers = set()
+                if action in ('block_ua', 'block_ua_fingerprint'):
+                    crawlers = {t for t in targets if is_verifiable_crawler_ua(t)}
+                    targets = {t for t in targets if is_browser_ua(t)} if fingerprints else set()
+                if targets or crawlers:
                     new_actions[host] = {'action': action, 'target': targets,
-                                         'fingerprints': fingerprints}
+                                         'fingerprints': fingerprints, 'crawlers': crawlers}
 
             if new_actions != self._actions:
                 if new_actions:
@@ -140,12 +144,19 @@ class FirstResponderBlocker:
     # Per-request check
     # ------------------------------------------------------------------
 
-    def process(self, host, ip, country, asn_name, survey_country, dnet='-', ua='', fingerprint=''):
+    def process(self, host, ip, country, asn_name, survey_country, dnet='-', ua='', fingerprint='',
+                verified_bot=False):
         """
         Returns True if the request matches an active block action and a block_ip
         command has been (or was already) issued.  The session pipeline should then
         skip further processing of this request.
+
+        verified_bot: True for crawlers verified by IP and GlobalAccessGranted (never blocked),
+        None when verification was skipped (lag) — then crawler UAs are not blocked either.
         """
+        if verified_bot:
+            return False
+
         # Fingerprint check first — most precise signal, no collateral damage.
         # Catches 1-req-per-IP bots that never build a full session (invisible to predictor).
         if fingerprint and fingerprint in self._fingerprints.get(host, set()):
@@ -161,11 +172,20 @@ class FirstResponderBlocker:
         action = ra['action']
         target = ra['target']
         hit = False
+        command_name = 'block_ip'
 
-        if action == 'block_ua_fingerprint':
-            # Browser UA shared by real users: block only together with the attack's fingerprint
+        if ua and verified_bot is False and ua in ra.get('crawlers', ()):
+            # Crawler UA from an IP that is not the crawler's: a fake
+            hit = True
+            action = 'block_ua_unverified_crawler'
+        elif action == 'block_ua_fingerprint':
+            # Browser UA shared by real users: only together with the attack's fingerprint,
+            # and challenge rather than block — mobile carrier IPs are shared by many people.
             if ua and ua in target and fingerprint and fingerprint in ra['fingerprints']:
                 hit = True
+                command_name = 'challenge_ip'
+        elif action == 'block_ua':
+            pass
         else:
             # Survey-country protection: never block the site's primary audience
             if survey_country and country and country == survey_country:
@@ -184,17 +204,17 @@ class FirstResponderBlocker:
             return True
 
         self._blocked_ips[ip] = True
-        self._send_block(host, ip, country, asn_name, action, dnet, ua)
+        self._send_block(host, ip, country, asn_name, action, dnet, ua, command_name)
         return True
 
     # ------------------------------------------------------------------
     # Kafka
     # ------------------------------------------------------------------
 
-    def _send_block(self, host, ip, country, asn_name, action, dnet, ua=''):
-        meta = f'first_responder [{action}] [block_ip] [session_pipeline]'
+    def _send_block(self, host, ip, country, asn_name, action, dnet, ua='', command_name='block_ip'):
+        meta = f'first_responder [{action}] [{command_name}] [session_pipeline]'
         command = {
-            'Name': 'block_ip',
+            'Name': command_name,
             'Value': ip,
             'host': host,
             'country': country,
@@ -217,6 +237,6 @@ class FirstResponderBlocker:
                 self._producer_output.send(topic=self.topic_commands, value=value, partition=partition)
 
         self.logger.warning(
-            f'[FirstResponderBlocker] block_ip ip={ip} host={host} '
+            f'[FirstResponderBlocker] {command_name} ip={ip} host={host} '
             f'country={country} asn={asn_name} ua={ua!r} action={action}'
         )

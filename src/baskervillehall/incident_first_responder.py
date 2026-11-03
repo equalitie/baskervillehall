@@ -88,6 +88,20 @@ _NON_BROWSER_RE = re.compile(
 )
 
 
+# Crawlers we verify by IP (BotVerificator): the UA alone can't tell the real one from a fake,
+# so these UAs are never sent to banjax as block_ua; first_responder_blocker blocks only
+# requests from unverified IPs.
+_VERIFIABLE_CRAWLER_RE = re.compile(
+    r'googlebot|google-inspectiontool|adsbot-google|mediapartners-google|'
+    r'bingbot|bingpreview|adidxbot|duckduckbot',
+    re.IGNORECASE,
+)
+
+
+def is_verifiable_crawler_ua(ua: str) -> bool:
+    return bool(_VERIFIABLE_CRAWLER_RE.search(ua))
+
+
 def is_browser_ua(ua: str) -> bool:
     """True if the UA looks like a real desktop/mobile browser rather than a tool or crawler."""
     return (
@@ -841,9 +855,10 @@ class IncidentFirstResponder:
         targets = [t for t in rec.get('target') or []
                    if not t.startswith(FINGERPRINT_TARGET_PREFIX)]
         for ua in targets:
-            if is_protected_ua(ua, host) or is_browser_ua(ua):
+            if is_protected_ua(ua, host) or is_browser_ua(ua) or is_verifiable_crawler_ua(ua):
                 self.logger.warning(
-                    f"[FIRST_RESPONDER] Skipping {action} for protected or browser UA: {ua!r}"
+                    f"[FIRST_RESPONDER] Skipping native {action} for protected, browser or "
+                    f"verifiable crawler UA: {ua!r}"
                 )
                 continue
             self._send_banjax_command(
