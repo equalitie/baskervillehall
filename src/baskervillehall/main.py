@@ -238,6 +238,8 @@ def main():
             fingerprint_max_ips=int(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MAX_IPS', '500')),
             fingerprint_block_enabled=os.environ.get(
                 'FIRST_RESPONDER_FINGERPRINT_BLOCK_ENABLED', 'false').lower() == 'true',
+            native_ua_commands_enabled=os.environ.get(
+                'FIRST_RESPONDER_NATIVE_UA_COMMANDS_ENABLED', 'false').lower() == 'true',
             host_whitelist=[h for h in os.environ.get('FIRST_RESPONDER_HOST_WHITELIST', '').split(',') if h.strip()],
             min_traffic_peak_count=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_COUNT', '50')),
             min_traffic_peak_req_min=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN', '50')),

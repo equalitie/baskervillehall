@@ -464,6 +464,7 @@ class IncidentFirstResponder:
             fingerprint_min_pct=40.0,
             fingerprint_max_ips=500,
             fingerprint_block_enabled=False,
+            native_ua_commands_enabled=False,
             host_whitelist=None,
             min_traffic_peak_count=50,
             min_traffic_peak_req_min=50,
@@ -498,6 +499,9 @@ class IncidentFirstResponder:
         # shared by many real users and every match becomes a global block_ip.
         # Browser UA + fingerprint (block_ua_fingerprint) is not affected.
         self.fingerprint_block_enabled = fingerprint_block_enabled
+        # banjax applies block_ua/challenge_ua to every Deflect site, not only the command's
+        # host (bug confirmed by Jeremy, Nov 2026). Off until banjax keys them by (UA, host).
+        self.native_ua_commands_enabled = native_ua_commands_enabled
         self.min_traffic_peak_count = min_traffic_peak_count
         self.min_traffic_peak_req_min = min_traffic_peak_req_min
         self.min_traffic_peak_req_min_multiplier = min_traffic_peak_req_min_multiplier
@@ -854,6 +858,13 @@ class IncidentFirstResponder:
             return
         targets = [t for t in rec.get('target') or []
                    if not t.startswith(FINGERPRINT_TARGET_PREFIX)]
+        if not self.native_ua_commands_enabled:
+            if targets:
+                self.logger.warning(
+                    f"[FIRST_RESPONDER] Native {action} disabled (global in banjax), "
+                    f"not sent: host={host} incident_id={incident_id} uas={len(targets)}"
+                )
+            return
         for ua in targets:
             if is_protected_ua(ua, host) or is_browser_ua(ua) or is_verifiable_crawler_ua(ua):
                 self.logger.warning(
