@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import logging
+import os
 import time
 
 import psycopg2
@@ -51,6 +52,21 @@ class FirstResponderBlocker:
 
         # Per-IP dedup cache: avoids re-sending block_ip on every request from same IP
         self._blocked_ips = TTLCache(maxsize=100_000, ttl=block_ttl)
+
+        # Manual stopgap for a long attack by browser UAs that pass the challenge (tapol.org,
+        # Nov 2026): {"host": ["exact UA", ...]} -> block_ip on the first request.
+        # Note: banjax block_ip applies to every site on the edge.
+        self._static_ua_blocks = {
+            h: set(uas) for h, uas in
+            json.loads(os.environ.get('SESSION_STATIC_UA_BLOCKS', '') or '{}').items()
+        }
+        self._static_ua_block_ttl = int(os.environ.get('SESSION_STATIC_UA_BLOCK_TTL', '3600'))
+        self._static_blocked_ips = TTLCache(maxsize=200_000, ttl=self._static_ua_block_ttl)
+        if self._static_ua_blocks:
+            self.logger.warning(
+                f"[FirstResponderBlocker] static UA blocks: {self._static_ua_blocks} "
+                f"ttl={self._static_ua_block_ttl}s"
+            )
 
         self._producer_output = KafkaProducer(**kafka_connection_output) if kafka_connection_output else None
         self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
@@ -157,6 +173,13 @@ class FirstResponderBlocker:
         if verified_bot:
             return False
 
+        if ua and ua in self._static_ua_blocks.get(host, ()):
+            if ip not in self._static_blocked_ips:
+                self._static_blocked_ips[ip] = True
+                self._send_block(host, ip, country, asn_name, 'static_ua_block', dnet, ua,
+                                 ttl=self._static_ua_block_ttl)
+            return True
+
         # Fingerprint check first — most precise signal, no collateral damage.
         # Catches 1-req-per-IP bots that never build a full session (invisible to predictor).
         if fingerprint and fingerprint in self._fingerprints.get(host, set()):
@@ -211,7 +234,8 @@ class FirstResponderBlocker:
     # Kafka
     # ------------------------------------------------------------------
 
-    def _send_block(self, host, ip, country, asn_name, action, dnet, ua='', command_name='block_ip'):
+    def _send_block(self, host, ip, country, asn_name, action, dnet, ua='', command_name='block_ip',
+                    ttl=300):
         meta = f'first_responder [{action}] [{command_name}] [session_pipeline]'
         command = {
             'Name': command_name,
@@ -221,7 +245,7 @@ class FirstResponderBlocker:
             'dnet': dnet,
             'source': meta,
             'meta': meta,
-            'ttl': 300,
+            'ttl': ttl,
         }
         value = json.dumps(command).encode('utf-8')
         key = bytearray(host, encoding='utf-8')

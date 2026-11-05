@@ -152,6 +152,9 @@ data:
     SESSION_LLM_SCORE_MIN: "10"
     SESSION_LLM_SCORE_MAX: "99"
     SESSION_LLM_MIN_REQUESTS: "5"
+    # Temporary (Nov 2026): tapol.org attack UAs -> block_ip on the first request. Remove when the attack ends.
+    SESSION_STATIC_UA_BLOCKS: '{"tapol.org": ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"]}'
+    SESSION_STATIC_UA_BLOCK_TTL: "3600"
     SESSION_LLM_QUEUE_SIZE: "200"
     CLUSTER_LLM_PROVIDER: "anthropic"
     CLUSTER_LLM_MODEL: "claude-haiku-4-5-20251001"
