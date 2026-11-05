@@ -1911,7 +1911,13 @@ Reply JSON only, no markdown:
              payload,
              key,
              dnet):
-        payload['Name'] = guard_command_name(payload['Name'])
+        name = guard_command_name(payload['Name'])
+        if name != payload['Name']:
+            # meta/source carry the original name, e.g. "Bad bot rule [block_ip]"
+            for f in ('meta', 'source'):
+                if isinstance(payload.get(f), str):
+                    payload[f] = payload[f].replace(f"[{payload['Name']}]", f"[{name}]")
+            payload['Name'] = name
         key = bytearray(payload['host'], encoding="utf8")
         producer.send(topic=self.topic_commands,
                       value=json.dumps(payload).encode("utf-8"),
