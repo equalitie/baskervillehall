@@ -4,6 +4,7 @@ import logging
 
 from cachetools import TTLCache
 from kafka import KafkaProducer
+from baskervillehall.block_guard import guard_command_name
 
 
 class CountryBlocker:
@@ -50,6 +51,7 @@ class CountryBlocker:
             command_name = 'challenge_ip'
         else:
             command_name = 'block_ip'
+        command_name = guard_command_name(command_name)
 
         command = {
             "Name": command_name,

@@ -8,6 +8,7 @@ import psycopg2
 import psycopg2.extras
 import requests
 from kafka import KafkaProducer
+from baskervillehall.block_guard import guard_command_name
 
 # Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
 PROTECTED_ASNS = {
@@ -704,6 +705,7 @@ class IncidentFirstResponder:
         if self._producer is None and self._producer_output is None:
             self.logger.warning(f"[CLUSTER_RESPONDER] No Kafka producer — {command_name} skipped")
             return
+        command_name = guard_command_name(command_name)
         host = incident['host']
         dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
@@ -741,6 +743,7 @@ class IncidentFirstResponder:
                 f"[CLUSTER_RESPONDER] No Kafka producer — {command_name} skipped"
             )
             return 0
+        command_name = guard_command_name(command_name)
         host = incident['host']
         dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
@@ -787,6 +790,7 @@ class IncidentFirstResponder:
                 f"[FIRST_RESPONDER] No Kafka producer — {command_name} skipped"
             )
             return
+        command_name = guard_command_name(command_name)
         command = {
             'Name': command_name,
             'ttl': ttl_seconds,
@@ -1278,11 +1282,12 @@ class IncidentFirstResponder:
 
         host = incident['host']
         dnet = incident.get('_dnet') or self._get_host_dnet(conn, host)
-        meta = f'first_responder [block_fingerprint] [block_ip]'
+        fp_command = guard_command_name('block_ip')
+        meta = f'first_responder [block_fingerprint] [{fp_command}]'
         blocked = 0
         for ip in ips:
             command = {
-                'Name': 'block_ip',
+                'Name': fp_command,
                 'value': ip,
                 'host': host,
                 'dnet': dnet,

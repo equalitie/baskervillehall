@@ -25,6 +25,7 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
+from baskervillehall.block_guard import guard_command_name
 from baskervillehall.baskervillehall_isolation_forest import (
     BaskervillehallIsolationForest,
     ModelType,
@@ -1910,6 +1911,7 @@ Reply JSON only, no markdown:
              payload,
              key,
              dnet):
+        payload['Name'] = guard_command_name(payload['Name'])
         key = bytearray(payload['host'], encoding="utf8")
         producer.send(topic=self.topic_commands,
                       value=json.dumps(payload).encode("utf-8"),
