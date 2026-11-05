@@ -107,14 +107,15 @@ class FirstResponderBlocker:
                 # Tool/bot UAs of block_ua are enforced natively by banjax. Here:
                 # - verifiable crawler UAs (Googlebot, Bingbot...): only from unverified IPs;
                 # - block_ua_fingerprint: browser UAs only together with the attack's fingerprints.
-                if action not in ('block_asn', 'block_country', 'block_ua', 'block_ua_fingerprint'):
+                if action not in ('block_asn', 'block_country', 'block_ua', 'block_ua_fingerprint',
+                                  'challenge_ua', 'challenge_ua_fingerprint'):
                     continue
                 targets = {t.strip() for t in (target_str or '').split('|') if t.strip()}
                 fingerprints = {t[len(FINGERPRINT_TARGET_PREFIX):] for t in targets
                                 if t.startswith(FINGERPRINT_TARGET_PREFIX)}
                 targets -= {FINGERPRINT_TARGET_PREFIX + fp for fp in fingerprints}
                 crawlers = set()
-                if action in ('block_ua', 'block_ua_fingerprint'):
+                if action in ('block_ua', 'block_ua_fingerprint', 'challenge_ua', 'challenge_ua_fingerprint'):
                     crawlers = {t for t in targets if is_verifiable_crawler_ua(t)}
                     targets = {t for t in targets if is_browser_ua(t)} if fingerprints else set()
                 if targets or crawlers:
@@ -202,13 +203,13 @@ class FirstResponderBlocker:
             # Crawler UA from an IP that is not the crawler's: a fake
             hit = True
             action = 'block_ua_unverified_crawler'
-        elif action == 'block_ua_fingerprint':
+        elif action in ('block_ua_fingerprint', 'challenge_ua_fingerprint'):
             # Browser UA shared by real users: only together with the attack's fingerprint,
             # and challenge rather than block — mobile carrier IPs are shared by many people.
             if ua and ua in target and fingerprint and fingerprint in ra['fingerprints']:
                 hit = True
                 command_name = 'challenge_ip'
-        elif action == 'block_ua':
+        elif action in ('block_ua', 'challenge_ua'):
             pass
         else:
             # Survey-country protection: never block the site's primary audience

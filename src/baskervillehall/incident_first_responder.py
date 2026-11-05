@@ -8,7 +8,7 @@ import psycopg2
 import psycopg2.extras
 import requests
 from kafka import KafkaProducer
-from baskervillehall.block_guard import guard_command_name
+from baskervillehall.block_guard import BLOCKS_DISABLED, guard_command_name
 
 # Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
 PROTECTED_ASNS = {
@@ -288,6 +288,18 @@ Decision rules (apply in order):
 15. URL and UA data is from sessions only (static-file-only bots are not included).
     Do not use absence of URL/UA data as a reason to downgrade confidence if ASN/country
     data is already conclusive.
+"""
+
+# Appended to the decision prompts while BASKERVILLE_BLOCKS_DISABLED is on.
+BLOCKS_DISABLED_NOTICE = """
+
+*** BLOCKING IS DISABLED — THIS OVERRIDES EVERY RULE ABOVE ***
+Blocks have caused too much collateral damage to real users, so no block action is allowed.
+NEVER return block_ua, block_subnet, block_asn or block_country.
+Allowed actions: challenge_ua, challenge_subnet, challenge_all, raise_threshold, monitor_only.
+Wherever a rule above says block_ua use challenge_ua, and wherever it says block_subnet use
+challenge_subnet. A challenge is passed automatically by real browsers; it only stops clients
+that cannot run JavaScript.
 """
 
 TRAFFIC_SPIKE_SYSTEM_PROMPT = """You are a DDoS mitigation expert analyzing a RAW TRAFFIC SPIKE —
@@ -841,7 +853,7 @@ class IncidentFirstResponder:
                 conn=conn,
             )
             return
-        if action == 'block_subnet':
+        if action in ('block_subnet', 'challenge_subnet'):
             targets = rec.get('target') or []
             dnet = self._get_host_dnet(conn, host) if conn is not None else '-'
             ttl_override = rec.get('ttl_minutes', self.ttl_minutes)
@@ -849,15 +861,15 @@ class IncidentFirstResponder:
                 self._send_subnet_command(
                     incident={'host': host, '_dnet': dnet},
                     cidr=cidr,
-                    command_name='block_subnet',
+                    command_name=action,
                     reason=f'incident_id={incident_id} llm_decision',
                     ttl_minutes=ttl_override,
                 )
             return
-        if action == 'block_ua_fingerprint':
+        if action in ('block_ua_fingerprint', 'challenge_ua_fingerprint'):
             # Browser UAs (and fp: targets) are enforced by first_responder_blocker as
             # UA + fingerprint; only tool/bot UAs go to banjax as native block_ua.
-            action = 'block_ua'
+            action = action[:-len('_fingerprint')]
         elif action not in ('block_ua', 'challenge_ua'):
             return
         targets = [t for t in rec.get('target') or []
@@ -1623,6 +1635,8 @@ class IncidentFirstResponder:
             )
         else:
             system = system_prompt
+        if BLOCKS_DISABLED:
+            system += BLOCKS_DISABLED_NOTICE
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_prompt},
@@ -1838,7 +1852,7 @@ class IncidentFirstResponder:
 
     def _validate_response(self, rec):
         """Basic validation of LLM response before saving."""
-        valid_actions = {'block_country', 'block_asn', 'block_ua', 'challenge_ua', 'challenge_all', 'raise_threshold', 'monitor_only', 'block_subnet'}
+        valid_actions = {'block_country', 'block_asn', 'block_ua', 'challenge_ua', 'challenge_all', 'raise_threshold', 'monitor_only', 'block_subnet', 'challenge_subnet'}
         valid_confidence = {'high', 'medium', 'low'}
         if not isinstance(rec, dict):
             return False
@@ -1859,11 +1873,18 @@ class IncidentFirstResponder:
         - challenge_all while challenge_all is already active: the prompt tells the model
           not to repeat it, and re-issuing does not change anything on the edge.
         """
+        if BLOCKS_DISABLED and rec.get('action') in ('block_ua', 'block_ua_fingerprint', 'block_subnet'):
+            challenge = 'challenge' + rec['action'][len('block'):]
+            self.logger.warning(
+                f"[FIRST_RESPONDER] Blocks disabled: {rec['action']} -> {challenge}"
+            )
+            rec['reasoning'] = rec.get('reasoning', '') + f" [blocks disabled: {rec['action']} -> {challenge}]"
+            rec['action'] = challenge
         action = rec.get('action')
         reason = None
         if action in ('block_asn', 'block_country'):
             reason = f'{action} is not supported by banjax'
-        elif action in ('block_subnet', 'block_ua', 'challenge_ua') \
+        elif action in ('block_subnet', 'challenge_subnet', 'block_ua', 'challenge_ua') \
                 and not rec.get('target'):
             reason = f'{action} with empty target'
         elif action == 'challenge_all' and any(
@@ -1922,8 +1943,8 @@ class IncidentFirstResponder:
             s['fingerprint'] for s in fingerprint_stats or []
             if s.get('fingerprint') and s.get('pct', 0) >= UA_FINGERPRINT_MIN_PCT
         ][:UA_FINGERPRINT_MAX]
-        if browser and attack_fps and rec['action'] == 'block_ua':
-            rec['action'] = 'block_ua_fingerprint'
+        if browser and attack_fps and rec['action'] in ('block_ua', 'challenge_ua'):
+            rec['action'] = rec['action'] + '_fingerprint'
             rec['target'] = list(dict.fromkeys(resolved)) + [
                 FINGERPRINT_TARGET_PREFIX + fp for fp in attack_fps
             ]
@@ -2314,7 +2335,8 @@ class IncidentFirstResponder:
                             SELECT action FROM first_responder_actions
                             WHERE incident_id = %s
                               AND action IN ('block_country', 'block_asn', 'block_ua',
-                                             'block_ua_fingerprint')
+                                             'block_ua_fingerprint', 'challenge_ua',
+                                             'challenge_ua_fingerprint', 'challenge_subnet')
                             ORDER BY created_at DESC LIMIT 1
                         """, (incident_id,))
                         existing_block = cur.fetchone()
