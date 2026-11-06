@@ -4,7 +4,7 @@ import logging
 
 from cachetools import TTLCache
 from kafka import KafkaProducer
-from baskervillehall.block_guard import guard_command_name
+from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
 
 
 class CountryBlocker:
@@ -44,6 +44,8 @@ class CountryBlocker:
         return True
 
     def _send_block_command(self, host, ip, country, dnet):
+        if is_host_whitelisted(host):
+            return
         action_type = self.deflect_api_setting.get_country_action_type(host)
         ttl_ban_time = self.deflect_api_setting.get_ttl_ban_time(host)
 

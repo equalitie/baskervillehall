@@ -25,7 +25,7 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
-from baskervillehall.block_guard import guard_command_name
+from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
 from baskervillehall.baskervillehall_isolation_forest import (
     BaskervillehallIsolationForest,
     ModelType,
@@ -1911,6 +1911,8 @@ Reply JSON only, no markdown:
              payload,
              key,
              dnet):
+        if is_host_whitelisted(payload.get('host')):
+            return
         name = guard_command_name(payload['Name'])
         if name != payload['Name']:
             # meta/source carry the original name, e.g. "Bad bot rule [block_ip]"

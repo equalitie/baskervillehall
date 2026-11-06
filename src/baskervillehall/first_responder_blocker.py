@@ -8,7 +8,7 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaProducer
 
-from baskervillehall.block_guard import guard_command_name
+from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
 from baskervillehall.incident_first_responder import (
     FINGERPRINT_TARGET_PREFIX, is_browser_ua, is_verifiable_crawler_ua,
 )
@@ -238,6 +238,8 @@ class FirstResponderBlocker:
 
     def _send_block(self, host, ip, country, asn_name, action, dnet, ua='', command_name='block_ip',
                     ttl=300):
+        if is_host_whitelisted(host):
+            return
         command_name = guard_command_name(command_name)
         meta = f'first_responder [{action}] [{command_name}] [session_pipeline]'
         command = {

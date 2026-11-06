@@ -8,7 +8,7 @@ import psycopg2
 import psycopg2.extras
 import requests
 from kafka import KafkaProducer
-from baskervillehall.block_guard import BLOCKS_DISABLED, guard_command_name
+from baskervillehall.block_guard import BLOCKS_DISABLED, guard_command_name, is_host_whitelisted
 
 # Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
 PROTECTED_ASNS = {
@@ -719,6 +719,9 @@ class IncidentFirstResponder:
             return
         command_name = guard_command_name(command_name)
         host = incident['host']
+        if is_host_whitelisted(host):
+            self.logger.info(f"[CLUSTER_RESPONDER] {host} whitelisted — {command_name} skipped")
+            return
         dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
         ttl_sec = (ttl_minutes if ttl_minutes is not None else self.ttl_minutes) * 60
@@ -757,6 +760,9 @@ class IncidentFirstResponder:
             return 0
         command_name = guard_command_name(command_name)
         host = incident['host']
+        if is_host_whitelisted(host):
+            self.logger.info(f"[CLUSTER_RESPONDER] {host} whitelisted — {command_name} skipped")
+            return 0
         dnet = incident.get('_dnet', '-')
         meta = f'cluster_responder [{command_name}] {reason}'
         sent = 0
@@ -801,6 +807,9 @@ class IncidentFirstResponder:
             self.logger.warning(
                 f"[FIRST_RESPONDER] No Kafka producer — {command_name} skipped"
             )
+            return
+        if is_host_whitelisted(host):
+            self.logger.info(f"[FIRST_RESPONDER] {host} whitelisted — {command_name} skipped")
             return
         command_name = guard_command_name(command_name)
         command = {
@@ -1078,7 +1087,7 @@ class IncidentFirstResponder:
         block_criteria = incident.get('block_criteria') or []
         incident['_dnet'] = self._get_host_dnet(conn, host)
 
-        if host in self.host_whitelist:
+        if is_host_whitelisted(host):
             self.logger.info(
                 f"[CLUSTER_RESPONDER] host={host} is whitelisted — skipping"
             )
@@ -1158,7 +1167,7 @@ class IncidentFirstResponder:
                 """, (host,))
                 recent_cluster_count = cur.fetchone()[0]
 
-            if recent_cluster_count >= 5 and host not in self.host_whitelist:
+            if recent_cluster_count >= 5 and not is_host_whitelisted(host):
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT 1 FROM first_responder_actions
@@ -1271,6 +1280,8 @@ class IncidentFirstResponder:
         """
         if self._producer is None and self._producer_output is None:
             self.logger.warning("[FIRST_RESPONDER] No Kafka producer — fingerprint IP blocking skipped")
+            return 0
+        if is_host_whitelisted(incident['host']):
             return 0
 
         with conn.cursor() as cur:
@@ -2361,7 +2372,7 @@ class IncidentFirstResponder:
                     self._mark_processed(conn, incident_id)
                     return
 
-        if host in self.host_whitelist:
+        if is_host_whitelisted(host):
             self.logger.info(
                 f"[FIRST_RESPONDER] host={host} is whitelisted — monitor only, no blocking"
             )
@@ -2420,7 +2431,7 @@ class IncidentFirstResponder:
             and spike_ratio >= self.challenge_all_spike_ratio
             and immature_ratio is not None
             and immature_ratio >= self.challenge_all_immature_ratio
-            and host not in self.host_whitelist
+            and not is_host_whitelisted(host)
         ):
             # Check if challenge_all is already active for this host (avoid duplicate commands).
             with conn.cursor() as cur:
@@ -2611,7 +2622,7 @@ class IncidentFirstResponder:
             self._mark_processed(conn, incident_id)
             return
 
-        if host in self.host_whitelist:
+        if is_host_whitelisted(host):
             self.logger.info(
                 f"[FIRST_RESPONDER] host={host} is whitelisted — monitor only, no blocking"
             )
