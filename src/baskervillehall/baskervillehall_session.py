@@ -1473,11 +1473,14 @@ class BaskervillehallSession(object):
                             # Verified crawlers stay out of the UA/fingerprint breakdown: the first
                             # responder must not see real Googlebot traffic as part of an attack.
                             _bucket = mitigation.classify(data.get('banjax_decision'),
-                                                          data.get('http_response_code'))
-                            self.host_mitigation_counts[host][_bucket] += 1
+                                                          data.get('http_response_code'),
+                                                          data.get('loc_in'))
+                            if _bucket:
+                                self.host_mitigation_counts[host][_bucket] += 1
                             if _ua_key and not verified_bot:
                                 self.host_ua_counts[host][_ua_key] += 1
-                                self.host_ua_mitigation_counts[host][_ua_key][_bucket] += 1
+                                if _bucket:
+                                    self.host_ua_mitigation_counts[host][_ua_key][_bucket] += 1
                             if _fp_hash and not verified_bot:
                                 self.host_fingerprint_counts[host][_fp_hash] += 1
                         session_id = self.get_session_cookie(data)

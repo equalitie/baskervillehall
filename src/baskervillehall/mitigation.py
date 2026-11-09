@@ -14,8 +14,14 @@ PASSED_DECISIONS = frozenset({
 BUCKETS = ('served', 'passed', 'challenged', 'blocked', 'rate_limited')
 
 
-def classify(banjax_decision, status):
-    """Return one of BUCKETS.
+# nginx locations that never go through banjax: static files (usually from the edge cache)
+# and the http -> https redirect. Counting them would show "served without a challenge"
+# for every asset a browser loads after passing the challenge.
+NOT_CHECKED_LOCATIONS = frozenset({'static_file', 'redir_to_ssl'})
+
+
+def classify(banjax_decision, status, loc_in=None):
+    """Return one of BUCKETS, or None for requests banjax never checks (see NOT_CHECKED_LOCATIONS).
 
     served        content served, no challenge involved (includes cache hits)
     passed        content served after the client passed a challenge (valid cookie)
@@ -23,6 +29,8 @@ def classify(banjax_decision, status):
     blocked       banjax block page or ban
     rate_limited  429 from a rate-limit rule
     """
+    if loc_in in NOT_CHECKED_LOCATIONS:
+        return None
     d = banjax_decision or ''
     if d in PASSED_DECISIONS:
         return 'passed'
