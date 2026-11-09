@@ -23,6 +23,7 @@ from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
+from baskervillehall import mitigation
 import json as _json_std
 from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -295,6 +296,9 @@ class BaskervillehallSession(object):
         self.host_country_counts = defaultdict(lambda: defaultdict(int))
         self.host_asn_counts = defaultdict(lambda: defaultdict(int))
         self.host_ua_counts = defaultdict(lambda: defaultdict(int))
+        # What banjax did with the requests (mitigation.BUCKETS), per host and per host+UA
+        self.host_mitigation_counts = defaultdict(lambda: defaultdict(int))
+        self.host_ua_mitigation_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         self.host_session_counts = defaultdict(int)
         self.host_immature_counts = defaultdict(int)
         self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
@@ -434,6 +438,9 @@ class BaskervillehallSession(object):
         country_snap = {h: dict(v) for h, v in self.host_country_counts.items()}
         asn_snap = {h: dict(v) for h, v in self.host_asn_counts.items()}
         ua_snap = {h: dict(v) for h, v in self.host_ua_counts.items()}
+        mitigation_snap = {h: dict(v) for h, v in self.host_mitigation_counts.items()}
+        ua_mitigation_snap = {h: {u: dict(b) for u, b in v.items()}
+                              for h, v in self.host_ua_mitigation_counts.items()}
         fp_snap = {h: dict(v) for h, v in self.host_fingerprint_counts.items()}
         session_snap = dict(self.host_session_counts)
         immature_snap = dict(self.host_immature_counts)
@@ -442,6 +449,8 @@ class BaskervillehallSession(object):
         self.host_country_counts.clear()
         self.host_asn_counts.clear()
         self.host_ua_counts.clear()
+        self.host_mitigation_counts.clear()
+        self.host_ua_mitigation_counts.clear()
         self.host_fingerprint_counts.clear()
         self.host_session_counts.clear()
         self.host_immature_counts.clear()
@@ -463,6 +472,13 @@ class BaskervillehallSession(object):
                 'session_count': total_sessions,
                 'immature_session_count': immature_sessions,
                 'immature_ratio': immature_ratio,
+                'mitigation': mitigation_snap.get(host, {}),
+                # same UAs as ua_counts (top 10), so the First Responder can tell whether the
+                # attack UAs reach the site, get the challenge page or pass it
+                'ua_mitigation': {
+                    u: ua_mitigation_snap.get(host, {}).get(u, {})
+                    for u in top10(ua_snap.get(host, {}))
+                },
             }
             try:
                 self.producer_output.send(
@@ -1456,8 +1472,12 @@ class BaskervillehallSession(object):
                                 self.host_asn_counts[host][asn_name] += 1
                             # Verified crawlers stay out of the UA/fingerprint breakdown: the first
                             # responder must not see real Googlebot traffic as part of an attack.
+                            _bucket = mitigation.classify(data.get('banjax_decision'),
+                                                          data.get('http_response_code'))
+                            self.host_mitigation_counts[host][_bucket] += 1
                             if _ua_key and not verified_bot:
                                 self.host_ua_counts[host][_ua_key] += 1
+                                self.host_ua_mitigation_counts[host][_ua_key][_bucket] += 1
                             if _fp_hash and not verified_bot:
                                 self.host_fingerprint_counts[host][_fp_hash] += 1
                         session_id = self.get_session_cookie(data)
@@ -1532,7 +1552,7 @@ class BaskervillehallSession(object):
                         cloudflare_score = 0
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
-                            if banjax_decision == 'ShaChallengePassed':
+                            if mitigation.is_passed(banjax_decision):
                                 passed_challenge = True
                             if banjax_decision in ['PasswordChallengePassed', 'PasswordProtectedPriorityPass',
                                                    'PasswordChallengeRoamingPassed']:

@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import psycopg2.extras
@@ -217,7 +217,8 @@ Decision rules (apply in order):
    or monitor_only instead. There are NO exceptions to this rule.
 5. Use challenge_all when:
    (a) ESCALATION: previous block_asn, block_ua, or block_subnet actions are already active
-       for this host but the attack is still ongoing — those blocks did not stop it.
+       for this host and "What banjax did with the traffic" shows most attack requests are
+       still served (the spike ratio alone does not show this: it counts challenged requests).
        challenge_all is a JS challenge wall for ALL visitors: humans solve it transparently,
        bots fail. Use it when targeted blocking is insufficient.
    (b) HIGH COLLATERAL: you would normally choose monitor_only because blocking would hurt
@@ -427,9 +428,10 @@ DECISION RULES:
 
 12. Use challenge_all when:
     (a) ESCALATION: previous block_asn, block_ua, or block_subnet actions are already active
-        for this host but the attack is still ongoing. Those targeted blocks did not stop it.
+        for this host and "What banjax did with the traffic" shows most attack requests are
+        still served (the spike ratio alone does not show this: it counts challenged requests).
         challenge_all is a JS challenge wall: humans solve it transparently, bots fail.
-        Use when targeted actions have been tried and the attack continues.
+        Use when targeted actions have been tried and the numbers show they are not working.
     (b) HIGH COLLATERAL: you would choose monitor_only because the attack comes from
         survey_country, widely-used UAs, or residential ASNs (collateral damage too high),
         BUT the attack is significant (peak >5000 req/min OR immature_ratio >80%).
@@ -938,6 +940,102 @@ class IncidentFirstResponder:
             rows = cur.fetchall()
         return [{'action': r[0], 'target': r[1], 'created_at': r[2]} for r in rows]
 
+    MITIGATION_MIN_REQUESTS = 100
+
+    def _get_mitigation(self, conn, host, active_actions, ua_stats):
+        """What banjax did with the host's traffic (host_mitigation_minute, written by the detector).
+
+        Window: since the oldest active action (so it shows the effect of what is in place),
+        capped at 2 h; the last 10 minutes when nothing is active. Returns None without data.
+        """
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(minutes=10)
+        if active_actions:
+            oldest = min(a['created_at'] for a in active_actions)
+            since = max(oldest, now - timedelta(hours=2))
+        since_utc = since.astimezone(timezone.utc).replace(tzinfo=None)
+        buckets = ('served', 'passed', 'challenged', 'blocked', 'rate_limited')
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT {', '.join(f'COALESCE(SUM({b}), 0)' for b in buckets)}
+                    FROM host_mitigation_minute WHERE host = %s AND minute >= %s
+                """, (host, since_utc))
+                totals = dict(zip(buckets, (int(v) for v in cur.fetchone())))
+                uas = [u['ua'] for u in (ua_stats or [])[:5]]
+                per_ua = {}
+                if uas:
+                    cur.execute(f"""
+                        SELECT ua, {', '.join(f'SUM({b})' for b in buckets)}
+                        FROM host_ua_mitigation_minute
+                        WHERE host = %s AND minute >= %s AND ua = ANY(%s)
+                        GROUP BY ua
+                    """, (host, since_utc, uas))
+                    for r in cur.fetchall():
+                        per_ua[r[0]] = dict(zip(buckets, (int(v) for v in r[1:])))
+        except Exception as e:
+            conn.rollback()
+            self.logger.warning(f"[FIRST_RESPONDER] mitigation stats unavailable for {host}: {e}")
+            return None
+        if sum(totals.values()) < self.MITIGATION_MIN_REQUESTS:
+            return None
+        return {'since': since, 'totals': totals, 'per_ua': per_ua}
+
+    @staticmethod
+    def _pct(part, total):
+        return 100.0 * part / total if total else 0.0
+
+    def _mitigation_lines(self, mitigation, has_challenge_all):
+        """Prompt lines: measured effect of the mitigations, and a verdict on challenge_all."""
+        if not mitigation:
+            lines = ["\n--- What banjax did with the traffic ---",
+                     "  (no data yet). Request counts include requests answered with a challenge page,"
+                     " so a continuing spike does NOT show that a challenge fails."]
+            if has_challenge_all:
+                lines.append("  challenge_all IS ALREADY ACTIVE. Do NOT issue challenge_all again.")
+            return lines
+        t = mitigation['totals']
+        total = sum(t.values())
+        p = {k: self._pct(v, total) for k, v in t.items()}
+        lines = [
+            f"\n--- What banjax did with the traffic (since {mitigation['since'].strftime('%H:%M UTC')}, "
+            f"{total} requests) ---",
+            f"  served without a challenge: {p['served']:.1f}%",
+            f"  served after passing a challenge: {p['passed']:.1f}%",
+            f"  challenge page served (did not reach the site): {p['challenged']:.1f}%",
+            f"  blocked: {p['blocked']:.1f}%   rate-limited: {p['rate_limited']:.1f}%",
+            "  Request counts and spike ratios INCLUDE challenged requests: judge whether a"
+            " challenge works from these numbers, not from the spike.",
+        ]
+        for ua, b in mitigation['per_ua'].items():
+            ut = sum(b.values())
+            if ut < 20:
+                continue
+            lines.append(
+                f"  UA {ua[:120]!r}: served {self._pct(b['served'], ut):.0f}%, "
+                f"passed {self._pct(b['passed'], ut):.0f}%, "
+                f"challenge page {self._pct(b['challenged'], ut):.0f}%, "
+                f"blocked {self._pct(b['blocked'], ut):.0f}% ({ut} requests)"
+            )
+        if has_challenge_all:
+            reached = p['served'] + p['passed']
+            if p['passed'] >= 30:
+                lines.append(
+                    f"  ⚠ challenge_all IS ACTIVE and clients ARE passing it: {p['passed']:.0f}% of requests"
+                    " were served after a passed challenge. The JS challenge does not stop this traffic."
+                    " Do NOT issue challenge_all again.")
+            elif reached < 30:
+                lines.append(
+                    f"  ✓ challenge_all IS ACTIVE and WORKING: {p['challenged'] + p['blocked']:.0f}% of requests"
+                    " got the challenge page or a block and did not reach the site. The spike still counts"
+                    " them. Do NOT escalate and do NOT issue challenge_all again; monitor_only is correct.")
+            else:
+                lines.append(
+                    f"  challenge_all IS ACTIVE but {p['served']:.0f}% of requests are served without a"
+                    " challenge (path exceptions, allowlisted clients or cache). Do NOT issue challenge_all"
+                    " again.")
+        return lines
+
     # ------------------------------------------------------------------
     # Subnet concentration helpers
     # ------------------------------------------------------------------
@@ -1411,7 +1509,8 @@ class IncidentFirstResponder:
     def _build_prompt(self, incident, country_stats, asn_stats, normal_traffic,
                       normal_asn_traffic=None, url_stats=None, ua_stats=None,
                       normal_url_traffic=None, normal_ua_traffic=None,
-                      fingerprint_stats=None, has_followup=False, active_actions=None):
+                      fingerprint_stats=None, has_followup=False, active_actions=None,
+                      mitigation=None):
         host = incident['host']
         survey_country = incident['survey_country']
         normal_asn_traffic = normal_asn_traffic or {}
@@ -1487,22 +1586,17 @@ class IncidentFirstResponder:
             lines.append("Raw traffic spike: not detected (challenge spike only, or traffic monitor warming up)")
 
         if active_actions:
-            lines.append("\n⚠ ACTIVE MITIGATIONS (already applied, attack is still ongoing):")
+            lines.append("\n⚠ ACTIVE MITIGATIONS (already applied):")
             for a in active_actions:
                 lines.append(f"  {a['action']} → {a['target']} (applied {a['created_at'].strftime('%H:%M UTC')})")
             has_challenge_all = any(a['action'] == 'challenge_all' for a in active_actions)
-            if has_challenge_all:
+            if not has_challenge_all:
                 lines.append(
-                    "  ⚠ challenge_all IS ALREADY ACTIVE but the attack continues —"
-                    " bots are solving the JS/SHA challenge. challenge_all is INEFFECTIVE here."
-                    " Do NOT issue challenge_all again. Escalate to block_ua (if single UA >70%)"
-                    " or block_subnet (if datacenter ASNs dominate)."
+                    "  If the numbers below show these actions are not stopping the attack, consider"
+                    " challenge_all as escalation when the attack is significant (>5000 req/min)."
                 )
-            else:
-                lines.append(
-                    "  These actions did not stop the attack. Consider challenge_all as escalation"
-                    " if targeted blocks have failed and attack is significant (>5000 req/min)."
-                )
+        lines.extend(self._mitigation_lines(
+            mitigation, any(a['action'] == 'challenge_all' for a in (active_actions or []))))
 
         if incident['botnet_info']:
             lines.append(f"Botnet overlap with previous incidents:\n{incident['botnet_info']}")
@@ -2105,7 +2199,8 @@ class IncidentFirstResponder:
 
     def _build_traffic_spike_prompt(self, incident, country_stats, asn_stats,
                                     normal_traffic, normal_asn_traffic,
-                                    ua_stats, fingerprint_stats, active_actions=None):
+                                    ua_stats, fingerprint_stats, active_actions=None,
+                                    mitigation=None):
         host = incident['host']
         survey_country = incident.get('survey_country') or 'unknown'
         spike_ratio = incident.get('spike_ratio', 0.0) or incident.get('traffic_peak_ratio', 0.0)
@@ -2139,22 +2234,17 @@ class IncidentFirstResponder:
             )
 
         if active_actions:
-            lines.append("\n⚠ ACTIVE MITIGATIONS (already applied, attack is still ongoing):")
+            lines.append("\n⚠ ACTIVE MITIGATIONS (already applied):")
             for a in active_actions:
                 lines.append(f"  {a['action']} → {a['target']} (applied {a['created_at'].strftime('%H:%M UTC')})")
             has_challenge_all = any(a['action'] == 'challenge_all' for a in active_actions)
-            if has_challenge_all:
+            if not has_challenge_all:
                 lines.append(
-                    "  ⚠ challenge_all IS ALREADY ACTIVE but the attack continues —"
-                    " bots are solving the JS/SHA challenge. challenge_all is INEFFECTIVE here."
-                    " Do NOT issue challenge_all again. Escalate to block_ua (if single UA >70%)"
-                    " or block_subnet (if datacenter ASNs dominate)."
+                    "  If the numbers below show these actions are not stopping the attack, consider"
+                    " challenge_all as escalation when the attack is significant (>5000 req/min)."
                 )
-            else:
-                lines.append(
-                    "  These actions did not stop the attack. Consider challenge_all as escalation"
-                    " if targeted blocks have failed and attack is significant (>5000 req/min)."
-                )
+        lines.extend(self._mitigation_lines(
+            mitigation, any(a['action'] == 'challenge_all' for a in (active_actions or []))))
 
         lines.append("\n--- Traffic country distribution ---")
         if country_stats:
@@ -2499,6 +2589,7 @@ class IncidentFirstResponder:
             normal_traffic, normal_asn_traffic,
             ua_stats, fingerprint_stats,
             active_actions=active_actions,
+            mitigation=self._get_mitigation(conn, host, active_actions, ua_stats),
         )
         self.logger.info(
             f"[FIRST_RESPONDER] Calling LLM for traffic_spike incident_id={incident_id}"
@@ -2688,6 +2779,7 @@ class IncidentFirstResponder:
             url_stats, ua_stats, normal_url_traffic, normal_ua_traffic,
             fingerprint_stats=fingerprint_stats,
             active_actions=active_actions,
+            mitigation=self._get_mitigation(conn, host, active_actions, ua_stats),
         )
         self.logger.info(f"[FIRST_RESPONDER] Calling LLM for incident_id={incident_id}")
 
