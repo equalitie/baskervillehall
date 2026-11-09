@@ -57,12 +57,15 @@ There are two independent sources of commands:
    `challenge_command_history`**. To see the individual IPs they hit, use Kibana
    `baskerville_banjax_command-*` (every command we send, with `source`/`meta`).
 
-**Blocks are currently sent as challenges.** While `BASKERVILLE_BLOCKS_DISABLED=true` (since Nov 2026),
-`block_ip` / `block_subnet` / `block_session` are sent to banjax as `challenge_*`. The predictor
-stores the name it sent. `first_responder_actions.action` stores what the LLM decided, so a
-`block_ip` row there was actually sent as `challenge_ip`.
+**Automatic blocks are currently sent as challenges.** While `BASKERVILLE_BLOCKS_DISABLED=true`
+(since Nov 2026), `block_ip` / `block_subnet` / `block_session` from the predictor and the First
+Responder are sent to banjax as `challenge_*`. The predictor stores the name it sent.
+`first_responder_actions.action` stores what the LLM decided, so a `block_ip` row there was actually
+sent as `challenge_ip`. Manual commands can send a real block with `--allow-block` (skill
+`send-command`): check `manual_commands.sent_name` for what actually went out.
 
-A challenge is a JS proof-of-work page in banjax. Real browsers pass it; most scripts don't. A
+A challenge is a JS proof-of-work page in banjax. Real browsers pass it automatically in a few
+seconds (a person barely notices it); most scripts don't. Headless-browser botnets pass it too. A
 banjax `challenge_ip` applies to the IP on **every** Deflect site on that edge, not only the
 attacked one.
 

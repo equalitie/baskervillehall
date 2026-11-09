@@ -55,7 +55,7 @@ class CommandError(ValueError):
 
 
 def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='', operator='',
-                  clear_host=False):
+                  clear_host=False, allow_block=False):
     """Validate the request and return (banjax message, list of warnings)."""
     warnings = []
     if name not in COMMANDS:
@@ -71,9 +71,13 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         raise CommandError(f'{host} is in BASKERVILLE_HOST_WHITELIST, no commands are sent for it')
 
     kind = COMMANDS[name]
-    sent_name = guard_command_name(name)
+    # The kill switch is for automatic blocks; an analyst can override it for one command.
+    sent_name = name if allow_block else guard_command_name(name)
     if sent_name != name:
-        warnings.append(f'blocks are disabled (BASKERVILLE_BLOCKS_DISABLED): {name} is sent as {sent_name}')
+        warnings.append(f'blocks are disabled (BASKERVILLE_BLOCKS_DISABLED): {name} is sent as {sent_name}; '
+                        f'add --allow-block to send a real block')
+    elif allow_block and sent_name != guard_command_name(name):
+        warnings.append(f'--allow-block: a real {name} is sent although automatic blocks are disabled')
 
     meta = f'manual [{operator}] {reason}'
     # "Value" (not "value"): banjax reads either, but the Kibana pipeline maps only "Value" to client_ip.
@@ -168,6 +172,8 @@ def main(argv=None):
     parser.add_argument('--ttl', type=int, help=f'seconds, max {MAX_TTL}')
     parser.add_argument('--reason', required=True)
     parser.add_argument('--operator', required=True)
+    parser.add_argument('--allow-block', action='store_true',
+                        help='send block_* as is, even while BASKERVILLE_BLOCKS_DISABLED turns automatic blocks into challenges')
     parser.add_argument('--clear-host', action='store_true',
                         help="clear_rules: also clear the host's challenge_all (and limit --ua to this host)")
     parser.add_argument('--all-dnets', action='store_true',
@@ -178,7 +184,8 @@ def main(argv=None):
     try:
         message, warnings = build_command(
             args.name, args.host, value=args.value, ua=args.ua, session_id=args.session_id,
-            ttl=args.ttl, reason=args.reason, operator=args.operator, clear_host=args.clear_host)
+            ttl=args.ttl, reason=args.reason, operator=args.operator, clear_host=args.clear_host,
+            allow_block=args.allow_block)
     except CommandError as e:
         print(f'ERROR: {e}', file=sys.stderr)
         return 2

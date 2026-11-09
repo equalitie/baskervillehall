@@ -34,8 +34,15 @@ without a prompt.
 All except `clear_rules` need `--ttl` in seconds (max 86400 = 24 h). `--host` is always required:
 it picks the dnet.
 
-While `BASKERVILLE_BLOCKS_DISABLED=true`, `block_ip/subnet/session` are sent as `challenge_*` (the
-script prints a NOTE). `altcha_*` needs banjax v0.13.0 on the host's dnet.
+**Blocks.** While `BASKERVILLE_BLOCKS_DISABLED=true`, `block_ip/subnet/session` are sent as
+`challenge_*` (the script prints a NOTE). That kill switch exists because automatic blocks hurt real
+users. To send a **real** block, add `--allow-block`. Use it only when the analyst explicitly asks for a
+block (not a challenge), e.g. a client that solves the challenge and keeps attacking. Before sending, tell
+them that `block_ip`/`block_subnet` block the address on **every** site of that edge, and keep the TTL
+short (minutes to a few hours). `block_ua` is per host and is never converted. `clear_rules` removes a
+block like any other decision.
+
+`altcha_*` needs banjax v0.13.0 on the host's dnet.
 
 ## Removing a decision (`clear_rules`)
 
@@ -59,11 +66,20 @@ bin/send_command.sh challenge_ip --host example.org --value 203.0.113.7 --ttl 36
 
 bin/send_command.sh challenge_all --host example.org --ttl 1800 --reason "L7 flood, 40x spike, customer asked"
 
+bin/send_command.sh block_ip --host example.org --value 203.0.113.7 --ttl 1800 --allow-block \
+  --reason "solves the challenge, 20k req/h to /search, analyst asked for a block"
+
 bin/send_command.sh clear_rules --host example.org --value 198.51.100.20 \
   --reason "customer's office IP, false positive from Bad bot rule"
 ```
 
 ## After sending
+
+A challenge is invisible to a normal browser: the SHA proof-of-work solves itself in a few seconds.
+Don't judge by "I opened the site and saw nothing". Check `banjax_decision` in Kibana `deflect.log-*`
+for the IP: `ExpiringChallenge` (429) then `ShaChallengePassed` = the challenge works; `NginxBlock` /
+403 = blocked; `NoMention` after `clear_rules` = the decision is gone. banjax applies a command 5–15 s
+after it is sent.
 
 - Say what was sent (the printed message), to which dnet, the TTL, and the `manual_commands.id`.
 - To check it reached banjax: Kibana `baskerville_banjax_command-*` with `source: manual*`, and

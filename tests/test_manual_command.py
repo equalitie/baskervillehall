@@ -48,6 +48,13 @@ def test_block_sent_as_challenge_when_disabled(monkeypatch):
     assert any('sent as challenge_ip' in w for w in warnings)
 
 
+def test_allow_block_overrides_kill_switch(monkeypatch):
+    monkeypatch.setattr(block_guard, 'BLOCKS_DISABLED', True)
+    msg, warnings = build_command('block_ip', 'example.org', value='1.2.3.4', ttl=60, allow_block=True, **BASE)
+    assert msg['Name'] == 'block_ip'
+    assert any('real block_ip' in w for w in warnings)
+
+
 def test_whitelisted_host(monkeypatch):
     monkeypatch.setattr(block_guard, 'HOST_WHITELIST', ('kavkaz-uzel.eu',))
     with pytest.raises(CommandError):
