@@ -9,6 +9,10 @@ Everything goes through `bin/send_command.sh`. It runs inside the First Responde
 command to the host's dnet, applies the host whitelist and the block kill switch, and logs the send
 in `manual_commands`.
 
+Run it as a single command from the `analyst/` folder: `bin/send_command.sh ...`, with no `cd`,
+`&&`, `;` or pipes around it. Only that exact form matches the permission rule that lets it run
+without a prompt.
+
 ## Before sending
 
 1. Know exactly what and why: the host, the target (IP / subnet / session / exact UA), the TTL and
