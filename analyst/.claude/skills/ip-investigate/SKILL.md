@@ -54,6 +54,14 @@ An action can hit the IP without naming it: `challenge_all` (whole host), `chall
 `block_ua` (matches the IP's UA exactly), `*_ua_fingerprint`, `challenge_subnet` (its /24).
 Compare the target with the IP's UA, fingerprint and subnet.
 
+Was it sent by hand? (the table exists after the first manual send)
+
+```sql
+SELECT created_at, operator, sent_name, host, value, ttl, reason
+FROM manual_commands WHERE value = '<IP>' OR '<IP>'::inet << value::cidr
+ORDER BY created_at DESC LIMIT 10;
+```
+
 ## 3. Sessions on the host (needs host; keep the window to hours)
 
 ```sql

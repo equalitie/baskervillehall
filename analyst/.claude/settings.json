@@ -3,6 +3,8 @@
     "allow": [
       "Bash(bin/q.sh:*)",
       "Bash(./bin/q.sh:*)",
+      "Bash(bin/send_command.sh:*)",
+      "Bash(./bin/send_command.sh:*)",
       "Bash(kubectl get:*)",
       "Bash(kubectl logs:*)",
       "Bash(kubectl describe:*)"
