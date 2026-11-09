@@ -251,6 +251,22 @@ def main():
             challenge_all_ttl_minutes=int(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_TTL_MINUTES', '30')),
             logger=logger,
         ).run()
+    elif args.pipeline == 'daily_report':
+        from baskervillehall.daily_report import DailyReport
+        DailyReport(
+            postgres_connection=postgres_connection,
+            anthropic_api_key=os.environ.get('ANTHROPIC_API_KEY', ''),
+            model=os.environ.get('DAILY_REPORT_LLM_MODEL', 'claude-sonnet-5-5'),
+            smtp={
+                'host': os.environ.get('SMTP_HOST'),
+                'port': os.environ.get('SMTP_PORT', '587'),
+                'user': os.environ.get('SMTP_USER'),
+                'password': os.environ.get('SMTP_PASSWORD'),
+                'from': os.environ.get('DAILY_REPORT_FROM'),
+                'to': os.environ.get('DAILY_REPORT_TO'),
+            },
+            logger=logger,
+        ).run(send_email=os.environ.get('DAILY_REPORT_SEND_EMAIL', 'true').lower() == 'true')
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 
