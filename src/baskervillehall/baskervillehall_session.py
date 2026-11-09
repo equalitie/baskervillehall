@@ -20,12 +20,21 @@ from baskervillehall import baskerville_rules
 from baskervillehall.bot_verificator import BotVerificator
 from baskervillehall.ai_bot_verificator import AiBotVerificator
 from baskervillehall.country_blocker import CountryBlocker
+from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
-from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+from baskervillehall import mitigation
+import json as _json_std
+from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka.errors import NoBrokersAvailable
 from kafka.consumer.subscription_state import ConsumerRebalanceListener
+
+try:
+    from kubernetes import client as k8s_client, config as k8s_config
+    _K8S_AVAILABLE = True
+except ImportError:
+    _K8S_AVAILABLE = False
 
 # Fast JSON / ISO date parsing
 try:
@@ -175,7 +184,9 @@ class BaskervillehallSession(object):
             score_2_num_requests=5,
             hostname='localhost',
             topic_commands=None,
-            dnet_partition_map=None
+            dnet_partition_map=None,
+            topic_traffic_stats=None,
+            traffic_stats_interval=60,
     ):
         super().__init__()
         if kafka_connection is None:
@@ -230,6 +241,7 @@ class BaskervillehallSession(object):
 
         # --- state ---
         self.producer = None
+        self.producer_output = None
         self.ips = dict()
         self.ips_primary = dict()
         self.flush_size_primary = dict()
@@ -264,6 +276,36 @@ class BaskervillehallSession(object):
             deflect_api_setting=self.settings,
             logger=self.logger,
         )
+
+        self.first_responder_blocker = FirstResponderBlocker(
+            postgres_connection=postgres_connection,
+            kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
+            topic_commands=topic_commands or 'banjax_command_topic',
+            dnet_partition_map=self.dnet_partition_map,
+            check_interval=60,
+            block_ttl=300,
+            logger=self.logger,
+        )
+
+        self.topic_traffic_stats = topic_traffic_stats
+        self.traffic_stats_interval = traffic_stats_interval
+        self.internal_ips = set()
+        self._internal_ips_refreshed_at = 0.0  # epoch seconds, 0 = never
+        self.host_request_counts = defaultdict(int)
+        self.host_country_counts = defaultdict(lambda: defaultdict(int))
+        self.host_asn_counts = defaultdict(lambda: defaultdict(int))
+        self.host_ua_counts = defaultdict(lambda: defaultdict(int))
+        # What banjax did with the requests (mitigation.BUCKETS), per host and per host+UA
+        self.host_mitigation_counts = defaultdict(lambda: defaultdict(int))
+        self.host_ua_mitigation_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        self.host_session_counts = defaultdict(int)
+        self.host_immature_counts = defaultdict(int)
+        self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
+        self.host_dnet: dict = {}  # host → most recently seen dnet
+        self.ts_traffic_flush = time_module.time()
+        self._ts_host_dnet_flush = 0.0
+        self._postgres_connection = postgres_connection
 
         self.primary_collect_cooldown_sec = 2.0
         self._last_primary_collect = {}
@@ -314,6 +356,36 @@ class BaskervillehallSession(object):
     def _t(self):
         return time_module.time()
 
+    def _refresh_node_ips(self, refresh_interval=3600):
+        """Fetch all cluster node external IPs from Kubernetes API.
+
+        Used to whitelist our own infrastructure (e.g. DeflectHealthCheck) by
+        requiring both a known node IP AND the expected UA — prevents UA spoofing.
+        Refreshes at most once per refresh_interval seconds (default 1h).
+        """
+        if not _K8S_AVAILABLE:
+            return
+        now = time_module.time()
+        if now - self._internal_ips_refreshed_at < refresh_interval:
+            return
+        try:
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                k8s_config.load_kube_config()
+            v1 = k8s_client.CoreV1Api()
+            nodes = v1.list_node()
+            ips = set()
+            for node in nodes.items:
+                for addr in (node.status.addresses or []):
+                    if addr.type in ('ExternalIP', 'InternalIP'):
+                        ips.add(addr.address)
+            self.internal_ips = ips
+            self._internal_ips_refreshed_at = now
+            self.logger.info(f"[SESSION] Refreshed node IPs: {ips}")
+        except Exception as e:
+            self.logger.warning(f"[SESSION] Could not refresh node IPs: {e}")
+
     def _acc(self, key, t0):
         self.profile_stats[key] += (time_module.time() - t0)
 
@@ -351,6 +423,93 @@ class BaskervillehallSession(object):
                 self.logger.warning(f"  {name}: {time_spent:.3f}s ({percentage:.1f}%)")
         for k in list(self.profile_stats.keys()):
             self.profile_stats[k] = 0.0
+
+    def _flush_traffic_stats(self):
+        """Send per-host request counts and breakdowns to topic_traffic_stats and reset counters."""
+        if not self.host_request_counts:
+            self.logger.debug('[TRAFFIC_STATS] flush called but no counts')
+            return
+
+        def top10(d):
+            return dict(sorted(d.items(), key=lambda x: -x[1])[:10])
+
+        ts_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        counts = dict(self.host_request_counts)
+        country_snap = {h: dict(v) for h, v in self.host_country_counts.items()}
+        asn_snap = {h: dict(v) for h, v in self.host_asn_counts.items()}
+        ua_snap = {h: dict(v) for h, v in self.host_ua_counts.items()}
+        mitigation_snap = {h: dict(v) for h, v in self.host_mitigation_counts.items()}
+        ua_mitigation_snap = {h: {u: dict(b) for u, b in v.items()}
+                              for h, v in self.host_ua_mitigation_counts.items()}
+        fp_snap = {h: dict(v) for h, v in self.host_fingerprint_counts.items()}
+        session_snap = dict(self.host_session_counts)
+        immature_snap = dict(self.host_immature_counts)
+
+        self.host_request_counts.clear()
+        self.host_country_counts.clear()
+        self.host_asn_counts.clear()
+        self.host_ua_counts.clear()
+        self.host_mitigation_counts.clear()
+        self.host_ua_mitigation_counts.clear()
+        self.host_fingerprint_counts.clear()
+        self.host_session_counts.clear()
+        self.host_immature_counts.clear()
+
+        self.logger.info(f'[TRAFFIC_STATS] flushing {len(counts)} hosts to {self.topic_traffic_stats}')
+        for host, count in counts.items():
+            total_sessions = session_snap.get(host, 0)
+            immature_sessions = immature_snap.get(host, 0)
+            immature_ratio = round(immature_sessions / total_sessions, 3) if total_sessions > 0 else None
+            msg = {
+                'host': host,
+                'request_count': count,
+                'ts': ts_str,
+                'window_seconds': self.traffic_stats_interval,
+                'country_counts': top10(country_snap.get(host, {})),
+                'asn_counts': top10(asn_snap.get(host, {})),
+                'ua_counts': top10(ua_snap.get(host, {})),
+                'fingerprint_counts': top10(fp_snap.get(host, {})),
+                'session_count': total_sessions,
+                'immature_session_count': immature_sessions,
+                'immature_ratio': immature_ratio,
+                'mitigation': mitigation_snap.get(host, {}),
+                # same UAs as ua_counts (top 10), so the First Responder can tell whether the
+                # attack UAs reach the site, get the challenge page or pass it
+                'ua_mitigation': {
+                    u: ua_mitigation_snap.get(host, {}).get(u, {})
+                    for u in top10(ua_snap.get(host, {}))
+                },
+            }
+            try:
+                self.producer_output.send(
+                    self.topic_traffic_stats,
+                    key=host.encode('utf-8'),
+                    value=msg,
+                )
+            except Exception as e:
+                self.logger.warning(f'[TRAFFIC_STATS] Failed to send for {host}: {e}')
+
+    def _flush_host_dnet_to_db(self):
+        """Upsert host → dnet mapping to DB so first_responder can route commands correctly."""
+        if not self.host_dnet or not self._postgres_connection:
+            return
+        snapshot = dict(self.host_dnet)
+        self.host_dnet.clear()
+        try:
+            import psycopg2
+            conn = psycopg2.connect(**self._postgres_connection)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO host_dnet (host, dnet, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (host) DO UPDATE SET dnet = EXCLUDED.dnet, updated_at = NOW()""",
+                    [(h, d) for h, d in snapshot.items()]
+                )
+            conn.close()
+            self.logger.debug(f'[HOST_DNET] flushed {len(snapshot)} host→dnet mappings')
+        except Exception as e:
+            self.logger.warning(f'[HOST_DNET] flush failed: {e}')
 
     def create_kafka_connections(self, max_retries=10, initial_delay=5):
         consumer = None
@@ -416,8 +575,18 @@ class BaskervillehallSession(object):
                 self.logger.info(f"Assigned: {consumer.assignment()}")
 
                 producer = KafkaProducer(**kafka_producer_opts)
+
+                # Separate producer for output kafka (kafkab) — used for traffic stats
+                kafka_producer_output_opts = dict(self.kafka_connection_output)
+                kafka_producer_output_opts.update({
+                    'compression_type': 'gzip',
+                    'retries': 0,
+                    'value_serializer': _val_ser,
+                })
+                producer_output = KafkaProducer(**kafka_producer_output_opts)
+
                 self.logger.info("Successfully connected to Kafka brokers")
-                return consumer, producer
+                return consumer, producer, producer_output
             except NoBrokersAvailable as e:
                 delay = initial_delay * (2 ** attempt)
                 self.logger.warning(
@@ -580,6 +749,23 @@ class BaskervillehallSession(object):
             size = len(session['requests']) + session.get('static_count', 0)
             immature_session = self.score_2_num_requests <= size < self.min_number_of_requests
             session['immature_session'] = immature_session
+
+            # Fast-path for known crawlers: flush immediately on first request
+            ua = session.get('ua', '')
+            is_known_crawler = (
+                baskerville_rules.is_commercial_crawler(ua) or
+                baskerville_rules.is_ai_bot_user_agent(ua)
+            )
+            if is_known_crawler and not session.get('crawler_flushed', False):
+                session['immature_session'] = False
+                t0 = self._t()
+                self.send_session(session)
+                self._acc('session_send', t0)
+                session['flush_size'] = size
+                session['flush_end'] = session['end']
+                session['crawler_flushed'] = True
+                return
+
             if (immature_session and not session.get('immature_session_flushed', False) ) or \
                     (session['duration'] > self.min_session_duration and size > self.min_number_of_requests):
                 if 'flush_size' not in session or size - session.get('flush_size') > self.flush_increment:
@@ -613,6 +799,7 @@ class BaskervillehallSession(object):
         bot_score = -1.0
         bot_score_top_factor = ''
         deflect_password = False
+        google_referer_count = 0
 
         # Compute baskerville scores only once (they're based on first request)
         if 'baskerville_score_1' not in session:
@@ -643,9 +830,12 @@ class BaskervillehallSession(object):
                 bot_score_top_factor = r['bot_score_top_factor']
             if r['deflect_password']:
                 deflect_password = True
+            if r.get('google_referer'):
+                google_referer_count += 1
             requests_formatted.append(rf)
 
         scraper_name = baskerville_rules.detect_scraper(session['ua'])
+        security_scanner = baskerville_rules.detect_security_scanner(session['ua'])
         session_final = {
             'host': session['host'],
             'dnet': session['dnet'],
@@ -665,6 +855,7 @@ class BaskervillehallSession(object):
             'bot_score': bot_score,
             'bot_score_top_factor': bot_score_top_factor,
             'deflect_password': deflect_password,
+            'google_referer': google_referer_count > 0,
             'verified_bot': session['verified_bot'],
             'verified_bot_name': session.get('verified_bot_name', ''),
             'verified_ai_bot': session.get('verified_ai_bot', False),
@@ -679,6 +870,8 @@ class BaskervillehallSession(object):
             'asn_name': session['asn_name'],
             'bot_ua': baskerville_rules.is_bot_user_agent(session['ua']),
             'ai_bot_ua': baskerville_rules.is_ai_bot_user_agent(session['ua']),
+            'commercial_crawler': baskerville_rules.is_commercial_crawler(session['ua']),
+            'fake_ua': baskerville_rules.is_fake_user_agent(session['ua']),
             'num_languages': session['num_languages'],
             'accept_language': session['accept_language'],
             'short_ua': baskerville_rules.is_short_user_agent(session['ua']),
@@ -688,6 +881,7 @@ class BaskervillehallSession(object):
             'timezone': session['timezone'],
             'scraper_name': scraper_name if scraper_name else '',
             'is_scraper': scraper_name is not None,
+            'security_scanner': security_scanner if security_scanner else '',
             'cloudflare_score': session['cloudflare_score'],
             'http_protocol': session.get('http_protocol', ''),
             'immature_session': session.get('immature_session', False),
@@ -732,6 +926,8 @@ class BaskervillehallSession(object):
             session_final['class'] = 'verified_ai_bot'
         elif session_final['ai_bot_ua']:
             session_final['class'] = 'ai_bot'
+        elif session_final['commercial_crawler']:
+            session_final['class'] = 'commercial_crawler'
         elif session_final['bad_bot']:
             session_final['class'] = 'bad_bot'
         elif session_final['is_scraper']:
@@ -748,6 +944,12 @@ class BaskervillehallSession(object):
                 value=session_final
             )
         self._acc('send_producer_send', t_send)
+
+        if self.topic_traffic_stats:
+            host = session['host']
+            self.host_session_counts[host] += 1
+            if session_final.get('immature_session', False):
+                self.host_immature_counts[host] += 1
 
     def collect_primary_session(self, ip):
         primary_sessions = self.ips_primary.get(ip)
@@ -826,9 +1028,7 @@ class BaskervillehallSession(object):
                 to_delete = {sid for sid, s in primary_sessions.items() if s['host'] == host}
                 to_delete_by_host[host] = to_delete
                 continue
-            if self.current_lag < self.lag_moderate_threshold:
-                send_threshold = max(send_threshold, self.min_number_of_requests * 2)
-            elif self.current_lag >= self.lag_high_threshold:
+            if self.current_lag >= self.lag_high_threshold:
                 send_threshold = max(send_threshold, int(self.min_number_of_requests * 1.5))
 
             immature_session = request_count == 1
@@ -1046,7 +1246,7 @@ class BaskervillehallSession(object):
     def run(self):
 
         try:
-            consumer, self.producer = self.create_kafka_connections()
+            consumer, self.producer, self.producer_output = self.create_kafka_connections()
             self.logger.info(
                 f'Starting Baskervillehall sessionizer from topic {self.topic_weblogs} to {self.topic_sessions}')
 
@@ -1057,6 +1257,8 @@ class BaskervillehallSession(object):
             ts_assign_report = datetime.utcnow()
 
             while True:
+
+                self._refresh_node_ips()
 
                 if (datetime.utcnow() - ts_assign_report).total_seconds() > 30:
                     log_partition_assignment(consumer, self.logger)
@@ -1099,6 +1301,15 @@ class BaskervillehallSession(object):
                 # Refresh bot IP ranges once per poll batch (TTL-gated, cheap when within interval)
                 self.bot_verificator.refresh()
                 self.ai_bot_verificator.refresh()
+                self.first_responder_blocker.refresh()
+
+                if self.topic_traffic_stats and time_module.time() - self.ts_traffic_flush >= self.traffic_stats_interval:
+                    self._flush_traffic_stats()
+                    self.ts_traffic_flush = time_module.time()
+
+                if time_module.time() - self._ts_host_dnet_flush >= 300:
+                    self._flush_host_dnet_to_db()
+                    self._ts_host_dnet_flush = time_module.time()
 
                 for topic_partition, messages in raw_messages.items():
                     if (datetime.utcnow() - ts_lag_report).total_seconds() > 5:
@@ -1157,6 +1368,15 @@ class BaskervillehallSession(object):
                         t_ext = self._t()
                         ip = data['client_ip']
                         ua = data.get('client_ua', data.get('client_user_agent', ''))
+
+                        # Skip internal health checker: IP must be a known Deflect node
+                        # AND UA must match — double check prevents UA spoofing.
+                        if (self.internal_ips and ip in self.internal_ips
+                                and 'deflecthealthcheck' in ua.lower()):
+                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                            self.profile_stats['message_count'] += 1
+                            continue
+
                         if 'cloudflareProperties' in data:
                             prop = data['cloudflareProperties']
                             verified_bot = prop.get('botManagement', {}).get('verifiedBot', False)
@@ -1182,9 +1402,16 @@ class BaskervillehallSession(object):
                         asn = data.get('geoip_asn', {}).get('as', {}).get('number', '0')
                         asn_name = data.get('geoip_asn', {}).get('as', {}).get('organization', {}).get('name', '')
 
+                        # ActivityPub federation traffic (Mastodon, PeerTube, Lemmy, etc.)
+                        # is detected by UA pattern in is_bad_bot() and excluded from the
+                        # bad_bot rule. We do NOT set verified_bot here — these sessions
+                        # still go through ML scoring. UA-only whitelisting would be trivially
+                        # spoofable.
+
                         if verified_bot or self.skip_expensive_ops or not baskerville_rules.is_ai_bot_user_agent(ua):
                             verified_ai_bot = False
                             verified_ai_bot_name = ''
+                            ai_spoofer = False
                         else:
                             check_fcrdns = baskerville_rules.is_fcrdns_bot_user_agent(ua)
                             verified_ai_bot_name = self.ai_bot_verificator.get_bot_name(ip, check_fcrdns=check_fcrdns)
@@ -1206,9 +1433,56 @@ class BaskervillehallSession(object):
                                 self.logger.info(
                                     f'[AI] unsupported ip={ip} asn="{asn_name}" ua="{ua}"'
                                 )
-                        ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
+                            ai_spoofer = baskerville_rules.is_ai_spoofer(ua, verified_ai_bot)
                         self.debugging = self.is_debugging_mode(data)
                         host = message.key.decode('utf-8', errors='replace')
+
+                        # Compute TLS fingerprint once per request — used both for traffic
+                        # stats counting and for per-request fingerprint blocking in
+                        # FirstResponderBlocker (catches 1-req-per-IP bots that never
+                        # form a full session and are invisible to the predictor).
+                        _cipher = (
+                            data.get('ssl_cipher') or
+                            data.get('cloudflareProperties', {}).get('tlsCipher') or
+                            data.get('tlsCipher') or ''
+                        )
+                        if _cipher:
+                            _ciphers_raw = data.get('ssl_ciphers', '')
+                            _ciphers_list = _ciphers_raw.split(':') if _ciphers_raw else [_cipher]
+                            _accept_lang = data.get('accept_language', '') or data.get('language', '')
+                            _accept_lang_list = [_accept_lang] if isinstance(_accept_lang, str) and _accept_lang else (_accept_lang if isinstance(_accept_lang, list) else [])
+                            _fp_hash = SessionFingerprints.get_fingerprints({
+                                'ua': ua,
+                                'cipher': _cipher,
+                                'ciphers': _ciphers_list,
+                                'accept_language': _accept_lang_list,
+                            })
+                        else:
+                            _fp_hash = ''
+
+                        if self.topic_traffic_stats:
+                            self.host_request_counts[host] += 1
+                            _geoip = data.get('geoip', {})
+                            _country = _geoip.get('country_code2', _geoip.get('country_code', '')) or 'XX'
+                            # Full UA up to 512: banjax and FirstResponderBlocker match UAs exactly,
+                            # a UA cut at 150 in incident stats could never be blocked.
+                            _ua_key = ua[:512] if ua else ''
+                            self.host_country_counts[host][_country] += 1
+                            if asn_name:
+                                self.host_asn_counts[host][asn_name] += 1
+                            # Verified crawlers stay out of the UA/fingerprint breakdown: the first
+                            # responder must not see real Googlebot traffic as part of an attack.
+                            _bucket = mitigation.classify(data.get('banjax_decision'),
+                                                          data.get('http_response_code'),
+                                                          data.get('loc_in'))
+                            if _bucket:
+                                self.host_mitigation_counts[host][_bucket] += 1
+                            if _ua_key and not verified_bot:
+                                self.host_ua_counts[host][_ua_key] += 1
+                                if _bucket:
+                                    self.host_ua_mitigation_counts[host][_ua_key][_bucket] += 1
+                            if _fp_hash and not verified_bot:
+                                self.host_fingerprint_counts[host][_fp_hash] += 1
                         session_id = self.get_session_cookie(data)
                         self._acc('data_extraction', t_ext)
 
@@ -1222,9 +1496,19 @@ class BaskervillehallSession(object):
                         country = geoip.get('country_code2', geoip.get('country_code', ''))
                         survey_country = data.get('survey_country', '')
                         dnet = data.get('dnet', '-')
+                        if dnet != '-':
+                            self.host_dnet[host] = dnet
                         timezone_str = geoip.get('timezone', 'America/Los_Angeles')
 
                         if self.country_blocker.process(host, ip, country, dnet):
+                            self.profile_stats['message_processing'] += (time_module.time() - msg_start)
+                            self.profile_stats['message_count'] += 1
+                            continue
+
+                        # None = crawler verification skipped under lag: don't treat as unverified
+                        _verified = True if verified_bot else (None if self.skip_expensive_ops else False)
+                        if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country,
+                                                                dnet, ua, _fp_hash, verified_bot=_verified):
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)
                             self.profile_stats['message_count'] += 1
                             continue
@@ -1271,7 +1555,7 @@ class BaskervillehallSession(object):
                         cloudflare_score = 0
                         if 'banjax_decision' in data:
                             banjax_decision = data['banjax_decision']
-                            if banjax_decision == 'ShaChallengePassed':
+                            if mitigation.is_passed(banjax_decision):
                                 passed_challenge = True
                             if banjax_decision in ['PasswordChallengePassed', 'PasswordProtectedPriorityPass',
                                                    'PasswordChallengeRoamingPassed']:
@@ -1281,6 +1565,18 @@ class BaskervillehallSession(object):
                             passed_challenge = len(data.get('cookies', {}).get('challengePassedCookie', '')) > 0
 
                         t_build = self._t()
+                        # Check for search engine referer (strong human signal)
+                        referer = data.get('referer', '') or \
+                            data.get('networkRequestAgent', {}).get('agent', {}).get('referrers', '')
+                        refererdomain = data.get('refererdomain', '')
+                        _ref_check = refererdomain or referer
+                        google_referer = bool(_ref_check) and any(
+                            s in _ref_check for s in (
+                                'google.', 'bing.com', 'duckduckgo.com',
+                                'yahoo.com', 'yandex.', 'baidu.com', 'ecosia.org',
+                            )
+                        )
+
                         request = {
                             'ts': ts_event,
                             'dnet': dnet,
@@ -1297,7 +1593,8 @@ class BaskervillehallSession(object):
                             'bot_score': bot_score,
                             'bot_score_top_factor': bot_score_top_factor,
                             'deflect_password': deflect_password,
-                            'http_protocol': data.get('http_request_version', '')
+                            'http_protocol': data.get('http_request_version', ''),
+                            'google_referer': google_referer,
                         }
                         # Get cipher from different possible locations
                         cipher = data.get('ssl_cipher', '')

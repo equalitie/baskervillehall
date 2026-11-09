@@ -1,4 +1,4 @@
-FROM jupyter/scipy-notebook:python-3.11.4
+FROM quay.io/jupyter/scipy-notebook:python-3.11
 
 COPY ./requirements.txt /usr/bin/baskervillehall/requirements.txt
 RUN pip install -r /usr/bin/baskervillehall/requirements.txt

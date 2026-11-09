@@ -1,0 +1,55 @@
+---
+apiVersion: "apps/v1"
+kind: "Deployment"
+metadata:
+  name: "ollama"
+  namespace: "default"
+  labels:
+    app: "ollama"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "ollama"
+  template:
+    metadata:
+      labels:
+        app: "ollama"
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: "ollama"
+        image: "ollama/ollama:latest"
+        ports:
+        - containerPort: 11434
+          name: http
+        volumeMounts:
+        - name: ollama-data
+          mountPath: /root/.ollama
+        resources:
+          requests:
+            cpu: "2"
+            memory: "8Gi"
+          limits:
+            cpu: "4"
+            memory: "12Gi"
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c",
+                "until ollama list > /dev/null 2>&1; do sleep 2; done && ollama pull qwen2.5:7b"]
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 11434
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 11434
+          initialDelaySeconds: 30
+          periodSeconds: 30
+      volumes:
+      - name: ollama-data
+        emptyDir: {}

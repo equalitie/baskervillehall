@@ -39,6 +39,8 @@ docker buildx build --platform linux/amd64 -f ./Dockerfile_latest . -t equalitie
 docker push equalitie/baskervillehall:latest
 ```
 
+kubectl rollout restart statefulset baskervillehall-predictor
+
 ```
 docker buildx build --platform linux/amd64 -f ./Dockerfile_latest . -t equalitie/baskervillehall:dev
 docker push equalitie/baskervillehall:dev

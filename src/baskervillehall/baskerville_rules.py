@@ -20,6 +20,34 @@ SUSPICIOUS_PATH_PATTERNS = [
 
 compiled_path_patterns = [re.compile(p, re.IGNORECASE) for p in SUSPICIOUS_PATH_PATTERNS]
 
+# Security scanner / exploit tool UA patterns — always block, never challenge
+SECURITY_SCANNER_PATTERNS = {
+    "sqlmap":           r"\bsqlmap/",
+    "nikto":            r"\bnikto/",
+    "nmap":             r"\bnmap scripting engine",
+    "masscan":          r"\bmasscan",
+    "nuclei":           r"\bNuclei/",
+    "dirbuster":        r"\bdirbuster",
+    "gobuster":         r"\bgobuster",
+    "wfuzz":            r"\bwfuzz",
+    "hydra":            r"\bTHC-Hydra",
+    "zgrab":            r"\bzgrab",
+}
+
+compiled_scanner_patterns = {
+    name: re.compile(pattern, re.IGNORECASE)
+    for name, pattern in SECURITY_SCANNER_PATTERNS.items()
+}
+
+
+def detect_security_scanner(user_agent: str):
+    """Return scanner name if UA matches a known security/exploit tool, else None."""
+    for name, pattern in compiled_scanner_patterns.items():
+        if pattern.search(user_agent):
+            return name
+    return None
+
+
 # Define patterns for known scraping tools and bots
 SCRAPER_PATTERNS = {
     "scrapy":           r"\bScrapy/\d+\.\d+(?:\.\d+)?",
@@ -474,9 +502,6 @@ def is_ai_bot_user_agent(user_agent: str) -> bool:
         # Baidu affiliate
         r"yisouspider",
 
-        # Huawei / Petal
-        r"petalbot",
-
         # Yandex (search + LLM training)
         r"yandexbot",
 
@@ -491,6 +516,118 @@ def is_ai_bot_user_agent(user_agent: str) -> bool:
     ]
 
     return any(re.search(pattern, ua) for pattern in known_ai_crawlers)
+
+
+def is_fake_user_agent(user_agent: str) -> bool:
+    """
+    Returns True if the user-agent contains patterns that indicate a spoofed/fake browser UA.
+
+    Real browsers never produce certain version string patterns. Bots that spoof browser
+    UAs often use simplified version strings that are easy to detect.
+
+    Patterns detected:
+    - X.0.0.0 build number in Chrome/Edge/Safari (real Chrome always has non-zero build,
+      e.g. Chrome/149.0.7089.113, never Chrome/149.0.0.0)
+    """
+    if not user_agent:
+        return False
+
+    ua = user_agent.lower()
+
+    fake_patterns = [
+        # Chrome/Edge: real versions always have non-zero build, e.g. 149.0.7089.113
+        # Fake bots use simplified X.0.0.0 form
+        r"chrome/\d+\.0\.0\.0",
+        r"edg(?:e)?/\d+\.0\.0\.0",
+        # Safari version in UA (the AppleWebKit part): real Safari uses X.Y.Z not X.0.0.0
+        r"version/\d+\.0\.0\.0\s+safari",
+    ]
+
+    return any(re.search(pattern, ua) for pattern in fake_patterns)
+
+
+def is_commercial_crawler(user_agent: str) -> bool:
+    """
+    Returns True if the user-agent matches a known commercial/aggressive SEO or data crawler.
+
+    These are not AI training bots, but commercial products (SEO analytics, link analysis,
+    data resellers) that crawl aggressively for their paying customers' benefit, not for
+    the benefit of the sites they crawl. Distinguished from AI bots which are in
+    is_ai_bot_user_agent().
+    """
+    if not user_agent:
+        return False
+
+    ua = user_agent.lower()
+
+    known_commercial_crawlers = [
+        # Advertising / retargeting crawlers
+        r"criteobot",       # Criteo — ad targeting, crawls content for retargeting
+
+        # Search engines (commercial, no benefit to clients)
+        r"petalbot",        # Huawei Petal Search — commercial search engine
+
+        # SEO analytics platforms
+        r"ahrefsbot",       # Ahrefs — largest commercial link crawler
+        r"semrushbot",      # Semrush — SEO analytics
+        r"mj12bot",         # Majestic SEO — link intelligence
+        r"dotbot",          # Moz — domain authority crawler
+        r"blexbot",         # WebMeUp SEO
+        r"dataforseobot",   # DataForSEO — raw data reseller
+        r"megaindex",       # MegaIndex — Russian SEO platform
+        r"seokicks",        # SEOkicks
+        r"seekportbot",     # Seekport — European search/SEO
+
+        # Web archive / monitoring (aggressive)
+        r"archive\.org_bot",    # Internet Archive (high volume)
+        r"ia_archiver",         # Internet Archive legacy UA
+
+        # Content scrapers / aggregators
+        r"proximic",        # Comscore/Proximic — content targeting
+        r"panscient",       # Panscient web intelligence
+        r"paper\.li",       # Paper.li content aggregator
+        r"scoop\.it",       # Scoop.it content curation
+    ]
+
+    return any(re.search(pattern, ua) for pattern in known_commercial_crawlers)
+
+
+def is_activitypub_user_agent(user_agent: str) -> bool:
+    """
+    Returns True if the user-agent belongs to a known ActivityPub federation client.
+
+    ActivityPub servers (Mastodon, PeerTube, Lemmy, Friendica, Misskey, etc.) make
+    server-to-server requests to federated instances as part of normal protocol operation.
+    This traffic originates from datacenter IPs (Hetzner, OVH, DigitalOcean) and looks
+    like a bot, but it is legitimate automated traffic that must not be challenged or blocked.
+
+    The user-agent format is standardised by each platform and includes the instance URL,
+    making spoofing low-value for attackers.
+    """
+    if not user_agent:
+        return False
+    ua = user_agent.lower()
+    patterns = [
+        r"mastodon/",           # Mastodon/4.x.y (http.rb/...; +https://instance/)
+        r"peertube/",           # PeerTube/8.x.y (+https://instance/)
+        r"lemmy/",              # Lemmy/0.x.y; +https://instance/
+        r"friendica ",          # Friendica Name Version; https://instance/
+        r"misskey/",            # Misskey/2024.x.y
+        r"calckey/",            # Calckey
+        r"foundkey/",           # FoundKey
+        r"firefish/",           # Firefish
+        r"akkoma/",             # Akkoma
+        r"pleroma/",            # Pleroma
+        r"pixelfed/",           # Pixelfed
+        r"funkwhale/",          # Funkwhale
+        r"writefreely/",        # WriteFreely
+        r"gotosocial/",         # GoToSocial
+        r"hometown/",           # Hometown (Mastodon fork, may appear in UA)
+        r"activity-relay",      # Generic ActivityPub relay service
+        r"activityrelay",       # ActivityRelay
+        r"http\.rb/.*mastodon", # http.rb library used by Mastodon (backup match)
+    ]
+    return any(re.search(p, ua) for p in patterns)
 
 
 def is_fcrdns_bot_user_agent(user_agent: str) -> bool:
@@ -558,6 +695,15 @@ def is_ai_spoofer(user_agent: str, verified_ai_bot: bool) -> bool:
 def is_bad_bot(session):
     if session['verified_bot'] or session.get('verified_ai_bot', False):
         return False
+
+    if is_activitypub_user_agent(session.get('ua', '')):
+        return False
+
+    # Very short/empty UA can't be a real browser — flag regardless of session type.
+    # Real browsers always have UA > 5 chars even after passing a JS challenge.
+    session_ua = session.get('ua', '') or ''
+    if len(session_ua) < 5:
+        return True
 
     if not session['primary_session']:
         return False
@@ -1027,6 +1173,16 @@ def get_baskerville_score_3(session: dict, verbose: bool = False, logger=None) -
             prev = baskerville_score_3
             baskerville_score_3 = max(1, baskerville_score_3 - 10)
             dbg(f"[SCORE] cipher_type={cipher_type} (legacy/mixed) → {prev} → {baskerville_score_3}")
+
+    # ----------------------------------------------------------------------
+    # 12. Search engine referer (strong positive human signal)
+    # ----------------------------------------------------------------------
+    if session.get('google_referer', False):
+        prev = baskerville_score_3
+        # Boost to at least 60 unless strong bot flags are set
+        if not (session.get('bot_ua') or session.get('ai_bot_ua') or session.get('headless_ua')):
+            baskerville_score_3 = max(baskerville_score_3, 60)
+            dbg(f"[SCORE] google_referer=True (came from search engine) → {prev} → {baskerville_score_3}")
 
     # ----------------------------------------------------------------------
     # Clamp into [1, 99]

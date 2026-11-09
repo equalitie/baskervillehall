@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bin/q.sh:*)",
+      "Bash(./bin/q.sh:*)",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(kubectl describe:*)"
+    ],
+    "deny": [
+      "Bash(kubectl exec:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl edit:*)",
+      "Bash(kubectl patch:*)",
+      "Bash(kubectl scale:*)",
+      "Bash(kubectl rollout:*)",
+      "Bash(kubectl set:*)",
+      "Bash(kubectl cp:*)",
+      "Bash(kubectl create:*)",
+      "Bash(kubectl replace:*)",
+      "Bash(kubectl label:*)",
+      "Bash(kubectl annotate:*)",
+      "Bash(kubectl port-forward:*)"
+    ]
+  }
+}

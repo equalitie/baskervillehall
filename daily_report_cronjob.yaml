@@ -1,0 +1,53 @@
+# Baskerville daily report, 06:00 UTC, sent by email (src/baskervillehall/daily_report.py).
+#
+# Needs a secret with the SMTP settings (not in the repo):
+#   kubectl create secret generic daily-report-smtp \
+#     --from-literal=SMTP_HOST=... --from-literal=SMTP_PORT=587 \
+#     --from-literal=SMTP_USER=... --from-literal=SMTP_PASSWORD=... \
+#     --from-literal=DAILY_REPORT_FROM=baskerville@equalit.ie \
+#     --from-literal=DAILY_REPORT_TO=you@equalit.ie
+#
+# Run once by hand: kubectl create job --from=cronjob/baskerville-daily-report daily-report-manual
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: baskerville-daily-report
+spec:
+  schedule: "0 6 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: daily-report
+              image: "equalitie/baskervillehall:latest"
+              imagePullPolicy: Always
+              command: ["python"]
+              args: ["/usr/bin/baskervillehall/src/baskervillehall/main.py", "daily_report"]
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "500m"
+              envFrom:
+                - configMapRef:
+                    name: baskervillehall
+                - secretRef:
+                    name: daily-report-smtp
+              env:
+                - name: ANTHROPIC_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: anthropic-secret
+                      key: ANTHROPIC_API_KEY
+                - name: DAILY_REPORT_LLM_MODEL
+                  value: "claude-sonnet-5-5"

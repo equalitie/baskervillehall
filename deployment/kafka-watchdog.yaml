@@ -1,0 +1,66 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-watchdog
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kafka-watchdog
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kafka-watchdog
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: kafka-watchdog
+    namespace: default
+roleRef:
+  kind: Role
+  name: kafka-watchdog
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kafka-watchdog
+  namespace: default
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: kafka-watchdog
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  UNKNOWN=$(kubectl get pods -n default --field-selector=status.phase=Unknown \
+                    --no-headers -o custom-columns=NAME:.metadata.name | grep -E '^kafka')
+                  if [ -z "$UNKNOWN" ]; then
+                    echo "No Unknown kafka pods found."
+                    exit 0
+                  fi
+                  echo "Found Unknown kafka pods: $UNKNOWN"
+                  echo "$UNKNOWN" | xargs kubectl delete pod -n default
+                  echo "Deleted."

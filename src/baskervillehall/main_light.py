@@ -100,6 +100,8 @@ def main():
             'score_2_num_requests': int(os.environ.get('SCORE_2_NUM_REQUESTS', 5)),
             'topic_commands': os.environ.get('TOPIC_COMMANDS'),
             'dnet_partition_map': json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
+            'topic_traffic_stats': os.environ.get('TOPIC_TRAFFIC_STATS') or None,
+            'traffic_stats_interval': int(os.environ.get('TRAFFIC_STATS_INTERVAL', '60')),
         }
 
         logger.info("Starting session pipeline")

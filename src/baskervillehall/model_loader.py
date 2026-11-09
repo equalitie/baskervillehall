@@ -67,6 +67,6 @@ class ModelLoader(object):
         if self.thread is not None:
             return
 
-        self.thread = threading.Thread(target=self._run)
+        self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 

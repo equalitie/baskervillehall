@@ -1,16 +1,7 @@
 import argparse
 import logging
-
 import os
 import json
-
-from baskervillehall.alert_challenge_rate import AlertChallengeRate
-from baskervillehall.storage_commands import StorageCommands
-from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
-from baskervillehall.baskervillehall_session import BaskervillehallSession
-from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
-from baskervillehall.baskervillehall_classifier_trainer import BaskervillehallClassifierTrainer
-from baskervillehall.storage_sessions import StorageSessions
 
 logger = None
 
@@ -85,6 +76,7 @@ def main():
     }
 
     if args.pipeline == 'train':
+        from baskervillehall.baskervillehall_trainer import BaskervillehallTrainer
         params = {
             'accepted_contamination': float(os.environ.get('ACCEPTED_CONTAMINATION')),
             'features': os.environ.get('FEATURES').split(','),
@@ -121,6 +113,7 @@ def main():
         )
         trainer.run()
     elif args.pipeline == 'classifier_train':
+        from baskervillehall.baskervillehall_classifier_trainer import BaskervillehallClassifierTrainer
         params = {
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'group_id': os.environ.get('GROUP_ID_CLASSIFIER_TRAIN', 'classifier_train_pipeline'),
@@ -140,6 +133,7 @@ def main():
         )
         trainer.run()
     elif args.pipeline == 'predict':
+        from baskervillehall.baskervillehall_predictor import BaskervillehallPredictor
         params = {
             'topic_sessions': os.environ.get('TOPIC_SESSIONS'),
             'group_id': os.environ.get('GROUP_ID_PREDICTOR', 'predict_pipeline'),
@@ -161,6 +155,7 @@ def main():
             'white_list_refresh_period': int(os.environ.get('WHITELIST_REFRESH_IN_MINUTES', 5)),
             'ip_whitelist_url': os.environ.get('DEFLECT_CONFIG_URL_IP_WHITELIST', None),
             'ip_whitelist_auth': os.environ.get('DEFLECT_CONFIG_AUTH_IP_WHITELIST', None),
+            'static_ip_whitelist': [ip.strip() for ip in os.environ.get('STATIC_IP_WHITELIST', '').split(',') if ip.strip()],
             'global_allowlist_url': os.environ.get('DEFLECT_CONFIG_URL_GLOBAL_ALLOWLIST', None),
             'global_allowlist_auth': os.environ.get('DEFLECT_CONFIG_AUTH_GLOBAL_ALLOWLIST', None),
             'origin_ips_url': os.environ.get('DEFLECT_CONFIG_URL_ORIGIN_IPS', None),
@@ -172,7 +167,9 @@ def main():
             'sensitivity_factor': float(os.environ.get('SENSITIVITY_FACTOR')),
             'max_sessions_for_ip': float(os.environ.get('MAX_SESSIONS_FOR_IP')),
             'bot_score_threshold': float(os.environ.get('BOT_SCORE_THRESHOLD', 0.8)),
+            'gpu_renderer_threshold': float(os.environ.get('GPU_RENDERER_THRESHOLD', 0.4)),
             'challenge_scrapers': os.environ.get('CHALLENGE_SCRAPERS') == 'True',
+            'block_commercial_crawlers': os.environ.get('BLOCK_COMMERCIAL_CRAWLERS', 'True') == 'True',
             'worker_chunk_size': int(os.environ.get('WORKER_CHUNK_SIZE', 1000)),
             'kafka_poll_timeout_ms': int(os.environ.get('KAFKA_POLL_TIMEOUT_MS', 5000)),
             'max_poll_interval_ms': int(os.environ.get('MAX_POLL_INTERVAL_MS', 600000)),
@@ -193,6 +190,17 @@ def main():
             'attack_min_spike_ratio': float(os.environ.get('ATTACK_MIN_SPIKE_RATIO', 4.0)),
             'attack_aggressive_spike_ratio': float(os.environ.get('ATTACK_AGGRESSIVE_SPIKE_RATIO', 6.0)),
             'attack_extreme_spike_ratio': float(os.environ.get('ATTACK_EXTREME_SPIKE_RATIO', 15.0)),
+            'session_llm_enabled': os.environ.get('SESSION_LLM_ENABLED', 'True') == 'True',
+            'session_llm_provider': os.environ.get('SESSION_LLM_PROVIDER', 'ollama'),
+            'ollama_url': os.environ.get('OLLAMA_URL', 'http://localhost:11434'),
+            'llm_model': os.environ.get('SESSION_LLM_MODEL', os.environ.get('LLM_MODEL', 'qwen2.5:7b')),
+            'openai_api_key': os.environ.get('ANTHROPIC_API_KEY', os.environ.get('OPENAI_API_KEY', '')),
+            'cluster_llm_provider': os.environ.get('CLUSTER_LLM_PROVIDER', 'ollama'),
+            'cluster_llm_model': os.environ.get('CLUSTER_LLM_MODEL') or None,
+            'session_llm_score_min': int(os.environ.get('SESSION_LLM_SCORE_MIN', '20')),
+            'session_llm_score_max': int(os.environ.get('SESSION_LLM_SCORE_MAX', '80')),
+            'session_llm_min_requests': int(os.environ.get('SESSION_LLM_MIN_REQUESTS', '5')),
+            'session_llm_queue_size': int(os.environ.get('SESSION_LLM_QUEUE_SIZE', '200')),
         }
 
         predictor = BaskervillehallPredictor(
@@ -205,6 +213,60 @@ def main():
             logger=logger
         )
         predictor.run()
+    elif args.pipeline == 'respond':
+        from baskervillehall.incident_first_responder import IncidentFirstResponder
+        llm_provider = os.environ.get('FIRST_RESPONDER_LLM_PROVIDER', 'ollama')
+        IncidentFirstResponder(
+            postgres_connection=postgres_connection,
+            ollama_url=os.environ.get('OLLAMA_URL', 'http://localhost:11434'),
+            llm_model=os.environ.get('LLM_MODEL', 'qwen2.5:7b'),
+            llm_provider=llm_provider,
+            openai_api_key=os.environ.get('ANTHROPIC_API_KEY', os.environ.get('OPENAI_API_KEY', '')),
+            openai_model=os.environ.get('FIRST_RESPONDER_LLM_MODEL', 'claude-haiku-4-5-20251001'),
+            check_interval=int(os.environ.get('FIRST_RESPONDER_CHECK_INTERVAL', '30')),
+            min_attack_pct=float(os.environ.get('FIRST_RESPONDER_MIN_ATTACK_PCT', '50.0')),
+            max_normal_pct=float(os.environ.get('FIRST_RESPONDER_MAX_NORMAL_PCT', '20.0')),
+            ttl_minutes=int(os.environ.get('FIRST_RESPONDER_TTL_MINUTES', '30')),
+            min_spike_ratio=float(os.environ.get('FIRST_RESPONDER_MIN_SPIKE_RATIO', '3.0')),
+            min_challenge_count=int(os.environ.get('FIRST_RESPONDER_MIN_CHALLENGE_COUNT', '50')),
+            challenge_count_bypass_spike_ratio=float(os.environ.get('FIRST_RESPONDER_CHALLENGE_COUNT_BYPASS_SPIKE_RATIO', '8.0')),
+            kafka_connection=kafka_connection,
+            kafka_connection_output=kafka_connection_output,
+            topic_commands=os.environ.get('TOPIC_COMMANDS', 'banjax_command_topic'),
+            dnet_partition_map=json.loads(os.environ.get('DNET_PARTITION_MAP', '{}')),
+            fingerprint_min_pct=float(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MIN_PCT', '40.0')),
+            fingerprint_max_ips=int(os.environ.get('FIRST_RESPONDER_FINGERPRINT_MAX_IPS', '500')),
+            fingerprint_block_enabled=os.environ.get(
+                'FIRST_RESPONDER_FINGERPRINT_BLOCK_ENABLED', 'false').lower() == 'true',
+            native_ua_commands_enabled=os.environ.get(
+                'FIRST_RESPONDER_NATIVE_UA_COMMANDS_ENABLED', 'false').lower() == 'true',
+            host_whitelist=[h for h in os.environ.get('FIRST_RESPONDER_HOST_WHITELIST', '').split(',') if h.strip()],
+            min_traffic_peak_count=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_COUNT', '50')),
+            min_traffic_peak_req_min=int(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN', '50')),
+            min_traffic_peak_req_min_multiplier=float(os.environ.get('FIRST_RESPONDER_MIN_TRAFFIC_PEAK_REQ_MIN_MULTIPLIER', '10.0')),
+            min_incident_duration_minutes=int(os.environ.get('FIRST_RESPONDER_MIN_INCIDENT_DURATION_MINUTES', '10')),
+            llm_host_cooldown_minutes=int(os.environ.get('FIRST_RESPONDER_LLM_HOST_COOLDOWN_MINUTES', '10')),
+            challenge_all_spike_ratio=float(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_SPIKE_RATIO', '50.0')),
+            challenge_all_immature_ratio=float(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_IMMATURE_RATIO', '0.80')),
+            challenge_all_ttl_minutes=int(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_TTL_MINUTES', '30')),
+            logger=logger,
+        ).run()
+    elif args.pipeline == 'daily_report':
+        from baskervillehall.daily_report import DailyReport
+        DailyReport(
+            postgres_connection=postgres_connection,
+            anthropic_api_key=os.environ.get('ANTHROPIC_API_KEY', ''),
+            model=os.environ.get('DAILY_REPORT_LLM_MODEL', 'claude-sonnet-5-5'),
+            smtp={
+                'host': os.environ.get('SMTP_HOST'),
+                'port': os.environ.get('SMTP_PORT', '587'),
+                'user': os.environ.get('SMTP_USER'),
+                'password': os.environ.get('SMTP_PASSWORD'),
+                'from': os.environ.get('DAILY_REPORT_FROM'),
+                'to': os.environ.get('DAILY_REPORT_TO'),
+            },
+            logger=logger,
+        ).run(send_email=os.environ.get('DAILY_REPORT_SEND_EMAIL', 'true').lower() == 'true')
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 

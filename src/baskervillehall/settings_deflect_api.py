@@ -18,6 +18,7 @@ class SettingsDeflectAPI(object):
             origin_ips_auth=None,
             whitelist_default=[],
             whitelist_default_block_session=[],
+            static_ip_whitelist=None,
             logger=None,
             refresh_period_in_seconds=300):
         self.logger = logger if logger else logging.getLogger(self.__class__.__name__)
@@ -61,6 +62,9 @@ class SettingsDeflectAPI(object):
                 refresh_period_in_seconds=refresh_period_in_seconds
             )
         self.origin_ips_parsed = {}  # host -> list[ip_network]
+
+        # Static IP whitelist — loaded from STATIC_IP_WHITELIST config (comma-separated IPs/CIDRs)
+        self.static_ip_whitelist = self._parse_ip_list(static_ip_whitelist or [], 'static_ip_whitelist')
         self.domains = []
         self.prefixes = []
         self.matches = set()
@@ -359,6 +363,11 @@ class SettingsDeflectAPI(object):
         except ValueError as e:
             self.logger.warning(f"Invalid IP address: {ip!r} - {e}")
             return False
+
+        # 0. Static whitelist — from STATIC_IP_WHITELIST config (highest priority, no API call needed)
+        for network in self.static_ip_whitelist:
+            if ip_addr in network:
+                return True
 
         # 1. Per-site allowlist + 'global' key from /banjax_global_per_site_allowlist
         for network in self.ip_whitelist_parsed.get(host, []) + self.ip_whitelist_parsed.get('global', []):

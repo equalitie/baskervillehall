@@ -63,6 +63,14 @@ ALTER TABLE public.sessions ADD CONSTRAINT sessions_hostname_id_fkey FOREIGN KEY
 CREATE INDEX sessions_index ON sessions (session_end, host_name);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS sessions_created_at_idx ON public.sessions (created_at);
 
+CREATE TABLE IF NOT EXISTS host_country_stats (
+    host       TEXT NOT NULL,
+    country    TEXT NOT NULL,
+    pct        NUMERIC(5,1) NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (host, country)
+);
+
 DROP TABLE public.challenge_command_history;
 
 CREATE TABLE public.challenge_command_history (

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc2-binder
+spec:
+  restartPolicy: Never
+  # optional: align with the selected node the PVC shows
+  nodeName: postgres-node-a01607
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      volumeMounts:
+        - name: data
+          mountPath: /mnt/test
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: postgres-baskervillehall-pvc2

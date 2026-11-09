@@ -29,6 +29,7 @@ spec:
                     operator: In
                     values:
                       - postgres
+                      - baskerville
       containers:
       - name: "baskervillehall-predictor"
         image: "equalitie/baskervillehall:latest"
@@ -66,3 +67,8 @@ spec:
             secretKeyRef:
               name: baskerville-secrets
               key: s3_region
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: anthropic-secret
+              key: ANTHROPIC_API_KEY

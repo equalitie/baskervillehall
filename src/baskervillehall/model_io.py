@@ -85,6 +85,22 @@ class ModelIO(object):
             self.logger.error("ResponseMetadata: %r", meta)
             raise
 
+    def _delete_old_models(self, folder, keep):
+        bucket, prefix = self._split_s3_path(folder)
+        if not prefix.endswith('/'):
+            prefix += '/'
+        s3 = self._create_session()
+        try:
+            response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            for obj in response.get('Contents', []):
+                key = obj['Key']
+                full_path = f's3://{bucket}/{key}'
+                if key.endswith('.pkl') and full_path != keep:
+                    s3.delete_object(Bucket=bucket, Key=key)
+                    self.logger.info(f'Deleted old model: {full_path}')
+        except ClientError as e:
+            self.logger.warning(f'Failed to clean up old models in {folder}: {e}')
+
     def save(self, model, path, host, model_type):
         folder = os.path.join(path, host, model_type.value)
         ts_path = os.path.join(folder, f'{self._get_timestamp()}.pkl')
@@ -95,6 +111,9 @@ class ModelIO(object):
         # update index file to point at the new timestamped .pkl
         # ts_path is a str, so will be encoded to UTF-8 inside _save_object
         self._save_object(ts_path, os.path.join(folder, 'index.txt'))
+
+        # remove previous versions
+        self._delete_old_models(folder, keep=ts_path)
 
         self.logger.info(f'Model for host {host} saved into {ts_path}')
 
