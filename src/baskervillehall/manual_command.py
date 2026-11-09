@@ -76,6 +76,7 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         warnings.append(f'blocks are disabled (BASKERVILLE_BLOCKS_DISABLED): {name} is sent as {sent_name}')
 
     meta = f'manual [{operator}] {reason}'
+    # "Value" (not "value"): banjax reads either, but the Kibana pipeline maps only "Value" to client_ip.
     message = {'Name': sent_name, 'source': meta, 'meta': meta}
 
     if kind != 'clear':
@@ -86,11 +87,11 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         message['ttl'] = ttl
 
     if kind == 'ip':
-        message['value'] = _ip(value)
+        message['Value'] = _ip(value)
         message['host'] = host
         warnings.append('an IP decision in banjax applies to every site on the edge, not only this host')
     elif kind == 'subnet':
-        message['value'] = _subnet(value)
+        message['Value'] = _subnet(value)
         message['host'] = host
         warnings.append('a subnet decision in banjax applies to every site on the edge, not only this host')
     elif kind == 'session':
@@ -110,8 +111,8 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         # the host's challenge_all. So host goes into the message only when asked for.
         targets = 0
         if value:
-            message['value'] = _subnet(value) if '/' in value else _ip(value)
-            warnings.append(f'clears {message["value"]} on every site on the edge')
+            message['Value'] = _subnet(value) if '/' in value else _ip(value)
+            warnings.append(f'clears {message["Value"]} on every site on the edge')
             targets += 1
         if session_id:
             message['session_id'] = session_id
@@ -201,6 +202,7 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
+    message['dnet'] = dnet or '-'
     for w in warnings:
         print(f'NOTE: {w}')
     print(f'dnet={dnet} partitions={partitions}')
@@ -228,7 +230,7 @@ def main(argv=None):
             """INSERT INTO manual_commands (operator, name, sent_name, host, value, ua, session_id, ttl,
                                             dnet, partitions, reason, message)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-            (args.operator, args.name, message['Name'], host, message.get('value'), message.get('ua'),
+            (args.operator, args.name, message['Name'], host, message.get('Value'), message.get('ua'),
              message.get('session_id'), message.get('ttl'), dnet, ','.join(map(str, partitions)),
              args.reason, json.dumps(message)))
         row_id = cur.fetchone()[0]

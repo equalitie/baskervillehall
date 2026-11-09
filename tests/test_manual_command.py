@@ -9,7 +9,7 @@ BASE = dict(reason='test', operator='tester')
 def test_challenge_ip():
     msg, warnings = build_command('challenge_ip', 'Example.org', value='1.2.3.4', ttl=600, **BASE)
     assert msg == {'Name': 'challenge_ip', 'source': 'manual [tester] test', 'meta': 'manual [tester] test',
-                   'ttl': 600, 'value': '1.2.3.4', 'host': 'example.org'}
+                   'ttl': 600, 'Value': '1.2.3.4', 'host': 'example.org'}
     assert any('every site' in w for w in warnings)
 
 
@@ -38,7 +38,7 @@ def test_bad_values():
 
 def test_subnet_normalized():
     msg, _ = build_command('challenge_subnet', 'example.org', value='1.2.3.77/24', ttl=60, **BASE)
-    assert msg['value'] == '1.2.3.0/24'
+    assert msg['Value'] == '1.2.3.0/24'
 
 
 def test_block_sent_as_challenge_when_disabled(monkeypatch):
@@ -57,12 +57,12 @@ def test_whitelisted_host(monkeypatch):
 def test_clear_ip_has_no_host():
     # host in clear_rules would also clear the host's challenge_all
     msg, _ = build_command('clear_rules', 'example.org', value='1.2.3.4', **BASE)
-    assert msg['value'] == '1.2.3.4' and 'host' not in msg and 'ttl' not in msg
+    assert msg['Value'] == '1.2.3.4' and 'host' not in msg and 'ttl' not in msg
 
 
 def test_clear_challenge_all():
     msg, _ = build_command('clear_rules', 'example.org', clear_host=True, **BASE)
-    assert msg['host'] == 'example.org' and 'value' not in msg
+    assert msg['host'] == 'example.org' and 'Value' not in msg
 
 
 def test_clear_ua_on_host_warns():
