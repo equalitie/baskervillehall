@@ -266,7 +266,9 @@ class DailyReport:
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": self.model, "max_tokens": 4000, "system": SYSTEM_PROMPT,
+            # Output tokens include the model's thinking, which is not part of the text: with 4000 the
+            # report was cut after ~1,900 characters.
+            json={"model": self.model, "max_tokens": 16000, "system": SYSTEM_PROMPT,
                   "messages": [{"role": "user", "content": user}]},
             timeout=300,
         )
@@ -274,6 +276,9 @@ class DailyReport:
         body = resp.json()
         text = "".join(b.get('text', '') for b in body.get('content', []) if b.get('type') == 'text')
         usage = body.get('usage', {})
+        if body.get('stop_reason') == 'max_tokens':
+            self.logger.warning("[DAILY_REPORT] LLM output hit max_tokens, report is cut")
+            text += "\n\n**(Report cut: the LLM hit its output limit.)**"
         return text, int(usage.get('input_tokens', 0)), int(usage.get('output_tokens', 0))
 
     # ------------------------------------------------------------------ mail
@@ -285,16 +290,32 @@ class DailyReport:
                 WARNING: f"{n_warn} warnings", NORM: "all normal"}[level]
         return f"[{level}] Baskerville daily {day}: {tail}"
 
-    @staticmethod
-    def html(level, reasons, report_md):
+    # Gmail ignores most <style> blocks, so tables get inline styles.
+    _INLINE_STYLES = (
+        ('<table>', '<table style="border-collapse:collapse;margin:8px 0;font:13px sans-serif">'),
+        ('<th>', '<th style="border:1px solid #ccc;padding:4px 8px;background:#f3f3f3;text-align:left">'),
+        ('<td>', '<td style="border:1px solid #ccc;padding:4px 8px;vertical-align:top">'),
+        ('<code>', '<code style="background:#f3f3f3;padding:0 3px;font:12px ui-monospace,Menlo,monospace">'),
+        ('<h1>', '<h1 style="font:bold 20px sans-serif;margin:18px 0 8px">'),
+        ('<h2>', '<h2 style="font:bold 17px sans-serif;margin:18px 0 6px">'),
+        ('<h3>', '<h3 style="font:bold 15px sans-serif;margin:14px 0 6px">'),
+    )
+
+    @classmethod
+    def html(cls, level, reasons, report_md):
+        import markdown
         color = {NORM: '#1a7f37', WARNING: '#b35900', URGENT: '#c62828'}[level]
         items = "".join(f"<li><b>{escape(r['level'])}</b>: {escape(r['reason'])}</li>" for r in reasons)
+        # The LLM text can quote attacker-controlled strings: escape raw HTML before rendering.
+        body = markdown.markdown(escape(report_md, quote=False),
+                                 extensions=['tables', 'fenced_code', 'sane_lists'])
+        for tag, styled in cls._INLINE_STYLES:
+            body = body.replace(tag, styled)
         return (
             f'<div style="background:{color};color:#fff;padding:16px 20px;font:bold 28px sans-serif">'
             f'{level}</div>'
             f'<ul style="font:14px sans-serif">{items or "<li>No issues found by the rules.</li>"}</ul>'
-            f'<pre style="font:13px/1.45 ui-monospace,Menlo,monospace;white-space:pre-wrap">'
-            f'{escape(report_md)}</pre>'
+            f'<div style="font:14px/1.5 sans-serif;max-width:1000px">{body}</div>'
         )
 
     def send(self, subject, text, html):
