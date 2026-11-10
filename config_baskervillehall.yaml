@@ -58,13 +58,11 @@ data:
     WHITELIST_REFRESH_IN_MINUTES: "5"
     WHITELIST_URL_DEFAULT: "indymedia.org,splintercon.net"
     DEFLECT_CONFIG_URL: "https://dashboard.deflect.network/api/integration/baskerville/config_v3"
-    DEFLECT_CONFIG_AUTH: "IgQMFaVPSzH6Cv3v8BmrTMvsKzyggStI"
+    # Secrets (DEFLECT_CONFIG_AUTH*, POSTGRES_PASSWORD, ALERT_WEBHOOK, TYPESAFE_API_KEY) are NOT here:
+    # they live in the Secret baskervillehall-secrets (scripts/create_baskervillehall_secrets.sh).
     DEFLECT_CONFIG_URL_IP_WHITELIST: "https://dashboard.deflect.network/api/integration/banjax_global_per_site_allowlist"
-    DEFLECT_CONFIG_AUTH_IP_WHITELIST: "IgQMFaVPSzH6Cv3v8BmrTMvsKzyggStI"
     DEFLECT_CONFIG_URL_GLOBAL_ALLOWLIST: "https://dashboard.deflect.network/api/integration/global_allowlist"
-    DEFLECT_CONFIG_AUTH_GLOBAL_ALLOWLIST: "IgQMFaVPSzH6Cv3v8BmrTMvsKzyggStI"
     DEFLECT_CONFIG_URL_ORIGIN_IPS: "https://dashboard.deflect.network/api/integration/origin_ips"
-    DEFLECT_CONFIG_AUTH_ORIGIN_IPS: "IgQMFaVPSzH6Cv3v8BmrTMvsKzyggStI"
     # Classifier trainer (global XGBoost model for baskerville_score_4)
     GROUP_ID_CLASSIFIER_TRAIN: "classifier_train_pipeline"
     CLASSIFIER_NUM_SESSIONS: "50000"
@@ -85,7 +83,6 @@ data:
     POSTGRES_REFRESH_PERIOD_IN_SECONDS: "180"
     SENSITIVITY_FACTOR: "0.05"
     POSTGRES_USER: "postgres"
-    POSTGRES_PASSWORD: "zJmh93FfhMvX6tDRNEoLuu97"
     POSTGRES_DATABASE_NAME: "baskerville"
     TTL_RECORDS_DAYS: "2"
     NUM_REQUESTS_IN_STORAGE: "7"
@@ -93,7 +90,6 @@ data:
     SQL_TABLE_COMMANDS: "challenge_command_history"
     AUTOCREATE_HOSTNAME_ID: "True"
     MAX_SESSIONS_FOR_IP: "50"
-    ALERT_WEBHOOK: "https://mattermost.equalit.ie/hooks/47nd6xs1mbdmxq3y7pabcqaoco"
     ALERT_CC: '@anton'
     ALERT_WHITELIST: "[]"
     ALERT_MIN_NUM_SESSIONS: "50"
@@ -151,7 +147,6 @@ data:
     SESSION_LLM_ENABLED: "True"
     SESSION_LLM_PROVIDER: "typesafe"
     SESSION_LLM_MODEL: "claude-haiku-4-5-20251001"
-    TYPESAFE_API_KEY: "apikey_283ef32baec3ce34acbacf22cbbc92bbfaf_1315747a95b278428cc06ed6731864a23ef1d5c6a83e742be03718f7fdbb30b9"
     SESSION_LLM_SCORE_MIN: "10"
     SESSION_LLM_SCORE_MAX: "99"
     SESSION_LLM_MIN_REQUESTS: "5"

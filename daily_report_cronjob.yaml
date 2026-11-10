@@ -42,6 +42,8 @@ spec:
                 - configMapRef:
                     name: baskervillehall
                 - secretRef:
+                    name: baskervillehall-secrets
+                - secretRef:
                     name: daily-report-smtp
               env:
                 - name: ANTHROPIC_API_KEY

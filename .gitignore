@@ -96,3 +96,7 @@ simple_bot_example.py
 bask2.md
 config
 deployment/vpn_asn/
+
+# Kubernetes Secrets with real values: never commit
+postgres_secret.yaml
+deployment/postgres/postgres-baskervillehall-secret.yaml
