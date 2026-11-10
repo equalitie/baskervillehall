@@ -1,0 +1,82 @@
+# Keeps loadBalancerSourceRanges of logstash-lb, kafka9-lb-* and kafkab-lb-* equal to the Deflect edge
+# list (dashboard API) plus EXTRA_ALLOWED_CIDRS. Code: src/baskervillehall/edge_allowlist_sync.py.
+#
+# Needs the API token in a secret (not in the repo):
+#   read -rs -p "Edge API token: " T && echo && \
+#     kubectl create secret generic deflect-edge-api --from-literal=EDGE_API_TOKEN="$T" && unset T
+#
+# Dry run by hand: kubectl create job --from=cronjob/edge-allowlist-sync edge-sync-manual
+#   (set DRY_RUN to "true" below first to only log the diff)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge-allowlist-sync
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: edge-allowlist-sync
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["logstash-lb", "kafka9-lb-0", "kafka9-lb-1", "kafka9-lb-2",
+                    "kafkab-lb-0", "kafkab-lb-1", "kafkab-lb-2"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: edge-allowlist-sync
+subjects:
+  - kind: ServiceAccount
+    name: edge-allowlist-sync
+roleRef:
+  kind: Role
+  name: edge-allowlist-sync
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: edge-allowlist-sync
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: edge-allowlist-sync
+          restartPolicy: Never
+          containers:
+            - name: sync
+              image: "equalitie/baskervillehall:latest"
+              imagePullPolicy: Always
+              command: ["python"]
+              args: ["/usr/bin/baskervillehall/src/baskervillehall/edge_allowlist_sync.py"]
+              env:
+                - name: EDGE_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: deflect-edge-api
+                      key: EDGE_API_TOKEN
+                # Fixed addresses allowed besides the edges (Almaz).
+                - name: EXTRA_ALLOWED_CIDRS
+                  value: "212.105.153.41/32"
+                - name: MIN_EDGES
+                  value: "10"
+                - name: MIN_RATIO
+                  value: "0.7"
+                - name: DRY_RUN
+                  value: "false"
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "20m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "200m"
