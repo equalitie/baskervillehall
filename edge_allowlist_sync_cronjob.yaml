@@ -64,9 +64,9 @@ spec:
                     secretKeyRef:
                       name: deflect-edge-api
                       key: EDGE_API_TOKEN
-                # Fixed addresses allowed besides the edges (Almaz).
+                # Fixed addresses allowed besides the edges: Almaz (Starlink Milan pool, AS14593, the IP changes).
                 - name: EXTRA_ALLOWED_CIDRS
-                  value: "212.105.153.41/32"
+                  value: "212.105.153.0/24"
                 - name: MIN_EDGES
                   value: "10"
                 - name: MIN_RATIO
