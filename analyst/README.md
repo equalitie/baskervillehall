@@ -57,8 +57,8 @@ Examples:
   `kubectl exec/apply/delete/...` are denied in `.claude/settings.json`.
 - Commands: `bin/send_command.sh` sends real banjax commands to the edge, without an extra prompt.
   Claude sends one only when you ask, shows a `--dry-run` first, and every send is logged with your
-  git email in `manual_commands`. `challenge_ip`/`block_ip`/subnet commands apply to **every** Deflect
-  site on that edge. TTL is at most 24 h. Whitelisted hosts are refused. `block_*` is sent as a challenge unless you
+  git email in `manual_commands`. `challenge_ip`/`block_ip`/subnet commands apply to **every** site of
+  the host's dnet; removing (`clear_rules`) works in all dnets at once. TTL is at most 24 h. Whitelisted hosts are refused. `block_*` is sent as a challenge unless you
   explicitly ask for a real block (`--allow-block`).
 - Don't approve other commands that change the cluster if Claude ever asks. If something else needs
   to change (a rule, a whitelist), write it up and send it to the Baskerville team.

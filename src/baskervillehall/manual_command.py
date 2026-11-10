@@ -93,11 +93,11 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
     if kind == 'ip':
         message['Value'] = _ip(value)
         message['host'] = host
-        warnings.append('an IP decision in banjax applies to every site on the edge, not only this host')
+        warnings.append('an IP decision applies to every site of the dnet that receives it, not only this host')
     elif kind == 'subnet':
         message['Value'] = _subnet(value)
         message['host'] = host
-        warnings.append('a subnet decision in banjax applies to every site on the edge, not only this host')
+        warnings.append('a subnet decision applies to every site of the dnet that receives it, not only this host')
     elif kind == 'session':
         if not session_id:
             raise CommandError('--session-id is required')
@@ -116,7 +116,7 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         targets = 0
         if value:
             message['Value'] = _subnet(value) if '/' in value else _ip(value)
-            warnings.append(f'clears {message["Value"]} on every site on the edge')
+            warnings.append(f'clears {message["Value"]} on every site, in every dnet')
             targets += 1
         if session_id:
             message['session_id'] = session_id
@@ -162,6 +162,29 @@ def _host_dnet(conn, host):
     return row[0] if row else None
 
 
+# Each banjax reads only its own dnet's partition. Host-scoped commands and clear_rules go to every
+# dnet: harmless where the host is not served or nothing is set, and independent of host_dnet, which
+# keeps one dnet per host (the last one seen) and can be missing or stale. IP and subnet decisions
+# apply to every site of the dnet that receives them, so they stay on the host's dnet by default.
+ALL_DNETS_KINDS = {'clear', 'host', 'ua', 'session'}
+
+
+def choose_partitions(name, host_dnet, partition_map, dnet=None, all_dnets=False):
+    """Return (dnet label, sorted partitions) for a command, or raise CommandError."""
+    if not partition_map:
+        raise CommandError('DNET_PARTITION_MAP is empty')
+    if dnet:
+        if dnet not in partition_map:
+            raise CommandError(f'unknown dnet {dnet}; known: {", ".join(sorted(partition_map))}')
+        return dnet, [partition_map[dnet]]
+    if all_dnets or COMMANDS[name] in ALL_DNETS_KINDS:
+        return 'all', sorted(set(partition_map.values()))
+    if host_dnet in partition_map:
+        return host_dnet, [partition_map[host_dnet]]
+    raise CommandError(f'the host has no known dnet (host_dnet={host_dnet}). Check the host name, '
+                       f'or choose --dnet <name> or --all-dnets (all of Deflect)')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Send one banjax command by hand.')
     parser.add_argument('name', help=', '.join(sorted(COMMANDS)))
@@ -177,7 +200,9 @@ def main(argv=None):
     parser.add_argument('--clear-host', action='store_true',
                         help="clear_rules: also clear the host's challenge_all (and limit --ua to this host)")
     parser.add_argument('--all-dnets', action='store_true',
-                        help='send to every dnet partition, e.g. when the host has no dnet yet')
+                        help='ip/subnet commands: send to every dnet (all of Deflect), not only the host\'s dnet')
+    parser.add_argument('--dnet', default='',
+                        help='send only to this dnet (by name, e.g. dnext4)')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
 
@@ -199,20 +224,20 @@ def main(argv=None):
 
     host = args.host.strip().lower()
     partition_map = json.loads(os.environ.get('DNET_PARTITION_MAP', '{}'))
-    dnet = _host_dnet(conn, host)
-    if args.all_dnets:
-        partitions = sorted(set(partition_map.values()))
-    elif dnet in partition_map:
-        partitions = [partition_map[dnet]]
-    else:
-        print(f'ERROR: no dnet partition for {host} (dnet={dnet}). Check the host name, or use --all-dnets.',
-              file=sys.stderr)
+    host_dnet = _host_dnet(conn, host)
+    try:
+        dnet, partitions = choose_partitions(args.name, host_dnet, partition_map,
+                                             dnet=args.dnet.strip(), all_dnets=args.all_dnets)
+    except CommandError as e:
+        print(f'ERROR: {e}', file=sys.stderr)
         return 2
 
-    message['dnet'] = dnet or '-'
+    message['dnet'] = dnet
+    if dnet == 'all' and COMMANDS[args.name] in ('ip', 'subnet'):
+        warnings.append('--all-dnets: this IP/subnet decision applies on every Deflect site')
     for w in warnings:
         print(f'NOTE: {w}')
-    print(f'dnet={dnet} partitions={partitions}')
+    print(f'host dnet={host_dnet or "-"} -> sent to dnet={dnet} partitions={partitions}')
     print(json.dumps(message, ensure_ascii=False))
     if args.dry_run:
         print('dry run, nothing sent')

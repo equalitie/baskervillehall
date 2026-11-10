@@ -81,3 +81,28 @@ def test_clear_ua_on_host_warns():
 def test_clear_needs_target():
     with pytest.raises(CommandError):
         build_command('clear_rules', 'example.org', **BASE)
+
+
+PMAP = {'dnext1': 0, 'dnext2': 1, 'dnext6': 4}
+
+
+def test_ip_goes_to_host_dnet():
+    assert manual_command.choose_partitions('challenge_ip', 'dnext6', PMAP) == ('dnext6', [4])
+
+
+def test_ip_unknown_host_needs_explicit_choice():
+    with pytest.raises(CommandError):
+        manual_command.choose_partitions('block_ip', None, PMAP)
+    assert manual_command.choose_partitions('block_ip', None, PMAP, all_dnets=True) == ('all', [0, 1, 4])
+
+
+def test_clear_and_host_scoped_go_everywhere():
+    for name in ('clear_rules', 'challenge_all', 'challenge_ua', 'challenge_session'):
+        assert manual_command.choose_partitions(name, 'dnext6', PMAP) == ('all', [0, 1, 4])
+        assert manual_command.choose_partitions(name, None, PMAP) == ('all', [0, 1, 4])
+
+
+def test_explicit_dnet():
+    assert manual_command.choose_partitions('clear_rules', 'dnext6', PMAP, dnet='dnext2') == ('dnext2', [1])
+    with pytest.raises(CommandError):
+        manual_command.choose_partitions('challenge_ip', 'dnext6', PMAP, dnet='dnext99')

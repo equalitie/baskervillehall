@@ -66,8 +66,14 @@ sent as `challenge_ip`. Manual commands can send a real block with `--allow-bloc
 
 A challenge is a JS proof-of-work page in banjax. Real browsers pass it automatically in a few
 seconds (a person barely notices it); most scripts don't. Headless-browser botnets pass it too. A
-banjax `challenge_ip` applies to the IP on **every** Deflect site on that edge, not only the
-attacked one.
+banjax `challenge_ip` applies to the IP on **every** Deflect site of the dnet that received it, not
+only the attacked one.
+
+**dnets.** Deflect sites are served by groups of edges called dnets (dnext1, dnext2, ...). Each dnet
+has its own Kafka partition for commands, and its banjax reads only that partition. Baskerville finds a
+site's dnet in `host_dnet` (one dnet per host, the last one seen in traffic). So a predictor
+`challenge_ip` exists only in the dnet of the site where the IP was caught; the same IP is not
+challenged on other dnets. `baskerville_banjax_command-*` in Kibana shows the `dnet` of every command.
 
 ## Tables
 
