@@ -38,6 +38,8 @@ spec:
         envFrom:
           - configMapRef:
               name: baskervillehall
+          - secretRef:
+              name: baskervillehall-secrets
         env:
         - name: MY_POD_NAME
           valueFrom:

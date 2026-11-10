@@ -70,6 +70,8 @@ spec:
         envFrom:
           - configMapRef:
               name: baskervillehall
+          - secretRef:
+              name: baskervillehall-secrets
         env:
         # Bad ASN file disabled
         # - name: BAD_ASN_FILE
