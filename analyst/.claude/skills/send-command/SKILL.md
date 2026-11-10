@@ -30,10 +30,10 @@ without a prompt.
 
 ## Before sending
 
-1. Know exactly what and why: the host, the target (IP / subnet / session / exact UA), the TTL and
-   a one-line reason. If any of it is unclear, ask the analyst. Don't guess targets.
-2. Run with `--dry-run` first and show the analyst the message and the NOTE lines.
-3. Then send the same command without `--dry-run`.
+Know what and why: the host, the target (IP / subnet / session / exact UA), the TTL and a one-line
+reason. If the target is unclear, ask; otherwise send right away. Default TTL when the analyst gives
+none: 1 h for challenges, 30 min for blocks. Use `--dry-run` only if the analyst wants to see the
+message first.
 
 ## Commands
 
@@ -51,8 +51,7 @@ All except `clear_rules` need `--ttl` in seconds (max 86400 = 24 h). `--host` is
 
 **Blocks.** While `BASKERVILLE_BLOCKS_DISABLED=true`, `block_ip/subnet/session` are sent as
 `challenge_*` (the script prints a NOTE). That kill switch exists because automatic blocks hurt real
-users. To send a **real** block, add `--allow-block`. Use it only when the analyst explicitly asks for a
-block (not a challenge), e.g. a client that solves the challenge and keeps attacking. Before sending, tell
+users. To send a **real** block, add `--allow-block` when the analyst asks for a block (not a challenge), e.g. a client that solves the challenge and keeps attacking. Before sending, tell
 them that `block_ip`/`block_subnet` block the address on **every** site of the host's dnet, and keep the TTL
 short (minutes to a few hours). `block_ua` is per host and is never converted. `clear_rules` removes a
 block like any other decision.
