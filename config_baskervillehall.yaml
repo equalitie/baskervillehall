@@ -144,7 +144,8 @@ data:
     STATIC_IP_WHITELIST: "51.75.14.153"
     FIRST_RESPONDER_LLM_PROVIDER: "anthropic"
     FIRST_RESPONDER_LLM_MODEL: "claude-haiku-4-5-20251001"
-    SESSION_LLM_ENABLED: "True"
+    # Off until the corporate TypeSafe account (Nov 2026): the old key was revoked.
+    SESSION_LLM_ENABLED: "False"
     SESSION_LLM_PROVIDER: "typesafe"
     SESSION_LLM_MODEL: "claude-haiku-4-5-20251001"
     SESSION_LLM_SCORE_MIN: "10"
