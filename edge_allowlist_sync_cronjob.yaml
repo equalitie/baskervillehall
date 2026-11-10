@@ -40,7 +40,7 @@ kind: CronJob
 metadata:
   name: edge-allowlist-sync
 spec:
-  schedule: "*/10 * * * *"
+  schedule: "0 */3 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
