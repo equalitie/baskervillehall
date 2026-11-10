@@ -64,9 +64,10 @@ spec:
                     secretKeyRef:
                       name: deflect-edge-api
                       key: EDGE_API_TOKEN
-                # Fixed addresses allowed besides the edges: Almaz (Starlink Milan pool, AS14593, the IP changes).
+                # Fixed addresses allowed besides the edges: Almaz (Starlink Milan pool, AS14593, the IP changes)
+                # and the kibana.equalit.ie host (its ingest reads banjax_command_topic from kafkab).
                 - name: EXTRA_ALLOWED_CIDRS
-                  value: "212.105.153.0/24"
+                  value: "212.105.153.0/24,65.21.204.18/32"
                 - name: MIN_EDGES
                   value: "10"
                 - name: MIN_RATIO
