@@ -1,9 +1,11 @@
 # Keeps loadBalancerSourceRanges of logstash-lb, kafka9-lb-* and kafkab-lb-* equal to the Deflect edge
 # list (dashboard API) plus EXTRA_ALLOWED_CIDRS. Code: src/baskervillehall/edge_allowlist_sync.py.
 #
-# Needs the API token in a secret (not in the repo):
+# Needs two secrets (not in the repo):
 #   read -rs -p "Edge API token: " T && echo && \
 #     kubectl create secret generic deflect-edge-api --from-literal=EDGE_API_TOKEN="$T" && unset T
+#   kubectl create secret generic edge-allowlist-extra --from-literal=EXTRA_ALLOWED_CIDRS="<cidr>,<cidr>"
+#     (fixed addresses besides the edges; update it with --dry-run=client -o yaml | kubectl apply -f -)
 #
 # Dry run by hand: kubectl create job --from=cronjob/edge-allowlist-sync edge-sync-manual
 #   (set DRY_RUN to "true" below first to only log the diff)
@@ -64,10 +66,13 @@ spec:
                     secretKeyRef:
                       name: deflect-edge-api
                       key: EDGE_API_TOKEN
-                # Fixed addresses allowed besides the edges: Almaz (Starlink Milan pool, AS14593, the IP changes)
-                # and the kibana.equalit.ie host (its ingest reads banjax_command_topic from kafkab).
+                # Fixed addresses allowed besides the edges (people, the Kibana ingest host). Kept out of the
+                # repo in the secret edge-allowlist-extra. Not optional: without it the job fails and changes nothing.
                 - name: EXTRA_ALLOWED_CIDRS
-                  value: "212.105.153.0/24,65.21.204.18/32"
+                  valueFrom:
+                    secretKeyRef:
+                      name: edge-allowlist-extra
+                      key: EXTRA_ALLOWED_CIDRS
                 - name: MIN_EDGES
                   value: "10"
                 - name: MIN_RATIO
