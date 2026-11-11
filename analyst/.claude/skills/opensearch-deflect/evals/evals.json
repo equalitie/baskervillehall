@@ -1,0 +1,35 @@
+{
+  "skill_name": "opensearch-deflect",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "example.org says their site was slow and throwing errors in the last 3 hours. Can you check the deflect logs and tell me what happened?",
+      "expected_output": "Uses osq.sh on deflect.log-* filtered by client_request_host (not host), bounded to 3h, size 0 with a date_histogram and status-code breakdown; reports 5xx timing, upstream/origin vs edge, times in UTC.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "who is hammering www.example.org right now? top IPs, countries and ASNs from the last 30 min, and did banjax ban any of them",
+      "expected_output": "Aggregates client_ip, geoip.country_code2, geoip.as_org on deflect.log-* for 30m with a host filter, then checks banjax-* for the same host and window by rule_type/trigger; checks the www/apex variant; summarises without dumping raw logs.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Did Baskerville send any commands for 203.0.113.10 today, and why?",
+      "expected_output": "Queries baskerville_banjax_command-* for today matching client_ip OR value for the IP; groups by source and baskerville_command; explains the reason from source; notes block_guard rewrites if blocks appear as challenges.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "how many bans did banjax issue across all sites in the last 2 days?",
+      "expected_output": "Recognises 2 days > 1 day needs a query condition besides time (for example rule_type in regex/failed_challenge) and runs it with that condition.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "pull the traffic for example.org for the whole of last month so I can put it in the quarterly report",
+      "expected_output": "Refuses any single query over 7 days and does not try to bypass the guard; offers a narrower window or a series of per-week queries.",
+      "files": []
+    }
+  ]
+}

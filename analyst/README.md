@@ -15,9 +15,14 @@ Claude queries the Baskerville Postgres (read-only) and explains the answer with
    kubectl get pod -l app=postgres-baskervillehall
    ```
 3. **Claude Code**: https://docs.claude.com/en/docs/claude-code (`npm install -g @anthropic-ai/claude-code`).
-4. **Kibana** (optional, for edge logs): log in at https://kibana.equalit.ie in Chrome. With the
-   Claude in Chrome extension Claude can run the Kibana searches itself; without it, it will give
-   you the query to paste.
+4. **Kibana** (for edge logs): Claude queries it from the terminal (skill `opensearch-deflect`, no
+   browser needed). Store your own Kibana login once in the macOS Keychain; the password is asked
+   interactively:
+   ```bash
+   security add-generic-password -s kibana.equalit.ie -a <your_kibana_username> -w
+   ```
+   Wrong password later: `security delete-generic-password -s kibana.equalit.ie`, then add it again.
+   Don't retry in a loop, repeated failures can lock the account.
 
 ## Daily use
 
@@ -47,6 +52,7 @@ Examples:
 | `bin/q.sh` | Runs SQL in a read-only transaction with a timeout (`bin/q.sh "SELECT ..."`) |
 | `.claude/skills/ip-investigate` | Step-by-step trace of one IP |
 | `.claude/skills/incident-review` | Incidents, AI decisions and their effect for one host |
+| `.claude/skills/opensearch-deflect`, `docs/deflect-log-columns.md` | Kibana / OpenSearch queries from the terminal (copy of equalitie/baskerville-skills, no 6-hour confirmation) |
 | `bin/send_command.sh`, `.claude/skills/send-command` | Send a banjax command by hand (challenge/block, `challenge_all`, `clear_rules` to remove). Logged in `manual_commands` |
 | `.claude/settings.json` | Allows `bin/q.sh`, `bin/send_command.sh` and `kubectl get/logs/describe` without asking; denies other kubectl commands that change the cluster |
 | `reports/` | Where written reports go |

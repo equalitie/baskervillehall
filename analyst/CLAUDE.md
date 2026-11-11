@@ -135,6 +135,12 @@ something a bug.
 
 ## Kibana (https://kibana.equalit.ie, OpenSearch Dashboards)
 
+Query it from the terminal with the `opensearch-deflect` skill (`.claude/skills/opensearch-deflect/scripts/osq.sh`,
+read-only, credentials from the macOS Keychain item `kibana.equalit.ie`), not through the browser.
+Every query needs an `@timestamp` lower bound; more than 1 day needs another filter; more than 7 days is
+refused. Field definitions and gotchas: `docs/deflect-log-columns.md`. Note: `host` there is the edge
+server, the site is `client_request_host`; First Responder commands carry the IP in `value`, not `client_ip`.
+
 | Index pattern | What | Useful fields |
 |---|---|---|
 | `deflect.log-*` | Every request at the edge (nginx) | `client_ip`, `client_request_host`, `client_ua`, `client_url`, `http_response_code`, `banjax_decision`, `banjax_bot_score`, `banjax_bot_score_top_factor`, `banjax_bot_fingerprint`, `cache_result`, `deflect_session_new`, `geoip.country_code2`, `geoip.as_org`, `dnet` |
