@@ -18,7 +18,7 @@ from html import escape
 import psycopg2
 import requests
 
-from baskervillehall.block_guard import BLOCKS_DISABLED
+from baskervillehall.block_guard import BLOCKS_DISABLED, is_host_opted_out
 
 NORM, WARNING, URGENT = 'NORM', 'WARNING', 'URGENT'
 _LEVEL_ORDER = {NORM: 0, WARNING: 1, URGENT: 2}
@@ -59,6 +59,27 @@ QUERIES = {
         FROM first_responder_actions a JOIN incidents i ON i.id = a.incident_id
         WHERE i.started_at >= now() - interval '2 days' AND a.created_at >= now() - interval '1 day'
         GROUP BY 1 ORDER BY 2 DESC
+    """,
+    # The biggest incident per host, with everything FR did for that host's incidents in the
+    # last day (so the report can tell "no reaction" from "reacted").
+    'big_incidents': """
+        SELECT b.host, b.id AS biggest_incident, b.started_at, b.ended_at, b.spike, b.peak_req_min,
+               b.challenge_count, b.incidents,
+               coalesce((SELECT string_agg(x.action || ' x' || x.n || ' (' || x.first_at || ' to ' || x.last_at || ' UTC)',
+                                           ', ' ORDER BY x.n DESC)
+                         FROM (SELECT a.action, count(*) AS n,
+                                      to_char(min(a.created_at) AT TIME ZONE 'UTC', 'MM-DD HH24:MI') AS first_at,
+                                      to_char(max(a.created_at) AT TIME ZONE 'UTC', 'MM-DD HH24:MI') AS last_at
+                               FROM first_responder_actions a JOIN incidents j ON j.id = a.incident_id
+                               WHERE j.host = b.host AND j.started_at >= now() - interval '1 day'
+                               GROUP BY a.action) x), 'none') AS fr_actions
+        FROM (SELECT DISTINCT ON (host) host, id, started_at, ended_at,
+                     round(spike_ratio::numeric, 1) AS spike, traffic_peak_count AS peak_req_min,
+                     challenge_count, count(*) OVER (PARTITION BY host) AS incidents
+              FROM incidents
+              WHERE started_at >= now() - interval '1 day' AND spike_ratio >= 20
+              ORDER BY host, traffic_peak_count DESC NULLS LAST) b
+        ORDER BY b.peak_req_min DESC NULLS LAST LIMIT 20
     """,
     'repeated': """
         SELECT a.host, a.action, count(*) AS n
@@ -137,6 +158,14 @@ Facts you must keep in mind:
 - Request counts and spike ratios include requests answered with a challenge page. Whether a \
 challenge works is shown only by challenge_passing (pct_passed = share of challenge-related page \
 requests served after a passed challenge).
+- big_incidents lists, per host, its largest incident (spike >= 20) with fr_actions = everything \
+the First Responder did for that host's incidents in the last day. Say "no FR action" only \
+when fr_actions is 'none'. 'actions' and 'repeated' are totals, not per incident.
+- An FR action means the command was sent, not that banjax applied it. For a huge incident with \
+FR actions but no visible effect, suggest checking the edge.
+- opted_out = true: the site opted out of Baskerville in the Deflect dashboard. We send it no \
+commands and banjax ignores our decisions for it. Report such a host as "opted out", never as \
+"no FR action", and list opted-out hosts with big incidents so someone can ask the client.
 
 Write Markdown, short, every claim with numbers:
 1. Summary (3-5 bullets; start with what needs attention).
@@ -185,6 +214,9 @@ class DailyReport:
                         c2.execute("SET statement_timeout = '120s'")
                     self.logger.warning(f"[DAILY_REPORT] query {name} failed: {e}")
                     data[name] = {'error': str(e)[:200]}
+        if isinstance(data.get('big_incidents'), list):
+            for row in data['big_incidents']:
+                row['opted_out'] = is_host_opted_out(row.get('host'))
         data['blocks_disabled'] = BLOCKS_DISABLED
         return data
 
