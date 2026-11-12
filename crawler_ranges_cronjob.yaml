@@ -1,0 +1,47 @@
+# Publishes verified crawler IP ranges (Google, Bing, Apple, DuckDuckGo, OpenAI, Perplexity, Mistral,
+# Common Crawl, Ahrefs) to the compacted topic verified_crawlers on kafkab and kafka9, one message per
+# crawler (key = name). Code and message format: src/baskervillehall/crawler_ranges_publisher.py.
+#
+# Topic (once per cluster, run in kafkab-0 and kafka9-0):
+#   /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create \
+#     --topic verified_crawlers --partitions 1 --replication-factor 3 \
+#     --config cleanup.policy=compact --config max.message.bytes=4194304
+#
+# Run by hand: kubectl create job --from=cronjob/crawler-ranges crawler-ranges-manual-$(date +%s)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: crawler-ranges
+spec:
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: publish
+              image: "equalitie/baskervillehall:latest"
+              imagePullPolicy: Always
+              command: ["python"]
+              args: ["/usr/bin/baskervillehall/src/baskervillehall/crawler_ranges_publisher.py"]
+              envFrom:
+                - configMapRef:
+                    name: baskervillehall
+              env:
+                - name: CRAWLER_RANGES_TOPIC
+                  value: "verified_crawlers"
+                - name: DRY_RUN
+                  value: "false"
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "20m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "200m"

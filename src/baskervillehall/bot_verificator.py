@@ -50,8 +50,18 @@ class BotVerificator:
         self.bing_nets = tuple(nets)
 
     def refresh_duckduckgo(self):
-        html = self._get_text('https://duckduckgo.com/duckduckgo-help-pages/results/duckduckbot/')
-        ips = set(self.DUCK_RE.findall(html))
+        # The help page no longer lists the IPs (Nov 2026: 2 of 486); the JSON has them all as /32.
+        data = self._get_json('https://duckduckgo.com/duckduckbot.json')
+        ips = set()
+        for d in data.get("prefixes", []):
+            p = list(d.values())[0] if d else ''
+            try:
+                net = ipa.ip_network(p, strict=False)
+            except Exception as e:
+                self.logger.warning(f"Bad DuckDuckGo prefix {p!r}: {e}")
+                continue
+            if net.version == 4 and net.num_addresses == 1:
+                ips.add(net.network_address.exploded)
         self.duck_ips = frozenset(ips)
 
     def refresh(self, force=False):
