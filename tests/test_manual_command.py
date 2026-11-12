@@ -106,3 +106,12 @@ def test_explicit_dnet():
     assert manual_command.choose_partitions('clear_rules', 'dnext6', PMAP, dnet='dnext2') == ('dnext2', [1])
     with pytest.raises(CommandError):
         manual_command.choose_partitions('challenge_ip', 'dnext6', PMAP, dnet='dnext99')
+
+
+def test_opted_out_host(monkeypatch):
+    monkeypatch.setattr(block_guard, 'is_host_opted_out', lambda h: h == 'optout.example')
+    monkeypatch.setattr(manual_command, 'is_host_opted_out', lambda h: h == 'optout.example')
+    with pytest.raises(CommandError):
+        build_command('challenge_all', 'optout.example', ttl=60, **BASE)
+    # clear_rules stays allowed, IP decisions apply to the whole edge
+    build_command('clear_rules', 'optout.example', value='1.2.3.4', **BASE)

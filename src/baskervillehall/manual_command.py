@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
+from baskervillehall.block_guard import _in_env_whitelist, guard_command_name, is_host_opted_out
 
 MAX_TTL = 24 * 3600
 MIN_SUBNET_PREFIX = 16
@@ -67,8 +67,12 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         raise CommandError('--reason is required')
     if not operator.strip():
         raise CommandError('--operator is required')
-    if is_host_whitelisted(host):
+    if _in_env_whitelist(host.strip().lower()):
         raise CommandError(f'{host} is in BASKERVILLE_HOST_WHITELIST, no commands are sent for it')
+    # clear_rules stays allowed: it lifts IP decisions that apply to the whole edge.
+    if name != 'clear_rules' and is_host_opted_out(host):
+        raise CommandError(f'{host} opted out of Baskerville in the Deflect dashboard '
+                           f'(allowlist_domain); banjax ignores our commands for it')
 
     kind = COMMANDS[name]
     # The kill switch is for automatic blocks; an analyst can override it for one command.
