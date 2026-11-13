@@ -158,7 +158,7 @@ data:
     BASKERVILLE_BLOCKS_DISABLED: "true"
     # AltCha instead of sha-inv for every automatic challenge_* (block_guard.finalize_command).
     # Difficulty 1000..20000 (banjax clamps); average work = max_number/2 x 5000 PBKDF2 rounds.
-    BASKERVILLE_ALTCHA: "false"
+    BASKERVILLE_ALTCHA: "true"
     BASKERVILLE_ALTCHA_MAX_NUMBER: "1000"
     SESSION_LLM_QUEUE_SIZE: "200"
     CLUSTER_LLM_PROVIDER: "anthropic"

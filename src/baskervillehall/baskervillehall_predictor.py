@@ -2543,7 +2543,7 @@ Reply JSON only, no markdown:
                     threshold_ae=threshold_ae,
                     baskerville_score=session.get('baskerville_score_3', 1),
                 )
-                self._send_command(payload, host)
+                self.send(producer, producer_output, payload, key=host, dnet=dnet)
             return
 
         # weak_cipher / scraper meta rule
