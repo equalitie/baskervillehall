@@ -8,6 +8,7 @@ under challenge_all says nothing about whether the challenge works. These bucket
 PASSED_DECISIONS = frozenset({
     'ShaChallengePassed',
     'AltChaChallengePassed',
+    'AltChaClickChallengePassed',
     'ShaChallengePassedByAltCha',
 })
 
@@ -55,3 +56,15 @@ def classify(banjax_decision, status, loc_in=None):
 
 def is_passed(banjax_decision):
     return (banjax_decision or '') in PASSED_DECISIONS
+
+
+def altcha_click_event(banjax_decision):
+    """'shown' for a one-click AltCha challenge page (any source: ip, session, ua, host, sitewide),
+    'passed' for the request right after a solved one, else None. Banjax logs the pass only on that
+    request; the rest of the visit is logged with '-'."""
+    d = banjax_decision or ''
+    if d == 'AltChaClickChallengePassed':
+        return 'passed'
+    if 'AltChaClickChallenge' in d and not d.startswith('TooManyFailed'):
+        return 'shown'
+    return None

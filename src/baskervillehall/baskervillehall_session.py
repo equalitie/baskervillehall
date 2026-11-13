@@ -299,6 +299,8 @@ class BaskervillehallSession(object):
         # What banjax did with the requests (mitigation.BUCKETS), per host and per host+UA
         self.host_mitigation_counts = defaultdict(lambda: defaultdict(int))
         self.host_ua_mitigation_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        # one-click AltCha per (host, UA): [shown, passed], flushed to altcha_click_daily
+        self.altcha_click_counts = defaultdict(lambda: [0, 0])
         self.host_session_counts = defaultdict(int)
         self.host_immature_counts = defaultdict(int)
         self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
@@ -510,6 +512,35 @@ class BaskervillehallSession(object):
             self.logger.debug(f'[HOST_DNET] flushed {len(snapshot)} host→dnet mappings')
         except Exception as e:
             self.logger.warning(f'[HOST_DNET] flush failed: {e}')
+
+    def _flush_altcha_click_to_db(self):
+        """Add the one-click AltCha counts (shown, passed per host and UA) to altcha_click_daily,
+        so the daily report can show whether bots learn to click."""
+        if not self.altcha_click_counts or not self._postgres_connection:
+            return
+        snapshot = dict(self.altcha_click_counts)
+        self.altcha_click_counts.clear()
+        try:
+            import psycopg2
+            conn = psycopg2.connect(**self._postgres_connection)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS altcha_click_daily (
+                           day date NOT NULL, host text NOT NULL, ua text NOT NULL,
+                           shown bigint NOT NULL DEFAULT 0, passed bigint NOT NULL DEFAULT 0,
+                           PRIMARY KEY (day, host, ua))""")
+                cur.executemany(
+                    """INSERT INTO altcha_click_daily (day, host, ua, shown, passed)
+                       VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s, %s, %s)
+                       ON CONFLICT (day, host, ua) DO UPDATE
+                       SET shown = altcha_click_daily.shown + EXCLUDED.shown,
+                           passed = altcha_click_daily.passed + EXCLUDED.passed""",
+                    [(h, u, c[0], c[1]) for (h, u), c in snapshot.items()]
+                )
+            conn.close()
+        except Exception as e:
+            self.logger.warning(f'[ALTCHA_CLICK] flush failed: {e}')
 
     def create_kafka_connections(self, max_retries=10, initial_delay=5):
         consumer = None
@@ -1309,6 +1340,7 @@ class BaskervillehallSession(object):
 
                 if time_module.time() - self._ts_host_dnet_flush >= 300:
                     self._flush_host_dnet_to_db()
+                    self._flush_altcha_click_to_db()
                     self._ts_host_dnet_flush = time_module.time()
 
                 for topic_partition, messages in raw_messages.items():
@@ -1477,6 +1509,9 @@ class BaskervillehallSession(object):
                                                           data.get('loc_in'))
                             if _bucket:
                                 self.host_mitigation_counts[host][_bucket] += 1
+                            _click = mitigation.altcha_click_event(data.get('banjax_decision'))
+                            if _click:
+                                self.altcha_click_counts[(host, _ua_key)][0 if _click == 'shown' else 1] += 1
                             if _ua_key and not verified_bot:
                                 self.host_ua_counts[host][_ua_key] += 1
                                 if _bucket:

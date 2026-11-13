@@ -124,6 +124,14 @@ QUERIES = {
         GROUP BY host HAVING sum(passed) + sum(challenged) >= 500
         ORDER BY pct_passed DESC LIMIT 15
     """,
+    'altcha_click': """
+        SELECT host, ua, sum(shown) AS shown, sum(passed) AS passed,
+               round(100.0 * sum(passed) / nullif(sum(shown), 0), 2) AS pct_passed
+        FROM altcha_click_daily
+        WHERE day >= (now() AT TIME ZONE 'UTC')::date - 1
+        GROUP BY host, ua HAVING sum(shown) >= 20
+        ORDER BY sum(shown) DESC LIMIT 15
+    """,
     'llm_cost': """
         SELECT source, count(*) AS calls, sum(input_tokens) AS input_tokens,
                round(sum(cost_usd)::numeric, 2) AS cost_usd
@@ -161,6 +169,10 @@ requests served after a passed challenge).
 - big_incidents lists, per host, its largest incident (spike >= 20) with fr_actions = everything \
 the First Responder did for that host's incidents in the last day. Say "no FR action" only \
 when fr_actions is 'none'. 'actions' and 'repeated' are totals, not per incident.
+- altcha_click: one-click AltCha (checkbox) per host and UA, yesterday and today UTC. shown =
+challenge pages served, passed = requests right after a solved checkbox (counted per request, so
+pct_passed is a lower bound per visitor). A rising pct_passed for an attack UA means the bots
+learned to click; report it in Summary.
 - An FR action means the command was sent, not that banjax applied it. For a huge incident with \
 FR actions but no visible effect, suggest checking the edge.
 - opted_out = true: the site opted out of Baskerville in the Deflect dashboard. We send it no \
@@ -212,6 +224,9 @@ class DailyReport:
                     conn.rollback()
                     with conn.cursor() as c2:
                         c2.execute("SET statement_timeout = '120s'")
+                    if name == 'altcha_click' and 'does not exist' in str(e):
+                        data[name] = []  # created by the session pipeline on its first click count
+                        continue
                     self.logger.warning(f"[DAILY_REPORT] query {name} failed: {e}")
                     data[name] = {'error': str(e)[:200]}
         if isinstance(data.get('big_incidents'), list):
@@ -275,6 +290,11 @@ class DailyReport:
             if isinstance(r, dict) and _f(r.get('pct_passed')) >= 50:
                 add(WARNING, f"{r['host']}: {r['pct_passed']}% of challenge-related page requests passed "
                              f"the challenge (bots solving it?)")
+
+        for r in data.get('altcha_click') or []:
+            if isinstance(r, dict) and _f(r.get('shown')) >= 100 and _f(r.get('pct_passed')) >= 20:
+                add(WARNING, f"{r['host']}: {r['pct_passed']}% of one-click AltCha challenges passed for "
+                             f"UA {str(r['ua'])[:60]} (bots learned to click?)")
 
         cost = sum(_f(r.get('cost_usd')) for r in data.get('llm_cost') or [] if isinstance(r, dict))
         prev = (data.get('llm_cost_prev7') or [{}])[0] if isinstance(data.get('llm_cost_prev7'), list) else {}
