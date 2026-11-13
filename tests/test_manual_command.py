@@ -115,3 +115,29 @@ def test_opted_out_host(monkeypatch):
         build_command('challenge_all', 'optout.example', ttl=60, **BASE)
     # clear_rules stays allowed, IP decisions apply to the whole edge
     build_command('clear_rules', 'optout.example', value='1.2.3.4', **BASE)
+
+
+def test_altcha_options():
+    msg, warnings = build_command('altcha_challenge_ua', 'example.org', ua='Mozilla/5.0 test', ttl=600,
+                                  altcha_click=True, altcha_max_number=2000, altcha_force_new=True, **BASE)
+    assert msg['Name'] == 'altcha_challenge_ua' and msg['host'] == 'example.org'
+    assert msg['altcha_max_number'] == 2000 and msg['altcha_click'] is True and msg['altcha_force_new'] is True
+
+
+def test_altcha_default_difficulty_warns():
+    msg, warnings = build_command('altcha_challenge_all', 'example.org', ttl=600, **BASE)
+    assert 'altcha_max_number' not in msg and 'altcha_click' not in msg
+    assert any('10000' in w for w in warnings)
+
+
+def test_altcha_ip_warns_edge_block():
+    _, warnings = build_command('altcha_challenge_ip', 'example.org', value='1.2.3.4', ttl=600,
+                                altcha_max_number=1000, **BASE)
+    assert any('whole edge' in w for w in warnings)
+
+
+def test_altcha_options_rejected():
+    with pytest.raises(CommandError):
+        build_command('challenge_all', 'example.org', ttl=600, altcha_click=True, **BASE)
+    with pytest.raises(CommandError):
+        build_command('altcha_challenge_all', 'example.org', ttl=600, altcha_max_number=50000, **BASE)

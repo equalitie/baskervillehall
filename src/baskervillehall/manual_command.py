@@ -6,6 +6,8 @@ dnet settings; analysts call it through analyst/bin/send_command.sh.
   python manual_command.py challenge_ip --host example.org --value 1.2.3.4 --ttl 3600 \
       --reason "scraper hammering /search" --operator vladimir
   python manual_command.py clear_rules --host example.org --value 1.2.3.4 --reason "false positive" ...
+  python manual_command.py altcha_challenge_ua --host example.org --ua "<exact UA>" --ttl 3600 \
+      --altcha-click --altcha-max-number 2000 --reason "botnet passes sha-inv" ...
 
 Every command sent is recorded in the manual_commands table.
 """
@@ -19,6 +21,7 @@ from baskervillehall.block_guard import _in_env_whitelist, guard_command_name, i
 
 MAX_TTL = 24 * 3600
 MIN_SUBNET_PREFIX = 16
+ALTCHA_MAX_NUMBER_RANGE = (1000, 20000)  # banjax clamps to this
 
 # command name -> what it targets
 COMMANDS = {
@@ -55,7 +58,8 @@ class CommandError(ValueError):
 
 
 def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='', operator='',
-                  clear_host=False, allow_block=False):
+                  clear_host=False, allow_block=False, altcha_click=False, altcha_max_number=None,
+                  altcha_force_new=False):
     """Validate the request and return (banjax message, list of warnings)."""
     warnings = []
     if name not in COMMANDS:
@@ -83,6 +87,9 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
     elif allow_block and sent_name != guard_command_name(name):
         warnings.append(f'--allow-block: a real {name} is sent although automatic blocks are disabled')
 
+    if (altcha_click or altcha_max_number is not None or altcha_force_new) and not name.startswith('altcha_'):
+        raise CommandError('--altcha-click, --altcha-max-number and --altcha-force-new are for altcha_* commands')
+
     meta = f'manual [{operator}] {reason}'
     # "Value" (not "value"): banjax reads either, but the Kibana pipeline maps only "Value" to client_ip.
     message = {'Name': sent_name, 'source': meta, 'meta': meta}
@@ -93,6 +100,22 @@ def build_command(name, host, value='', ua='', session_id='', ttl=None, reason='
         if not 0 < ttl <= MAX_TTL:
             raise CommandError(f'--ttl must be between 1 and {MAX_TTL} seconds')
         message['ttl'] = ttl
+
+    if name.startswith('altcha_'):
+        # without these banjax uses its config: difficulty 10000, no checkbox, old cookies accepted
+        if altcha_max_number is not None:
+            lo, hi = ALTCHA_MAX_NUMBER_RANGE
+            if not lo <= altcha_max_number <= hi:
+                raise CommandError(f'--altcha-max-number must be between {lo} and {hi}')
+            message['altcha_max_number'] = altcha_max_number
+        else:
+            warnings.append('no --altcha-max-number: banjax uses its default (10000, several seconds on a phone)')
+        if altcha_click:
+            message['altcha_click'] = True
+        if altcha_force_new:
+            message['altcha_force_new'] = True
+        if kind in ('ip', 'subnet', 'session'):
+            warnings.append('3 requests without a solved AltCha in 10 s get the IP blocked on the whole edge')
 
     if kind == 'ip':
         message['Value'] = _ip(value)
@@ -207,6 +230,12 @@ def main(argv=None):
                         help='ip/subnet commands: send to every dnet (all of Deflect), not only the host\'s dnet')
     parser.add_argument('--dnet', default='',
                         help='send only to this dnet (by name, e.g. dnext4)')
+    parser.add_argument('--altcha-click', action='store_true',
+                        help='altcha_*: one-click "I\'m not a robot" checkbox before the proof of work')
+    parser.add_argument('--altcha-max-number', type=int,
+                        help='altcha_*: difficulty 1000..20000 (average work grows linearly; banjax default 10000)')
+    parser.add_argument('--altcha-force-new', action='store_true',
+                        help='altcha_*: reject deflect_altcha cookies solved before this command')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
 
@@ -214,7 +243,8 @@ def main(argv=None):
         message, warnings = build_command(
             args.name, args.host, value=args.value, ua=args.ua, session_id=args.session_id,
             ttl=args.ttl, reason=args.reason, operator=args.operator, clear_host=args.clear_host,
-            allow_block=args.allow_block)
+            allow_block=args.allow_block, altcha_click=args.altcha_click,
+            altcha_max_number=args.altcha_max_number, altcha_force_new=args.altcha_force_new)
     except CommandError as e:
         print(f'ERROR: {e}', file=sys.stderr)
         return 2
