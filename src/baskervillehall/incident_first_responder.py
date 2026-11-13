@@ -8,7 +8,7 @@ import psycopg2
 import psycopg2.extras
 import requests
 from kafka import KafkaProducer
-from baskervillehall.block_guard import BLOCKS_DISABLED, guard_command_name, is_host_whitelisted
+from baskervillehall.block_guard import BLOCKS_DISABLED, finalize_command, guard_command_name, is_host_whitelisted
 
 # Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
 PROTECTED_ASNS = {
@@ -736,7 +736,7 @@ class IncidentFirstResponder:
             'meta': meta,
             'ttl': ttl_sec,
         }
-        encoded = json.dumps(command).encode('utf-8')
+        encoded = json.dumps(finalize_command(command)).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
         partition = self.dnet_partition_map.get(dnet, -1)
         if self._producer is not None:
@@ -778,7 +778,7 @@ class IncidentFirstResponder:
                 'meta': meta,
                 'ttl': self.ttl_minutes * 60,
             }
-            value = json.dumps(command).encode('utf-8')
+            value = json.dumps(finalize_command(command)).encode('utf-8')
             key = bytearray(host, encoding='utf-8')
             partition = self.dnet_partition_map.get(dnet, -1)
             if self._producer is not None:
@@ -827,7 +827,7 @@ class IncidentFirstResponder:
             command['host'] = host
         else:
             command['value'] = value
-        encoded = json.dumps(command).encode('utf-8')
+        encoded = json.dumps(finalize_command(command)).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
         if self._producer is not None:
             self._producer.send(topic=self.topic_commands, value=encoded, key=key)
@@ -1416,7 +1416,7 @@ class IncidentFirstResponder:
                 'meta': meta,
                 'ttl': self.ttl_minutes * 60,
             }
-            value = json.dumps(command).encode('utf-8')
+            value = json.dumps(finalize_command(command)).encode('utf-8')
             key = bytearray(host, encoding='utf-8')
             partition = self.dnet_partition_map.get(dnet, -1)
             if self._producer is not None:

@@ -19,6 +19,39 @@ def guard_command_name(name):
     return name
 
 
+# AltCha instead of the sha-inv challenge for every automatic challenge (banjax >= v0.13.3 on all
+# edges). sha-inv is ~1000 hashes, nothing for a headless browser; AltCha's work is tunable, and
+# its cookie also passes sha-inv. Both fail the same way (Block), so the switch adds no new risk
+# besides the solve time, which BASKERVILLE_ALTCHA_MAX_NUMBER sets (banjax clamps to 1000..20000;
+# its own default, 10000, is too slow for cheap phones, so we always send it).
+ALTCHA_ENABLED = os.environ.get('BASKERVILLE_ALTCHA', 'false').lower() == 'true'
+ALTCHA_MAX_NUMBER = int(os.environ.get('BASKERVILLE_ALTCHA_MAX_NUMBER', '1000'))
+
+_CHALLENGE_TO_ALTCHA = {
+    'challenge_ip': 'altcha_challenge_ip',
+    'challenge_subnet': 'altcha_challenge_subnet',
+    'challenge_session': 'altcha_challenge_session',
+    'challenge_ua': 'altcha_challenge_ua',
+    'challenge_all': 'altcha_challenge_all',
+}
+
+
+def finalize_command(command):
+    """Last step before a command dict is sent: with BASKERVILLE_ALTCHA on, a challenge_* becomes
+    its altcha_challenge_* with our difficulty (an explicit altcha_max_number is kept). The name in
+    meta/source ("... [challenge_ip]") follows, so dashboards split by it. Returns the command."""
+    name = command.get('Name')
+    altcha = _CHALLENGE_TO_ALTCHA.get(name)
+    if not ALTCHA_ENABLED or altcha is None:
+        return command
+    command['Name'] = altcha
+    command.setdefault('altcha_max_number', ALTCHA_MAX_NUMBER)
+    for f in ('meta', 'source'):
+        if isinstance(command.get(f), str):
+            command[f] = command[f].replace(f'[{name}]', f'[{altcha}]')
+    return command
+
+
 # Sites Baskerville never sends any command for: the exact host and all its subdomains.
 # FIRST_RESPONDER_HOST_WHITELIST is kept for backward compatibility.
 HOST_WHITELIST = tuple(

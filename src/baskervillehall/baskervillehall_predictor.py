@@ -25,7 +25,7 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 
-from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
+from baskervillehall.block_guard import finalize_command, guard_command_name, is_host_whitelisted
 from baskervillehall.baskervillehall_isolation_forest import (
     BaskervillehallIsolationForest,
     ModelType,
@@ -1920,6 +1920,7 @@ Reply JSON only, no markdown:
                 if isinstance(payload.get(f), str):
                     payload[f] = payload[f].replace(f"[{payload['Name']}]", f"[{name}]")
             payload['Name'] = name
+        finalize_command(payload)
         key = bytearray(payload['host'], encoding="utf8")
         producer.send(topic=self.topic_commands,
                       value=json.dumps(payload).encode("utf-8"),
@@ -1971,6 +1972,8 @@ Reply JSON only, no markdown:
             ]:
                 output_payload[k] = payload[k]
 
+            if 'altcha_max_number' in payload:
+                output_payload['altcha_max_number'] = payload['altcha_max_number']
             output_payload['print_log'] = self.print_log_in_command
 
             payload_encoded = json.dumps(output_payload).encode("utf-8")

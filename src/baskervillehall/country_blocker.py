@@ -4,7 +4,7 @@ import logging
 
 from cachetools import TTLCache
 from kafka import KafkaProducer
-from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
+from baskervillehall.block_guard import finalize_command, guard_command_name, is_host_whitelisted
 
 
 class CountryBlocker:
@@ -66,7 +66,7 @@ class CountryBlocker:
             "ttl": ttl_ban_time,
         }
         partition = self.dnet_partition_map.get(dnet, -1)
-        value = json.dumps(command).encode("utf-8")
+        value = json.dumps(finalize_command(command)).encode("utf-8")
         if self.producer is not None:
             self.producer.send(
                 topic=self.topic_commands,

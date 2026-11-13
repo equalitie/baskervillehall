@@ -156,6 +156,10 @@ data:
     SESSION_STATIC_UA_BLOCK_TTL: "3600"
     # Nov 2026: too much collateral from edge-wide blocks; block_ip/subnet/session are sent as challenge_*.
     BASKERVILLE_BLOCKS_DISABLED: "true"
+    # AltCha instead of sha-inv for every automatic challenge_* (block_guard.finalize_command).
+    # Difficulty 1000..20000 (banjax clamps); average work = max_number/2 x 5000 PBKDF2 rounds.
+    BASKERVILLE_ALTCHA: "false"
+    BASKERVILLE_ALTCHA_MAX_NUMBER: "1000"
     SESSION_LLM_QUEUE_SIZE: "200"
     CLUSTER_LLM_PROVIDER: "anthropic"
     CLUSTER_LLM_MODEL: "claude-haiku-4-5-20251001"

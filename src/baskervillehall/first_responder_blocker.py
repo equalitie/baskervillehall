@@ -8,7 +8,7 @@ import psycopg2
 from cachetools import TTLCache
 from kafka import KafkaProducer
 
-from baskervillehall.block_guard import guard_command_name, is_host_whitelisted
+from baskervillehall.block_guard import finalize_command, guard_command_name, is_host_whitelisted
 from baskervillehall.incident_first_responder import (
     FINGERPRINT_TARGET_PREFIX, is_browser_ua, is_verifiable_crawler_ua,
 )
@@ -252,7 +252,7 @@ class FirstResponderBlocker:
             'meta': meta,
             'ttl': ttl,
         }
-        value = json.dumps(command).encode('utf-8')
+        value = json.dumps(finalize_command(command)).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
         partition = self.dnet_partition_map.get(dnet, -1)
 

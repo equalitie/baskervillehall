@@ -37,3 +37,32 @@ def test_no_config_url_means_no_opt_outs(monkeypatch):
     monkeypatch.delenv('DEFLECT_CONFIG_URL', raising=False)
     monkeypatch.setattr(block_guard, 'HOST_WHITELIST', ())
     assert not block_guard.is_host_whitelisted('optout.example')
+
+
+def test_finalize_command_altcha_off(monkeypatch):
+    monkeypatch.setattr(block_guard, 'ALTCHA_ENABLED', False)
+    cmd = {'Name': 'challenge_ip', 'Value': '1.2.3.4', 'meta': 'x [challenge_ip]'}
+    assert block_guard.finalize_command(dict(cmd)) == cmd
+
+
+def test_finalize_command_altcha_on(monkeypatch):
+    monkeypatch.setattr(block_guard, 'ALTCHA_ENABLED', True)
+    monkeypatch.setattr(block_guard, 'ALTCHA_MAX_NUMBER', 1500)
+    cmd = block_guard.finalize_command(
+        {'Name': 'challenge_all', 'host': 'a.example', 'meta': 'first_responder [challenge_all] r',
+         'source': 'first_responder'})
+    assert cmd['Name'] == 'altcha_challenge_all'
+    assert cmd['altcha_max_number'] == 1500
+    assert cmd['meta'] == 'first_responder [altcha_challenge_all] r'
+    # an explicit difficulty wins; blocks and clear_rules are left alone
+    assert block_guard.finalize_command({'Name': 'challenge_ua', 'altcha_max_number': 20000})[
+        'altcha_max_number'] == 20000
+    for name in ('block_ip', 'block_ua', 'clear_rules', 'altcha_challenge_ip'):
+        assert block_guard.finalize_command({'Name': name}) == {'Name': name}
+
+
+def test_kill_switch_then_altcha(monkeypatch):
+    monkeypatch.setattr(block_guard, 'BLOCKS_DISABLED', True)
+    monkeypatch.setattr(block_guard, 'ALTCHA_ENABLED', True)
+    cmd = {'Name': block_guard.guard_command_name('block_ip'), 'Value': '1.2.3.4'}
+    assert block_guard.finalize_command(cmd)['Name'] == 'altcha_challenge_ip'
