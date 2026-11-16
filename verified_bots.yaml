@@ -1,0 +1,188 @@
+# Verified bots JSON for banjax: https://api.baskerville.ai/v1/verified_bots.json
+# Format and sources: src/baskervillehall/verified_bots.py. The CronJob rebuilds it every 6 h into the
+# ConfigMap verified-bots; nginx serves that file and checks the token.
+#
+# The ingress sees node addresses, not client IPs (no proxy protocol), and trusts X-Forwarded-For,
+# so access is limited by the token, not by IP. The token secret is not in the repo:
+#   kubectl create secret generic verified-bots-token --from-literal=VERIFIED_BOTS_TOKEN="$(openssl rand -hex 32)"
+# Read it to pass on (Proton Pass), never paste it in chat or tickets:
+#   kubectl get secret verified-bots-token -o jsonpath='{.data.VERIFIED_BOTS_TOKEN}' | base64 -d
+#
+# Client: curl -H "Authorization: Bearer $TOKEN" https://api.baskerville.ai/v1/verified_bots.json
+# Run by hand: kubectl create job --from=cronjob/verified-bots verified-bots-manual-$(date +%s)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: verified-bots
+data:
+  verified_bots.json: '{"updated_at":null,"categories":[],"operators":{}}'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: verified-bots
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: verified-bots
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["verified-bots"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: verified-bots
+subjects:
+  - kind: ServiceAccount
+    name: verified-bots
+roleRef:
+  kind: Role
+  name: verified-bots
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: verified-bots
+spec:
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          serviceAccountName: verified-bots
+          restartPolicy: Never
+          containers:
+            - name: build
+              image: "equalitie/baskervillehall:latest"
+              imagePullPolicy: Always
+              command: ["python"]
+              args: ["/usr/bin/baskervillehall/src/baskervillehall/verified_bots.py"]
+              env:
+                - name: VERIFIED_BOTS_CONFIGMAP
+                  value: "verified-bots"
+                - name: NAMESPACE
+                  value: "default"
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "20m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "200m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: verified-bots-nginx
+data:
+  default.conf.template: |
+    server {
+      listen 8080;
+      server_tokens off;
+      location = /v1/verified_bots.json {
+        if ($http_authorization != "Bearer ${VERIFIED_BOTS_TOKEN}") { return 401; }
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        alias /data/verified_bots.json;
+      }
+      location = /healthz { return 200 "ok\n"; }
+      location / { return 404; }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verified-bots
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: verified-bots
+  template:
+    metadata:
+      labels:
+        app: verified-bots
+    spec:
+      containers:
+        - name: nginx
+          image: "nginxinc/nginx-unprivileged:1.27-alpine"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: VERIFIED_BOTS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: verified-bots-token
+                  key: VERIFIED_BOTS_TOKEN
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+            - name: conf
+              mountPath: /etc/nginx/templates
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+      volumes:
+        # no subPath, so ConfigMap updates reach the file
+        - name: data
+          configMap:
+            name: verified-bots
+        - name: conf
+          configMap:
+            name: verified-bots-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: verified-bots
+spec:
+  selector:
+    app: verified-bots
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Same host as the baskerville-cloud ingress; this exact path wins over its "/". The TLS secret is
+# the one cert-manager keeps for that ingress, so no issuer annotation here.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: verified-bots
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["api.baskerville.ai"]
+      secretName: baskerville-cloud-tls
+  rules:
+    - host: api.baskerville.ai
+      http:
+        paths:
+          - path: /v1/verified_bots.json
+            pathType: Exact
+            backend:
+              service:
+                name: verified-bots
+                port:
+                  number: 80
