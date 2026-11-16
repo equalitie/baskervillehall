@@ -18,6 +18,16 @@ HIGH, MEDIUM = 'high', 'medium'
 # Smaller bodies are status strings ("OK"), not files: a real .env line, git config or log is longer.
 MIN_BYTES = 20
 
+# Upper bounds for small files: a bigger answer is a page or a catch-all, not the file
+# (a real .git/HEAD is ~23 bytes; one site answers every path with the same 200 KB text).
+_MAX_BYTES = (
+    ('/.git/HEAD', 200),
+    ('/.git/config', 10000),
+    ('/.aws/credentials', 10000),
+    ('/.htpasswd', 50000),
+    ('/.env', 50000),  # also /.env.*
+)
+
 # exact paths -> (severity, what it is)
 _EXACT = {
     '/.env': (HIGH, 'environment file (keys, passwords)'),
@@ -76,6 +86,10 @@ def is_exposure(url, status, content_type, length, host=None):
             return False
     except (TypeError, ValueError):
         return False
+    for prefix, limit in _MAX_BYTES:
+        if url == prefix or (prefix == '/.env' and url.startswith('/.env.')):
+            if int(float(length)) > limit:
+                return False
     ct = (content_type or '').lower()
     if url == '/server-status':
         return ct.startswith('text/html') and 'iso-8859-1' in ct

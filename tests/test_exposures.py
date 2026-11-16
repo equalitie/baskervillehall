@@ -31,3 +31,10 @@ def test_status_strings_and_edge_ips_are_not_files():
     assert not ex.is_exposure('/.env', 200, 'text/plain', 2)              # "OK"
     assert not ex.is_exposure('/.env', 200, 'text/plain', 162, host='51.68.103.214')
     assert ex.is_exposure('/.env', 200, 'text/plain', 162, host='example.org')
+
+
+def test_too_big_for_the_file_is_a_page():
+    assert not ex.is_exposure('/.git/HEAD', 200, 'text/plain', 63310, host='example.org')
+    assert not ex.is_exposure('/.env', 200, 'text/plain', 205722, host='example.org')
+    assert ex.is_exposure('/.git/HEAD', 200, 'text/plain', 23, host='example.org')
+    assert ex.is_exposure('/wp-content/debug.log', 200, 'application/octet-stream', 106429824, host='example.org')
