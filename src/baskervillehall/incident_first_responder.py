@@ -2433,13 +2433,6 @@ class IncidentFirstResponder:
         incident_id = incident['id']
         host = incident['host']
 
-        if incident['ended_at'] is None and ALTCHA_CLICK_ENABLED:
-            try:
-                self._altcha_click_escalation(conn, incident)
-            except Exception as e:
-                conn.rollback()
-                self.logger.warning(f"[ALTCHA_CLICK] {host}: escalation failed: {e}")
-
         # For active incidents: re-analyze only every ttl_minutes (same as block TTL).
         # Using TTL instead of a short interval avoids repeated LLM calls when the attack
         # cannot be blocked (e.g. all ASNs are protected infrastructure).
@@ -2763,6 +2756,14 @@ class IncidentFirstResponder:
     def _process_incident(self, conn, incident):
         incident_id = incident['id']
         host = incident['host']
+
+        # Before the routing and the LLM timer: cheap, rule-based, every tick (all incident types).
+        if incident['ended_at'] is None and ALTCHA_CLICK_ENABLED:
+            try:
+                self._altcha_click_escalation(conn, incident)
+            except Exception as e:
+                conn.rollback()
+                self.logger.warning(f"[ALTCHA_CLICK] {host}: escalation failed: {e}")
 
         # Route cluster_analysis incidents to dedicated handler
         if incident.get('source') == 'cluster_analysis':
