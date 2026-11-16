@@ -1543,7 +1543,8 @@ class BaskervillehallSession(object):
                                 self.host_mitigation_counts[host][_bucket] += 1
                             _url = data.get('client_url')
                             if exposures.is_exposure(_url, data.get('http_response_code'),
-                                                     data.get('content_type'), data.get('reply_length_bytes')):
+                                                     data.get('content_type'), data.get('reply_length_bytes'),
+                                                     host):
                                 _e = self.exposure_counts[(host, _url, (data.get('content_type') or '')[:80])]
                                 _e[0] += 1
                                 _e[1] = max(_e[1], int(float(data.get('reply_length_bytes') or 0)))

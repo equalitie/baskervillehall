@@ -10,9 +10,13 @@ False positives: many sites answer every unknown path with their home page (text
 here) or with one catch-all response of another type (same size for every path). The report
 drops a host whose findings of a day share one size across 3+ paths.
 """
+import ipaddress
 import re
 
 HIGH, MEDIUM = 'high', 'medium'
+
+# Smaller bodies are status strings ("OK"), not files: a real .env line, git config or log is longer.
+MIN_BYTES = 20
 
 # exact paths -> (severity, what it is)
 _EXACT = {
@@ -53,13 +57,22 @@ def sensitive_path(url):
     return None
 
 
-def is_exposure(url, status, content_type, length):
-    """True when the origin served the sensitive file itself: 200, a body, and not an HTML page
-    (Apache's server-status is HTML in ISO-8859-1, unlike the sites' own pages)."""
-    if not sensitive_path(url):
+def _is_ip(host):
+    try:
+        ipaddress.ip_address((host or '').split(':')[0])
+        return True
+    except ValueError:
+        return False
+
+
+def is_exposure(url, status, content_type, length, host=None):
+    """True when the origin served the sensitive file itself: 200, at least MIN_BYTES, and not an
+    HTML page (Apache's server-status is HTML in ISO-8859-1, unlike the sites' own pages).
+    Requests to an edge by IP instead of a site name don't count."""
+    if not sensitive_path(url) or _is_ip(host):
         return False
     try:
-        if int(status or 0) != 200 or int(float(length or 0)) <= 0:
+        if int(status or 0) != 200 or int(float(length or 0)) < MIN_BYTES:
             return False
     except (TypeError, ValueError):
         return False

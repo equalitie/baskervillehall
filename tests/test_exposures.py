@@ -25,3 +25,9 @@ def test_exposure_needs_the_file_not_a_page():
 def test_server_status_is_apache_page():
     assert ex.is_exposure('/server-status', 200, 'text/html; charset=ISO-8859-1', 6967)
     assert not ex.is_exposure('/server-status', 200, 'text/html; charset=utf-8', 6967)
+
+
+def test_status_strings_and_edge_ips_are_not_files():
+    assert not ex.is_exposure('/.env', 200, 'text/plain', 2)              # "OK"
+    assert not ex.is_exposure('/.env', 200, 'text/plain', 162, host='51.68.103.214')
+    assert ex.is_exposure('/.env', 200, 'text/plain', 162, host='example.org')
