@@ -160,6 +160,9 @@ data:
     # Difficulty 1000..20000 (banjax clamps); average work = max_number/2 x 5000 PBKDF2 rounds.
     BASKERVILLE_ALTCHA: "true"
     BASKERVILLE_ALTCHA_MAX_NUMBER: "1000"
+    # First Responder: one-click AltCha (+ force_new) on attack UAs that pass the challenge
+    FIRST_RESPONDER_ALTCHA_CLICK: "true"
+    FIRST_RESPONDER_ALTCHA_CLICK_TTL_MINUTES: "360"
     SESSION_LLM_QUEUE_SIZE: "200"
     CLUSTER_LLM_PROVIDER: "anthropic"
     CLUSTER_LLM_MODEL: "claude-haiku-4-5-20251001"

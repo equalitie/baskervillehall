@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,8 @@ import psycopg2
 import psycopg2.extras
 import requests
 from kafka import KafkaProducer
-from baskervillehall.block_guard import BLOCKS_DISABLED, finalize_command, guard_command_name, is_host_whitelisted
+from baskervillehall.block_guard import (ALTCHA_MAX_NUMBER, BLOCKS_DISABLED, finalize_command,
+                                         guard_command_name, is_host_whitelisted)
 
 # Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
 PROTECTED_ASNS = {
@@ -101,6 +103,24 @@ _VERIFIABLE_CRAWLER_RE = re.compile(
 
 def is_verifiable_crawler_ua(ua: str) -> bool:
     return bool(_VERIFIABLE_CRAWLER_RE.search(ua))
+
+
+# One-click AltCha escalation (rule-based, no LLM). The tapol.org botnet (Nov 13) solved sha-inv
+# and AltCha on page load but never clicked: 0 of 1,293 IPs passed the checkbox. A deflect_altcha
+# cookie does not record the click, so the command always carries altcha_force_new. See
+# IncidentFirstResponder._altcha_click_candidates for the conditions.
+ALTCHA_CLICK_ENABLED = os.environ.get('FIRST_RESPONDER_ALTCHA_CLICK', 'true').lower() == 'true'
+ALTCHA_CLICK_TTL_MINUTES = int(os.environ.get('FIRST_RESPONDER_ALTCHA_CLICK_TTL_MINUTES', '360'))
+ALTCHA_CLICK_WINDOW_MINUTES = 10
+ALTCHA_CLICK_MIN_REQUESTS = 300      # of the UA in the window
+ALTCHA_CLICK_MIN_SHARE = 20.0        # % of the host's traffic in the window
+ALTCHA_CLICK_MIN_BASELINE_RATIO = 3  # share now / normal share (host_ua_stats)
+ALTCHA_CLICK_MIN_BOT_PCT = 20.0      # % of the incident's bot commands with this UA
+ALTCHA_CLICK_MIN_PASSED = 100
+ALTCHA_CLICK_MIN_PASS_RATE = 0.5     # passed / (passed + challenged)
+ALTCHA_CLICK_COOLDOWN_MINUTES = 15   # per host + UA; a re-send resets the visitors' cookies
+ALTCHA_CLICK_MAX_UAS = 2
+ALTCHA_CLICK_ACTION = 'altcha_click_ua'  # also excluded from the LLM re-analysis timer
 
 
 def is_browser_ua(ua: str) -> bool:
@@ -799,7 +819,82 @@ class IncidentFirstResponder:
         """Send block_ip Kafka commands for a list of IPs (used by _block_fingerprint_ips)."""
         return self._send_ip_commands(incident, ips, 'block_ip', reason)
 
-    def _send_banjax_command(self, host, command_name, value, ttl_seconds, reason, conn=None):
+    def _altcha_click_candidates(self, conn, incident):
+        """UAs of an open incident that pass the challenge they get and look like the attack:
+        browser UA, >= ALTCHA_CLICK_MIN_SHARE % of the host's traffic in the last
+        ALTCHA_CLICK_WINDOW_MINUTES and >= ALTCHA_CLICK_MIN_BASELINE_RATIO x its normal share,
+        >= ALTCHA_CLICK_MIN_BOT_PCT % of the incident's bot commands, and passing the challenge
+        (>= ALTCHA_CLICK_MIN_PASSED, rate >= ALTCHA_CLICK_MIN_PASS_RATE). Readers of a site under
+        challenge pass too, so all conditions are needed (fergana.agency, Nov 15: Chrome/157
+        Android readers would pass the pass-rate test alone)."""
+        host = incident['host']
+        since = (datetime.now(timezone.utc) - timedelta(minutes=ALTCHA_CLICK_WINDOW_MINUTES)
+                 ).replace(tzinfo=None)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(served + passed + challenged + blocked + rate_limited), 0)
+                FROM host_mitigation_minute WHERE host = %s AND minute >= %s""", (host, since))
+            host_total = int(cur.fetchone()[0] or 0)
+            if host_total < ALTCHA_CLICK_MIN_REQUESTS:
+                return []
+            cur.execute("""
+                SELECT ua, SUM(served + passed + challenged + blocked + rate_limited), SUM(passed),
+                       SUM(challenged)
+                FROM host_ua_mitigation_minute WHERE host = %s AND minute >= %s
+                GROUP BY ua ORDER BY 2 DESC LIMIT 10""", (host, since))
+            rows = cur.fetchall()
+        bot_pct = {u['ua']: u['pct'] for u in self._get_ua_stats(conn, incident['id'])}
+        normal = self._get_normal_ua_traffic(conn, host)
+        out = []
+        for ua, total, passed, challenged in rows:
+            total, passed, challenged = int(total or 0), int(passed or 0), int(challenged or 0)
+            share = 100.0 * total / host_total
+            if not is_browser_ua(ua) or is_verifiable_crawler_ua(ua):
+                continue
+            if total < ALTCHA_CLICK_MIN_REQUESTS or share < ALTCHA_CLICK_MIN_SHARE:
+                continue
+            if share < ALTCHA_CLICK_MIN_BASELINE_RATIO * normal.get(ua, 0.0):
+                continue
+            if bot_pct.get(ua, 0.0) < ALTCHA_CLICK_MIN_BOT_PCT:
+                continue
+            if passed < ALTCHA_CLICK_MIN_PASSED or passed < ALTCHA_CLICK_MIN_PASS_RATE * (passed + challenged):
+                continue
+            out.append({'ua': ua, 'share': share, 'passed': passed, 'challenged': challenged,
+                        'normal_pct': normal.get(ua, 0.0), 'bot_pct': bot_pct.get(ua, 0.0)})
+        return out[:ALTCHA_CLICK_MAX_UAS]
+
+    def _altcha_click_escalation(self, conn, incident):
+        """Put the one-click AltCha on attack UAs that pass the current challenge. The trigger is
+        also the check that the decision is gone (TTL over, or an edge restart dropped it): while it
+        is in place the bots stop passing. Re-sent at most every ALTCHA_CLICK_COOLDOWN_MINUTES."""
+        host = incident['host']
+        if is_host_whitelisted(host):
+            return
+        for c in self._altcha_click_candidates(conn, incident):
+            ua = c['ua']
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM first_responder_actions
+                    WHERE host = %s AND action = %s AND target = %s
+                      AND created_at > NOW() - INTERVAL '1 minute' * %s LIMIT 1""",
+                    (host, ALTCHA_CLICK_ACTION, ua, ALTCHA_CLICK_COOLDOWN_MINUTES))
+                if cur.fetchone():
+                    continue
+            reason = (f"UA passes the challenge during the attack: {c['passed']} passed vs "
+                      f"{c['challenged']} challenged in {ALTCHA_CLICK_WINDOW_MINUTES} min, "
+                      f"{c['share']:.0f}% of traffic (normal {c['normal_pct']:.1f}%), "
+                      f"{c['bot_pct']:.0f}% of bot commands")
+            self._send_banjax_command(
+                host, 'altcha_challenge_ua', ua, ALTCHA_CLICK_TTL_MINUTES * 60,
+                f'[{ALTCHA_CLICK_ACTION}] {reason}', conn=conn,
+                extra={'altcha_click': True, 'altcha_force_new': True,
+                       'altcha_max_number': ALTCHA_MAX_NUMBER})
+            self._save_action(conn, incident['id'], host, {
+                'action': ALTCHA_CLICK_ACTION, 'target': [ua], 'confidence': 0.9,
+                'reasoning': reason, 'ttl_minutes': ALTCHA_CLICK_TTL_MINUTES})
+            conn.commit()
+
+    def _send_banjax_command(self, host, command_name, value, ttl_seconds, reason, conn=None, extra=None):
         """Send a single non-IP banjax command (block_ua, challenge_ua, challenge_all) to Kafka.
 
         Routes to the correct dnet partition using the host_dnet table (populated by session pipeline).
@@ -820,13 +915,15 @@ class IncidentFirstResponder:
             'source': 'first_responder',
             'meta': f'first_responder [{command_name}] {reason}',
         }
-        if command_name in ('block_ua', 'challenge_ua'):
+        if command_name in ('block_ua', 'challenge_ua', 'altcha_challenge_ua'):
             command['ua'] = value
             command['host'] = host
         elif command_name == 'challenge_all':
             command['host'] = host
         else:
             command['value'] = value
+        if extra:
+            command.update(extra)
         encoded = json.dumps(finalize_command(command)).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
         if self._producer is not None:
@@ -2336,13 +2433,21 @@ class IncidentFirstResponder:
         incident_id = incident['id']
         host = incident['host']
 
+        if incident['ended_at'] is None and ALTCHA_CLICK_ENABLED:
+            try:
+                self._altcha_click_escalation(conn, incident)
+            except Exception as e:
+                conn.rollback()
+                self.logger.warning(f"[ALTCHA_CLICK] {host}: escalation failed: {e}")
+
         # For active incidents: re-analyze only every ttl_minutes (same as block TTL).
         # Using TTL instead of a short interval avoids repeated LLM calls when the attack
         # cannot be blocked (e.g. all ASNs are protected infrastructure).
         if incident['ended_at'] is None:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT MAX(created_at) FROM first_responder_actions WHERE incident_id = %s",
+                    "SELECT MAX(created_at) FROM first_responder_actions WHERE incident_id = %s"
+                    " AND action <> 'altcha_click_ua'",
                     (incident_id,)
                 )
                 last_action_at = cur.fetchone()[0]
@@ -2671,7 +2776,8 @@ class IncidentFirstResponder:
         if incident['ended_at'] is None:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT MAX(created_at) FROM first_responder_actions WHERE incident_id = %s",
+                    "SELECT MAX(created_at) FROM first_responder_actions WHERE incident_id = %s"
+                    " AND action <> 'altcha_click_ua'",
                     (incident_id,)
                 )
                 last_action_at = cur.fetchone()[0]
