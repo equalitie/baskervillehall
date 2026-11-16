@@ -25,6 +25,7 @@ _MAX_BYTES = (
     ('/.git/config', 10000),
     ('/.aws/credentials', 10000),
     ('/.htpasswd', 50000),
+    ('/.DS_Store', 100000),
     ('/.env', 50000),  # also /.env.*
 )
 
