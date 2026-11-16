@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import smtplib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
@@ -18,6 +18,7 @@ from html import escape
 import psycopg2
 import requests
 
+from baskervillehall import exposures
 from baskervillehall.block_guard import BLOCKS_DISABLED, is_host_opted_out
 
 NORM, WARNING, URGENT = 'NORM', 'WARNING', 'URGENT'
@@ -132,6 +133,19 @@ QUERIES = {
         GROUP BY host, ua HAVING sum(shown) >= 20
         ORDER BY sum(shown) DESC LIMIT 15
     """,
+    'exposures': """
+        WITH recent AS (
+            SELECT host, url, content_type, sum(hits) AS hits, max(max_bytes) AS bytes
+            FROM exposures_daily WHERE day >= (now() AT TIME ZONE 'UTC')::date - 1
+            GROUP BY host, url, content_type),
+        catch_all AS (  -- one response of the same size for 3+ paths: the site's catch-all page
+            SELECT host, bytes FROM recent GROUP BY host, bytes HAVING count(DISTINCT url) >= 3),
+        first_seen AS (SELECT host, url, min(day) AS first_day FROM exposures_daily GROUP BY host, url)
+        SELECT r.host, r.url, r.content_type, r.hits, r.bytes, f.first_day
+        FROM recent r JOIN first_seen f USING (host, url)
+        WHERE NOT EXISTS (SELECT 1 FROM catch_all c WHERE c.host = r.host AND c.bytes = r.bytes)
+        ORDER BY f.first_day DESC, r.hits DESC LIMIT 40
+    """,
     'llm_cost': """
         SELECT source, count(*) AS calls, sum(input_tokens) AS input_tokens,
                round(sum(cost_usd)::numeric, 2) AS cost_usd
@@ -173,6 +187,10 @@ when fr_actions is 'none'. 'actions' and 'repeated' are totals, not per incident
 challenge pages served, passed = requests right after a solved checkbox (counted per request, so
 pct_passed is a lower bound per visitor). A rising pct_passed for an attack UA means the bots
 learned to click; report it in Summary.
+- exposures: files that scanners requested and the origin really served (status 200, not an HTML
+page; catch-all responses removed), yesterday and today UTC. new = first seen yesterday or today.
+Scanners already downloaded them, so the site owner must remove the file AND rotate whatever it
+contained (keys, passwords). Never suggest downloading the files.
 - An FR action means the command was sent, not that banjax applied it. For a huge incident with \
 FR actions but no visible effect, suggest checking the edge.
 - opted_out = true: the site opted out of Baskerville in the Deflect dashboard. We send it no \
@@ -188,6 +206,8 @@ Write Markdown, short, every claim with numbers:
 6. Proposals: at most 5, each with evidence and a concrete change. Mark the ones repeated from \
 yesterday as still open.
 7. Cost.
+8. Exposed files (for support): new ones first, then still open; host, path, severity, what it is,
+size. One line per host if it has several. Say "none" if the list is empty.
 If data is missing for a section, say so in one line."""
 
 
@@ -224,11 +244,17 @@ class DailyReport:
                     conn.rollback()
                     with conn.cursor() as c2:
                         c2.execute("SET statement_timeout = '120s'")
-                    if name == 'altcha_click' and 'does not exist' in str(e):
+                    if name in ('altcha_click', 'exposures') and 'does not exist' in str(e):
                         data[name] = []  # created by the session pipeline on its first click count
                         continue
                     self.logger.warning(f"[DAILY_REPORT] query {name} failed: {e}")
                     data[name] = {'error': str(e)[:200]}
+        if isinstance(data.get('exposures'), list):
+            yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+            for row in data['exposures']:
+                sev = exposures.sensitive_path(row.get('url')) or ('medium', '')
+                row['severity'], row['what'] = sev
+                row['new'] = row.get('first_day') is not None and row['first_day'] >= yesterday
         if isinstance(data.get('big_incidents'), list):
             for row in data['big_incidents']:
                 row['opted_out'] = is_host_opted_out(row.get('host'))
@@ -295,6 +321,10 @@ class DailyReport:
             if isinstance(r, dict) and _f(r.get('shown')) >= 100 and _f(r.get('pct_passed')) >= 20:
                 add(WARNING, f"{r['host']}: {r['pct_passed']}% of one-click AltCha challenges passed for "
                              f"UA {str(r['ua'])[:60]} (bots learned to click?)")
+
+        for r in data.get('exposures') or []:
+            if isinstance(r, dict) and r.get('new') and r.get('severity') == 'high':
+                add(WARNING, f"{r['host']}{r['url']} is served to anyone ({r['what']})")
 
         cost = sum(_f(r.get('cost_usd')) for r in data.get('llm_cost') or [] if isinstance(r, dict))
         prev = (data.get('llm_cost_prev7') or [{}])[0] if isinstance(data.get('llm_cost_prev7'), list) else {}

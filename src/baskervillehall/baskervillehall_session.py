@@ -23,7 +23,7 @@ from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
-from baskervillehall import mitigation
+from baskervillehall import exposures, mitigation
 import json as _json_std
 from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -301,6 +301,8 @@ class BaskervillehallSession(object):
         self.host_ua_mitigation_counts = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         # one-click AltCha per (host, UA): [shown, passed], flushed to altcha_click_daily
         self.altcha_click_counts = defaultdict(lambda: [0, 0])
+        # leaked files served by the origin (exposures.py): (host, url, content_type) -> [hits, max bytes]
+        self.exposure_counts = defaultdict(lambda: [0, 0])
         self.host_session_counts = defaultdict(int)
         self.host_immature_counts = defaultdict(int)
         self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
@@ -541,6 +543,35 @@ class BaskervillehallSession(object):
             conn.close()
         except Exception as e:
             self.logger.warning(f'[ALTCHA_CLICK] flush failed: {e}')
+
+    def _flush_exposures_to_db(self):
+        """Add the leaked-file hits (exposures.py) to exposures_daily for the daily report."""
+        if not self.exposure_counts or not self._postgres_connection:
+            return
+        snapshot = dict(self.exposure_counts)
+        self.exposure_counts.clear()
+        try:
+            import psycopg2
+            conn = psycopg2.connect(**self._postgres_connection)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS exposures_daily (
+                           day date NOT NULL, host text NOT NULL, url text NOT NULL,
+                           content_type text NOT NULL, hits bigint NOT NULL DEFAULT 0,
+                           max_bytes bigint NOT NULL DEFAULT 0,
+                           PRIMARY KEY (day, host, url, content_type))""")
+                cur.executemany(
+                    """INSERT INTO exposures_daily (day, host, url, content_type, hits, max_bytes)
+                       VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s, %s, %s, %s)
+                       ON CONFLICT (day, host, url, content_type) DO UPDATE
+                       SET hits = exposures_daily.hits + EXCLUDED.hits,
+                           max_bytes = GREATEST(exposures_daily.max_bytes, EXCLUDED.max_bytes)""",
+                    [(h, u, ct, c[0], c[1]) for (h, u, ct), c in snapshot.items()]
+                )
+            conn.close()
+        except Exception as e:
+            self.logger.warning(f'[EXPOSURES] flush failed: {e}')
 
     def create_kafka_connections(self, max_retries=10, initial_delay=5):
         consumer = None
@@ -1341,6 +1372,7 @@ class BaskervillehallSession(object):
                 if time_module.time() - self._ts_host_dnet_flush >= 300:
                     self._flush_host_dnet_to_db()
                     self._flush_altcha_click_to_db()
+                    self._flush_exposures_to_db()
                     self._ts_host_dnet_flush = time_module.time()
 
                 for topic_partition, messages in raw_messages.items():
@@ -1509,6 +1541,12 @@ class BaskervillehallSession(object):
                                                           data.get('loc_in'))
                             if _bucket:
                                 self.host_mitigation_counts[host][_bucket] += 1
+                            _url = data.get('client_url')
+                            if exposures.is_exposure(_url, data.get('http_response_code'),
+                                                     data.get('content_type'), data.get('reply_length_bytes')):
+                                _e = self.exposure_counts[(host, _url, (data.get('content_type') or '')[:80])]
+                                _e[0] += 1
+                                _e[1] = max(_e[1], int(float(data.get('reply_length_bytes') or 0)))
                             _click = mitigation.altcha_click_event(data.get('banjax_decision'))
                             if _click:
                                 self.altcha_click_counts[(host, _ua_key)][0 if _click == 'shown' else 1] += 1
