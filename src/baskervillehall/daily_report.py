@@ -414,7 +414,12 @@ class DailyReport:
                 s.starttls()
             if self.smtp.get('user'):
                 s.login(self.smtp['user'], self.smtp['password'])
-            s.sendmail(self.smtp['from'], [a.strip() for a in self.smtp['to'].split(',')], msg.as_string())
+            to = [a.strip() for a in self.smtp['to'].split(',') if a.strip()]
+            refused = s.sendmail(self.smtp['from'], to, msg.as_string())
+            # sendmail raises only when every recipient is refused; the rest come back here
+            if refused:
+                self.logger.error(f"[DAILY_REPORT] refused recipients: {refused}")
+            self.logger.info(f"[DAILY_REPORT] accepted for {len(to) - len(refused or {})} of {len(to)} recipients")
 
     # ------------------------------------------------------------------- run
     def run(self, send_email=True):
