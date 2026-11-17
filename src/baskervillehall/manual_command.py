@@ -17,7 +17,7 @@ import json
 import os
 import sys
 
-from baskervillehall.block_guard import _in_env_whitelist, guard_command_name, is_host_opted_out
+from baskervillehall.block_guard import _in_env_whitelist, guard_command_name, host_variants, is_host_opted_out
 
 MAX_TTL = 24 * 3600
 MIN_SUBNET_PREFIX = 16
@@ -279,16 +279,26 @@ def main(argv=None):
 
     from kafka import KafkaProducer
     topic = os.environ.get('TOPIC_COMMANDS', 'banjax_command_topic')
-    encoded = json.dumps(message).encode('utf-8')
+    # Host-scoped decisions are per exact Host header, so they go out for host and www.host.
+    if 'host' in message and (COMMANDS[args.name] in ('ua', 'host') or (args.name == 'clear_rules' and args.clear_host)):
+        messages = [dict(message, host=h) for h in host_variants(message['host'])]
+    else:
+        messages = [message]
     producer_output = KafkaProducer(bootstrap_servers=os.environ.get('BOOTSTRAP_SERVERS_OUTPUT'))
-    for p in partitions:
-        producer_output.send(topic=topic, value=encoded, partition=p)
+    producer = (KafkaProducer(bootstrap_servers=os.environ.get('BOOTSTRAP_SERVERS'))
+                if os.environ.get('BOOTSTRAP_SERVERS') else None)
+    for m in messages:
+        encoded = json.dumps(m).encode('utf-8')
+        for p in partitions:
+            producer_output.send(topic=topic, value=encoded, partition=p)
+        # The internal cluster gets a copy too, as with First Responder commands.
+        if producer is not None:
+            producer.send(topic=topic, value=encoded, key=host.encode('utf-8'))
     producer_output.flush()
-    # The internal cluster gets a copy too, as with First Responder commands.
-    if os.environ.get('BOOTSTRAP_SERVERS'):
-        producer = KafkaProducer(bootstrap_servers=os.environ.get('BOOTSTRAP_SERVERS'))
-        producer.send(topic=topic, value=encoded, key=host.encode('utf-8'))
+    if producer is not None:
         producer.flush()
+    if len(messages) > 1:
+        print(f"also sent for {', '.join(m['host'] for m in messages[1:])}")
 
     with conn.cursor() as cur:
         cur.execute(CREATE_TABLE_SQL)

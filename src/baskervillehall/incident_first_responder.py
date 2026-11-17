@@ -10,7 +10,7 @@ import psycopg2.extras
 import requests
 from kafka import KafkaProducer
 from baskervillehall.block_guard import (ALTCHA_MAX_NUMBER, BLOCKS_DISABLED, finalize_command,
-                                         guard_command_name, is_host_whitelisted)
+                                         guard_command_name, host_variants, is_host_whitelisted)
 
 # Hard-coded blocklist: these ASNs must NEVER be blocked regardless of LLM output.
 PROTECTED_ASNS = {
@@ -121,6 +121,12 @@ ALTCHA_CLICK_MIN_PASS_RATE = 0.5     # passed / (passed + challenged)
 ALTCHA_CLICK_COOLDOWN_MINUTES = 15   # per host + UA; a re-send resets the visitors' cookies
 ALTCHA_CLICK_MAX_UAS = 2
 ALTCHA_CLICK_ACTION = 'altcha_click_ua'  # also excluded from the LLM re-analysis timer
+# Each re-send carries force_new and resets the visitors' cookies. When the UA still passes
+# after this many sends within ALTCHA_CLICK_GIVE_UP_HOURS, the click does not stop it: stop.
+ALTCHA_CLICK_MAX_SENDS = 3
+# After the incident closes, keep checking the clicked UAs this long: botnets come back.
+ALTCHA_CLICK_FOLLOW_HOURS = 12
+ALTCHA_CLICK_GIVE_UP_HOURS = 2
 
 
 def is_browser_ua(ua: str) -> bool:
@@ -863,6 +869,21 @@ class IncidentFirstResponder:
                         'normal_pct': normal.get(ua, 0.0), 'bot_pct': bot_pct.get(ua, 0.0)})
         return out[:ALTCHA_CLICK_MAX_UAS]
 
+    def _altcha_click_followup(self, conn, open_hosts):
+        """Hosts that got a click in the last ALTCHA_CLICK_FOLLOW_HOURS and have no open incident:
+        run the same check against the incident of the last click, so a returning botnet gets the
+        click again (same cooldown and give-up rules)."""
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (host) host, incident_id
+                FROM first_responder_actions
+                WHERE action = %s AND created_at > NOW() - INTERVAL '1 hour' * %s
+                ORDER BY host, created_at DESC""", (ALTCHA_CLICK_ACTION, ALTCHA_CLICK_FOLLOW_HOURS))
+            rows = cur.fetchall()
+        for host, incident_id in rows:
+            if host not in open_hosts:
+                self._altcha_click_escalation(conn, {'id': incident_id, 'host': host})
+
     def _altcha_click_escalation(self, conn, incident):
         """Put the one-click AltCha on attack UAs that pass the current challenge. The trigger is
         also the check that the decision is gone (TTL over, or an edge restart dropped it): while it
@@ -880,7 +901,18 @@ class IncidentFirstResponder:
                     (host, ALTCHA_CLICK_ACTION, ua, ALTCHA_CLICK_COOLDOWN_MINUTES))
                 if cur.fetchone():
                     continue
-            reason = (f"UA passes the challenge during the attack: {c['passed']} passed vs "
+                # only sends since the www fix (marked "+www") count: before it, www.<host> was
+                # never covered, so those repeats say nothing about the click
+                cur.execute("""
+                    SELECT count(*) FROM first_responder_actions
+                    WHERE host = %s AND action = %s AND target = %s AND reasoning LIKE '%%(+www)%%'
+                      AND created_at > NOW() - INTERVAL '1 hour' * %s""",
+                    (host, ALTCHA_CLICK_ACTION, ua, ALTCHA_CLICK_GIVE_UP_HOURS))
+                if cur.fetchone()[0] >= ALTCHA_CLICK_MAX_SENDS:
+                    self.logger.warning(f"[ALTCHA_CLICK] {host}: still passing after {ALTCHA_CLICK_MAX_SENDS} "
+                                        f"click sends in {ALTCHA_CLICK_GIVE_UP_HOURS} h, not re-sending: {ua[:80]}")
+                    continue
+            reason = (f"(+www) UA passes the challenge during the attack: {c['passed']} passed vs "
                       f"{c['challenged']} challenged in {ALTCHA_CLICK_WINDOW_MINUTES} min, "
                       f"{c['share']:.0f}% of traffic (normal {c['normal_pct']:.1f}%), "
                       f"{c['bot_pct']:.0f}% of bot commands")
@@ -915,26 +947,30 @@ class IncidentFirstResponder:
             'source': 'first_responder',
             'meta': f'first_responder [{command_name}] {reason}',
         }
+        host_scoped = command_name in ('block_ua', 'challenge_ua', 'altcha_challenge_ua',
+                                       'challenge_all', 'altcha_challenge_all')
         if command_name in ('block_ua', 'challenge_ua', 'altcha_challenge_ua'):
             command['ua'] = value
-            command['host'] = host
-        elif command_name == 'challenge_all':
-            command['host'] = host
-        else:
+        elif not host_scoped:
             command['value'] = value
         if extra:
             command.update(extra)
-        encoded = json.dumps(finalize_command(command)).encode('utf-8')
         key = bytearray(host, encoding='utf-8')
-        if self._producer is not None:
-            self._producer.send(topic=self.topic_commands, value=encoded, key=key)
         dnet = self._get_host_dnet(conn, host) if conn is not None else '-'
+        partition = self.dnet_partition_map.get(dnet, -1)
+        # host-scoped decisions are per exact Host header: send them for host and www.host
+        for h in (host_variants(host) if host_scoped else [None]):
+            if h:
+                command['host'] = h
+            encoded = json.dumps(finalize_command(dict(command))).encode('utf-8')
+            if self._producer is not None:
+                self._producer.send(topic=self.topic_commands, value=encoded, key=key)
+            if self._producer_output is not None:
+                if partition < 0:
+                    self._producer_output.send(topic=self.topic_commands, value=encoded, key=key)
+                else:
+                    self._producer_output.send(topic=self.topic_commands, value=encoded, partition=partition)
         if self._producer_output is not None:
-            partition = self.dnet_partition_map.get(dnet, -1)
-            if partition < 0:
-                self._producer_output.send(topic=self.topic_commands, value=encoded, key=key)
-            else:
-                self._producer_output.send(topic=self.topic_commands, value=encoded, partition=partition)
             self._producer_output.flush()
         self.logger.warning(
             f"[FIRST_RESPONDER] {command_name} sent to Kafka: value={value!r} host={host} "
@@ -3019,6 +3055,13 @@ class IncidentFirstResponder:
                     self._ensure_tables(conn)
 
                 incidents = self._get_unprocessed_incidents(conn)
+                if ALTCHA_CLICK_ENABLED:
+                    try:
+                        self._altcha_click_followup(
+                            conn, {i['host'] for i in incidents if i['ended_at'] is None})
+                    except Exception:
+                        conn.rollback()
+                        self.logger.exception("[ALTCHA_CLICK] follow-up failed")
                 if incidents:
                     self.logger.info(
                         f"[FIRST_RESPONDER] Found {len(incidents)} unprocessed incident(s)"

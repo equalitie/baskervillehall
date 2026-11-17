@@ -105,3 +105,16 @@ def is_host_opted_out(host):
 def is_host_whitelisted(host):
     host = (host or '').strip().lower()
     return _in_env_whitelist(host) or is_host_opted_out(host)
+
+
+def host_variants(host):
+    """Hosts a host-scoped command (challenge_all, *_ua) must be sent for. Banjax matches the
+    exact Host header, while our logs (and so our incidents) strip "www.": a decision for
+    nswp.org did not cover www.nswp.org, where the bots were (Nov 17). IP and session decisions
+    apply to the whole edge and need no variants."""
+    host = (host or '').strip().lower()
+    if not host:
+        return []
+    if host.startswith('www.'):
+        return [host, host[4:]]
+    return [host, 'www.' + host]

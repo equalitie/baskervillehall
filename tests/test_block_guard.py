@@ -66,3 +66,9 @@ def test_kill_switch_then_altcha(monkeypatch):
     monkeypatch.setattr(block_guard, 'ALTCHA_ENABLED', True)
     cmd = {'Name': block_guard.guard_command_name('block_ip'), 'Value': '1.2.3.4'}
     assert block_guard.finalize_command(cmd)['Name'] == 'altcha_challenge_ip'
+
+
+def test_host_variants():
+    assert block_guard.host_variants('nswp.org') == ['nswp.org', 'www.nswp.org']
+    assert block_guard.host_variants('www.nswp.org') == ['www.nswp.org', 'nswp.org']
+    assert block_guard.host_variants('') == []

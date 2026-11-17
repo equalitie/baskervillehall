@@ -65,7 +65,10 @@ QUERIES = {
     # last day (so the report can tell "no reaction" from "reacted").
     'big_incidents': """
         SELECT b.host, b.id AS biggest_incident, b.started_at, b.ended_at, b.spike, b.peak_req_min,
-               b.challenge_count, b.incidents,
+               b.challenge_count AS ml_flagged_sessions, b.incidents,
+               m.served, m.challenged, m.passed, m.blocked,
+               round(100.0 * m.challenged / nullif(m.total, 0), 1) AS pct_challenged,
+               round(100.0 * m.passed / nullif(m.passed + m.challenged, 0), 1) AS pct_passed,
                coalesce((SELECT string_agg(x.action || ' x' || x.n || ' (' || x.first_at || ' to ' || x.last_at || ' UTC)',
                                            ', ' ORDER BY x.n DESC)
                          FROM (SELECT a.action, count(*) AS n,
@@ -80,6 +83,13 @@ QUERIES = {
               FROM incidents
               WHERE started_at >= now() - interval '1 day' AND spike_ratio >= 20
               ORDER BY host, traffic_peak_count DESC NULLS LAST) b
+        LEFT JOIN LATERAL (  -- what banjax did with the host's traffic during that incident
+            SELECT sum(served) AS served, sum(challenged) AS challenged, sum(passed) AS passed,
+                   sum(blocked) AS blocked,
+                   sum(served + passed + challenged + blocked + rate_limited) AS total
+            FROM host_mitigation_minute
+            WHERE host = b.host AND minute >= b.started_at AT TIME ZONE 'UTC'
+              AND minute <= coalesce(b.ended_at, now()) AT TIME ZONE 'UTC') m ON TRUE
         ORDER BY b.peak_req_min DESC NULLS LAST LIMIT 20
     """,
     'repeated': """
@@ -191,8 +201,13 @@ learned to click; report it in Summary.
 page; catch-all responses removed), yesterday and today UTC. new = first seen yesterday or today.
 Scanners already downloaded them, so the site owner must remove the file AND rotate whatever it
 contained (keys, passwords). Never suggest downloading the files.
-- An FR action means the command was sent, not that banjax applied it. For a huge incident with \
-FR actions but no visible effect, suggest checking the edge.
+- An FR action means the command was sent, not that banjax applied it. Judge the effect only by
+what banjax did during the incident (big_incidents: pct_challenged = share of the host's requests
+answered with a challenge page, pct_passed = share of challenges passed). ml_flagged_sessions
+counts only sessions the ML predictor flagged; it is NOT the number of challenges, and 0 is normal
+for single-request bots, so never read 0 as "the challenge did nothing". Suggest checking the edge
+only when FR sent challenge_all/altcha commands and pct_challenged stayed near 0 (the edge did not
+apply them). A high pct_passed on an attack means bots pass the challenge: say so.
 - opted_out = true: the site opted out of Baskerville in the Deflect dashboard. We send it no \
 commands and banjax ignores our decisions for it. Report such a host as "opted out", never as \
 "no FR action", and list opted-out hosts with big incidents so someone can ask the client.
