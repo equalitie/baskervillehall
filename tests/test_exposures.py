@@ -39,3 +39,10 @@ def test_too_big_for_the_file_is_a_page():
     assert not ex.is_exposure('/.DS_Store', 200, 'text/plain', 205722, host='example.org')
     assert ex.is_exposure('/.git/HEAD', 200, 'text/plain', 23, host='example.org')
     assert ex.is_exposure('/wp-content/debug.log', 200, 'application/octet-stream', 106429824, host='example.org')
+
+
+def test_json_is_an_app_error_not_the_file():
+    # flip.org.co (Next.js) answered Meta's crawler on /.env with 200 application/json, 22 bytes
+    assert not ex.is_exposure('/.env', 200, 'application/json; charset=utf-8', 22, host='flip.org.co')
+    assert not ex.is_exposure('/.git/config', 200, 'application/problem+json', 120, host='example.org')
+    assert ex.is_exposure('/.env.local', 200, 'text/plain', 162, host='example.org')

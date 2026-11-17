@@ -8,7 +8,8 @@ The daily report lists them for support (exposures_daily, written every 5 min).
 
 False positives: many sites answer every unknown path with their home page (text/html, ignored
 here) or with one catch-all response of another type (same size for every path). The report
-drops a host whose findings of a day share one size across 3+ paths.
+drops a host whose findings of a day share one size across 3+ paths. None of these files is JSON,
+so a JSON answer is the app's error or API reply (flip.org.co, Next.js, Nov 2026), not the file.
 """
 import ipaddress
 import re
@@ -78,7 +79,8 @@ def _is_ip(host):
 
 def is_exposure(url, status, content_type, length, host=None):
     """True when the origin served the sensitive file itself: 200, at least MIN_BYTES, and not an
-    HTML page (Apache's server-status is HTML in ISO-8859-1, unlike the sites' own pages).
+    HTML page (Apache's server-status is HTML in ISO-8859-1, unlike the sites' own pages) and
+    not JSON (an app's error reply).
     Requests to an edge by IP instead of a site name don't count."""
     if not sensitive_path(url) or _is_ip(host):
         return False
@@ -92,6 +94,8 @@ def is_exposure(url, status, content_type, length, host=None):
             if int(float(length)) > limit:
                 return False
     ct = (content_type or '').lower()
+    if 'json' in ct:
+        return False
     if url == '/server-status':
         return ct.startswith('text/html') and 'iso-8859-1' in ct
     return not ct.startswith('text/html')
