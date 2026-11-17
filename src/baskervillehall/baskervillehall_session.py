@@ -592,20 +592,34 @@ class BaskervillehallSession(object):
                            code_500 bigint NOT NULL DEFAULT 0, max_time double precision NOT NULL DEFAULT 0,
                            sleep_matched int[] NOT NULL DEFAULT '{}', ips text[] NOT NULL DEFAULT '{}',
                            PRIMARY KEY (day, host, url))""")
+                cur.execute(
+                    """ALTER TABLE sqli_daily
+                           ADD COLUMN IF NOT EXISTS first_seen timestamp,
+                           ADD COLUMN IF NOT EXISTS last_seen timestamp,
+                           ADD COLUMN IF NOT EXISTS sample text,
+                           ADD COLUMN IF NOT EXISTS signature text,
+                           ADD COLUMN IF NOT EXISTS challenged_ips bigint NOT NULL DEFAULT 0""")
                 for (host, url), c in snapshot.items():
                     cur.execute(
                         """INSERT INTO sqli_daily AS s (day, host, url, attempts, origin_answered, code_500,
-                                                         max_time, sleep_matched, ips)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                                         max_time, sleep_matched, ips, first_seen, last_seen,
+                                                         sample, signature, challenged_ips)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                            ON CONFLICT (day, host, url) DO UPDATE
                            SET attempts = s.attempts + EXCLUDED.attempts,
                                origin_answered = s.origin_answered + EXCLUDED.origin_answered,
                                code_500 = s.code_500 + EXCLUDED.code_500,
                                max_time = GREATEST(s.max_time, EXCLUDED.max_time),
                                sleep_matched = ARRAY(SELECT DISTINCT unnest(s.sleep_matched || EXCLUDED.sleep_matched)),
-                               ips = (ARRAY(SELECT DISTINCT unnest(s.ips || EXCLUDED.ips)))[1:50]""",
+                               ips = (ARRAY(SELECT DISTINCT unnest(s.ips || EXCLUDED.ips)))[1:50],
+                               first_seen = LEAST(s.first_seen, EXCLUDED.first_seen),
+                               last_seen = GREATEST(s.last_seen, EXCLUDED.last_seen),
+                               sample = COALESCE(s.sample, EXCLUDED.sample),
+                               signature = COALESCE(s.signature, EXCLUDED.signature),
+                               challenged_ips = s.challenged_ips + EXCLUDED.challenged_ips""",
                         (day, host[:255], (url or '')[:500], c['attempts'], c['origin'], c['code_500'],
-                         c['max_time'], sorted(c['sleep_matched']), sorted(c['ips'])))
+                         c['max_time'], sorted(c['sleep_matched']), sorted(c['ips']), c['first'], c['last'],
+                         c['sample'], c['signature'], c['challenged']))
             conn.close()
         except Exception as e:
             self.logger.error(f'sqli_daily flush failed: {e!r}')
@@ -1588,8 +1602,9 @@ class BaskervillehallSession(object):
                                 _e[1] = max(_e[1], int(float(data.get('reply_length_bytes') or 0)))
                             if self.sqli_counter.add(host, _url, data.get('querystring'), ip,
                                                      data.get('http_response_code'), data.get('request_time'),
-                                                     _bucket in ('served', 'passed')) \
+                                                     _bucket in ('served', 'passed'), ts_event) \
                                     and not verified_bot and self.sqli_counter.should_challenge(ip):
+                                self.sqli_counter.mark_challenged(host, _url)
                                 self.first_responder_blocker._send_block(
                                     host, ip, _country, asn_name, 'sqli', data.get('dnet', '-'), ua, 'challenge_ip',
                                     ttl=sqli.CHALLENGE_TTL, origin='sqli')

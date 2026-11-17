@@ -33,6 +33,7 @@ WINDOW_SECONDS = int(os.environ.get('SQLI_WINDOW_SECONDS', '600'))
 CHALLENGE_TTL = int(os.environ.get('SQLI_CHALLENGE_TTL', '3600'))
 
 # Response time vs SLEEP(N): N - SLOW_MARGIN_BELOW <= time <= N + SLOW_MARGIN_ABOVE
+SAMPLE_CHARS = 500
 MIN_SLEEP = 3
 SLOW_MARGIN_BELOW = 0.5
 SLOW_MARGIN_ABOVE = 3.0
@@ -144,10 +145,11 @@ class SqliCounter:
     def __init__(self):
         self._ip_attempts = TTLCache(maxsize=200_000, ttl=WINDOW_SECONDS)
         self._challenged = TTLCache(maxsize=100_000, ttl=CHALLENGE_TTL)
-        # (host, url) -> {'attempts', 'origin', 'code_500', 'max_time', 'sleep_matched': set, 'ips': set}
+        # (host, url) -> {'attempts', 'origin', 'code_500', 'max_time', 'sleep_matched': set, 'ips': set,
+        #                 'first', 'last' (log time), 'sample' (first query string), 'signature', 'challenged'}
         self.counts = {}
 
-    def add(self, host, url, query, ip, status, request_time, origin_answered):
+    def add(self, host, url, query, ip, status, request_time, origin_answered, ts=None):
         """Count one request. Returns the signature name when it is an attempt, else None."""
         sig = detect(url, query)
         if not sig:
@@ -155,8 +157,13 @@ class SqliCounter:
         c = self.counts.get((host, url))
         if c is None:
             c = self.counts[(host, url)] = {'attempts': 0, 'origin': 0, 'code_500': 0, 'max_time': 0.0,
-                                             'sleep_matched': set(), 'ips': set()}
+                                             'sleep_matched': set(), 'ips': set(), 'first': ts, 'last': ts,
+                                             'sample': (query or '')[:SAMPLE_CHARS], 'signature': sig,
+                                             'challenged': 0}
         c['attempts'] += 1
+        if ts is not None:
+            c['first'] = ts if c['first'] is None else min(c['first'], ts)
+            c['last'] = ts if c['last'] is None else max(c['last'], ts)
         if len(c['ips']) < self.MAX_IPS:
             c['ips'].add(ip)
         if origin_answered:
@@ -187,6 +194,11 @@ class SqliCounter:
             self._challenged[ip] = True
             return True
         return False
+
+    def mark_challenged(self, host, url):
+        c = self.counts.get((host, url))
+        if c is not None:
+            c['challenged'] += 1
 
     def snapshot(self):
         counts, self.counts = self.counts, {}

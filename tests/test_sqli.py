@@ -85,3 +85,16 @@ def test_libinjection_ordinary_values():
               'h=e3b0c44298fc1c149afbf4c8996fb924', 'email=user@example.com', 'd=2026-11-17+10:00',
               'r=https://x.org/a?b=1%26c=2', 't=dGVzdA==', 'n=-1', 'q=1+or+2']:
         assert sqli.detect('/', q) is None, q
+
+
+def test_counter_keeps_times_sample_signature_and_challenges():
+    from datetime import datetime
+    c = sqli.SqliCounter()
+    t1, t2 = datetime(2026, 11, 17, 14, 0), datetime(2026, 11, 17, 14, 5)
+    c.add('a.org', '/', PMPRO, '1.1.1.1', 200, None, True, t2)
+    c.add('a.org', '/', UNION, '1.1.1.1', 200, None, True, t1)
+    c.mark_challenged('a.org', '/')
+    row = c.snapshot()[('a.org', '/')]
+    assert (row['first'], row['last']) == (t1, t2)
+    assert row['sample'] == PMPRO and row['signature'] == 'time_based'
+    assert row['challenged'] == 1
