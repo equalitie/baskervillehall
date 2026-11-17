@@ -41,14 +41,17 @@ SLOW_MARGIN_ABOVE = 3.0
 # SQL constructs, not words: a search for "select" or "sleep" is not an attempt.
 _SIGNATURES = (
     ('union_select', re.compile(r'\bunion\b[\s(/*]+(all[\s(/*]+)?select\b')),
-    ('time_based', re.compile(r'\b(sleep|pg_sleep)\s*\(\s*\d|\bwaitfor\s+delay\b|\bbenchmark\s*\(\s*\d')),
+    ('time_based', re.compile(r'\b(sleep|pg_sleep)\s*\(\s*\d|\bwaitfor\s+delay\b|\bbenchmark\s*\(\s*\d'
+                              r'|\bdbms_pipe\.receive_message\s*\(')),
     ('information_schema', re.compile(r'\binformation_schema\b')),
     ('error_based', re.compile(r'\b(extractvalue|updatexml)\s*\(|\bfloor\s*\(\s*rand\s*\(')),
     ('boolean', re.compile(r"['\"]\s*\)?\s*(or|and)\s+['\"]?\d+['\"]?\s*=\s*['\"]?\d+|\b(or|and)\s+\d+\s*=\s*\d+\s*(--|#|/\*)")),
     ('select_from', re.compile(r"['\"]\s*\)*\s*;?\s*\(?\s*select\b.{1,200}\bfrom\b")),
     ('xp_cmdshell', re.compile(r'\bxp_cmdshell\b')),
 )
-_SLEEP_RE = re.compile(r"\b(?:sleep|pg_sleep)\s*\(\s*(\d{1,3})|\bwaitfor\s+delay\s+'\d{1,2}:\d{1,2}:(\d{1,2})'")
+# SLEEP(N) / pg_sleep(N) / WAITFOR DELAY '0:0:N' / Oracle DBMS_PIPE.RECEIVE_MESSAGE(name, N)
+_SLEEP_RE = re.compile(r"\b(?:sleep|pg_sleep)\s*\(\s*(\d{1,3})|\bwaitfor\s+delay\s+'\d{1,2}:\d{1,2}:(\d{1,2})'"
+                       r"|\bdbms_pipe\.receive_message\s*\([^,]{1,120},\s*(\d{1,3})\s*\)")
 
 
 LIBINJECTION_PATH = os.environ.get('LIBINJECTION_PATH', '/usr/local/lib/libinjection.so')
@@ -118,11 +121,11 @@ def detect(url, query):
 
 
 def sleep_seconds(url, query):
-    """N of a SLEEP(N) / pg_sleep(N) / WAITFOR DELAY '0:0:N' payload, else None."""
+    """N of a time-based payload (see _SLEEP_RE), else None."""
     m = _SLEEP_RE.search(_decode(f'{url or ""}?{query or ""}'))
     if not m:
         return None
-    return int(m.group(1) or m.group(2))
+    return int(m.group(1) or m.group(2) or m.group(3))
 
 
 def sleep_matched(n, request_time):

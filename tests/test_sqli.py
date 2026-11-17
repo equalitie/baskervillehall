@@ -109,3 +109,9 @@ def test_triple_encoded():
     q = ('lang=%252527%29%2F**%2FAND%2F**%2F%28%252527ZQXoaJ%252527%3D%252527zQXOaj%252527AND%2F**%2F'
          'EXTRACTVALUE%283370%2CCONCAT%280x7e%2C%28%28SELECT%2F**%2F%28ELT%283370%3D3370%2C1%29%29%29%29%2C0x7e%29%29')
     assert sqli.detect('/hebergement-fsm-2026/', q)  # fsm2026benin.org, sqlmap
+
+
+def test_oracle_dbms_pipe():
+    q = 'at2=128)%3BSELECT%20DBMS_PIPE.RECEIVE_MESSAGE(CHR(85)%7C%7CCHR(70)%7C%7CCHR(71),7)%20FROM%20DUAL--'
+    assert sqli.detect('/', q) == 'time_based'  # rote-hilfe.de, Nov 17
+    assert sqli.sleep_seconds('/', q) == 7
