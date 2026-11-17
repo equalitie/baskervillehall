@@ -71,8 +71,10 @@ def _load_libinjection():
 _lib = _load_libinjection()
 
 
-# One token and a comment ("1c": bankwatch.org's apc=147581-----1) is a value with dashes, not an attack.
-_WEAK_FINGERPRINT = re.compile(r'^.c$')
+# Too weak alone: one token and a comment ("1c": bankwatch.org's apc=147581-----1), and
+# string-operator-string ("sos": searches with quotes on nordis.net/verafiles.org, btselem.org's own
+# form fields; Nov 17 the only real one was shell injection, not SQL).
+_WEAK_FINGERPRINT = re.compile(r'^(.c|sos)$')
 DECODE_ROUNDS = 3  # sqlmap's tamper scripts encode up to three times (%252527 = ')
 
 

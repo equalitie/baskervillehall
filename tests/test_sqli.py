@@ -115,3 +115,9 @@ def test_oracle_dbms_pipe():
     q = 'at2=128)%3BSELECT%20DBMS_PIPE.RECEIVE_MESSAGE(CHR(85)%7C%7CCHR(70)%7C%7CCHR(71),7)%20FROM%20DUAL--'
     assert sqli.detect('/', q) == 'time_based'  # rote-hilfe.de, Nov 17
     assert sqli.sleep_seconds('/', q) == 7
+
+
+@needs_lib
+def test_quotes_in_searches_and_form_fields():
+    assert sqli.detect('/', 's=cricle+with+a+two+%22%2B%22+symble+inside+the+circle+') is None  # nordis.net
+    assert sqli.detect('/photoblog', 'page=5&start=1&x_Concatenate=01&z_Concatenate=LIKE%2C%27%25%2C%25%27') is None

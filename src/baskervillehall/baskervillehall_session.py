@@ -24,6 +24,7 @@ from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
 from baskervillehall import exposures, mitigation, sqli
+from baskervillehall.block_guard import is_host_whitelisted
 import json as _json_std
 from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -1603,7 +1604,8 @@ class BaskervillehallSession(object):
                             if self.sqli_counter.add(host, _url, data.get('querystring'), ip,
                                                      data.get('http_response_code'), data.get('request_time'),
                                                      _bucket in ('served', 'passed'), ts_event) \
-                                    and not verified_bot and self.sqli_counter.should_challenge(ip):
+                                    and not verified_bot and not is_host_whitelisted(host) \
+                                    and self.sqli_counter.should_challenge(ip):
                                 self.sqli_counter.mark_challenged(host, _url)
                                 self.first_responder_blocker._send_block(
                                     host, ip, _country, asn_name, 'sqli', data.get('dnet', '-'), ua, 'challenge_ip',
