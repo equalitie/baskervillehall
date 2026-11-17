@@ -237,11 +237,11 @@ class FirstResponderBlocker:
     # ------------------------------------------------------------------
 
     def _send_block(self, host, ip, country, asn_name, action, dnet, ua='', command_name='block_ip',
-                    ttl=300):
+                    ttl=300, origin='first_responder'):
         if is_host_whitelisted(host):
             return
         command_name = guard_command_name(command_name)
-        meta = f'first_responder [{action}] [{command_name}] [session_pipeline]'
+        meta = f'{origin} [{action}] [{command_name}] [session_pipeline]'
         command = {
             'Name': command_name,
             'Value': ip,

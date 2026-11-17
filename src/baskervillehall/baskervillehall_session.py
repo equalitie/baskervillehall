@@ -23,7 +23,7 @@ from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.first_responder_blocker import FirstResponderBlocker
 from baskervillehall.settings_deflect_api import SettingsDeflectAPI
 from baskervillehall.tor_exit_scanner import TorExitScanner
-from baskervillehall import exposures, mitigation
+from baskervillehall import exposures, mitigation, sqli
 import json as _json_std
 from collections import defaultdict
 from kafka import KafkaConsumer, KafkaProducer, TopicPartition
@@ -303,6 +303,8 @@ class BaskervillehallSession(object):
         self.altcha_click_counts = defaultdict(lambda: [0, 0])
         # leaked files served by the origin (exposures.py): (host, url, content_type) -> [hits, max bytes]
         self.exposure_counts = defaultdict(lambda: [0, 0])
+        # SQL injection attempts (sqli.py): IP challenge + per host/path counts for sqli_daily
+        self.sqli_counter = sqli.SqliCounter()
         self.host_session_counts = defaultdict(int)
         self.host_immature_counts = defaultdict(int)
         self.host_fingerprint_counts = defaultdict(lambda: defaultdict(int))
@@ -572,6 +574,41 @@ class BaskervillehallSession(object):
             conn.close()
         except Exception as e:
             self.logger.warning(f'[EXPOSURES] flush failed: {e}')
+
+    def _flush_sqli_to_db(self):
+        """Add the SQL injection attempts (sqli.py) to sqli_daily for the daily report."""
+        snapshot = self.sqli_counter.snapshot()
+        if not snapshot or not self._postgres_connection:
+            return
+        day = datetime.utcnow().date()
+        try:
+            import psycopg2
+            conn = psycopg2.connect(**self._postgres_connection)
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS sqli_daily (
+                           day date NOT NULL, host text NOT NULL, url text NOT NULL,
+                           attempts bigint NOT NULL DEFAULT 0, origin_answered bigint NOT NULL DEFAULT 0,
+                           code_500 bigint NOT NULL DEFAULT 0, max_time double precision NOT NULL DEFAULT 0,
+                           sleep_matched int[] NOT NULL DEFAULT '{}', ips text[] NOT NULL DEFAULT '{}',
+                           PRIMARY KEY (day, host, url))""")
+                for (host, url), c in snapshot.items():
+                    cur.execute(
+                        """INSERT INTO sqli_daily AS s (day, host, url, attempts, origin_answered, code_500,
+                                                         max_time, sleep_matched, ips)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (day, host, url) DO UPDATE
+                           SET attempts = s.attempts + EXCLUDED.attempts,
+                               origin_answered = s.origin_answered + EXCLUDED.origin_answered,
+                               code_500 = s.code_500 + EXCLUDED.code_500,
+                               max_time = GREATEST(s.max_time, EXCLUDED.max_time),
+                               sleep_matched = ARRAY(SELECT DISTINCT unnest(s.sleep_matched || EXCLUDED.sleep_matched)),
+                               ips = (ARRAY(SELECT DISTINCT unnest(s.ips || EXCLUDED.ips)))[1:50]""",
+                        (day, host[:255], (url or '')[:500], c['attempts'], c['origin'], c['code_500'],
+                         c['max_time'], sorted(c['sleep_matched']), sorted(c['ips'])))
+            conn.close()
+        except Exception as e:
+            self.logger.error(f'sqli_daily flush failed: {e!r}')
 
     def create_kafka_connections(self, max_retries=10, initial_delay=5):
         consumer = None
@@ -1373,6 +1410,7 @@ class BaskervillehallSession(object):
                     self._flush_host_dnet_to_db()
                     self._flush_altcha_click_to_db()
                     self._flush_exposures_to_db()
+                    self._flush_sqli_to_db()
                     self._ts_host_dnet_flush = time_module.time()
 
                 for topic_partition, messages in raw_messages.items():
@@ -1548,6 +1586,13 @@ class BaskervillehallSession(object):
                                 _e = self.exposure_counts[(host, _url, (data.get('content_type') or '')[:80])]
                                 _e[0] += 1
                                 _e[1] = max(_e[1], int(float(data.get('reply_length_bytes') or 0)))
+                            if self.sqli_counter.add(host, _url, data.get('querystring'), ip,
+                                                     data.get('http_response_code'), data.get('request_time'),
+                                                     _bucket in ('served', 'passed')) \
+                                    and not verified_bot and self.sqli_counter.should_challenge(ip):
+                                self.first_responder_blocker._send_block(
+                                    host, ip, _country, asn_name, 'sqli', data.get('dnet', '-'), ua, 'challenge_ip',
+                                    ttl=sqli.CHALLENGE_TTL, origin='sqli')
                             _click = mitigation.altcha_click_event(data.get('banjax_decision'))
                             if _click:
                                 self.altcha_click_counts[(host, _ua_key)][0 if _click == 'shown' else 1] += 1

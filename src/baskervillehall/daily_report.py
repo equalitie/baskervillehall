@@ -18,7 +18,7 @@ from html import escape
 import psycopg2
 import requests
 
-from baskervillehall import exposures
+from baskervillehall import exposures, sqli
 from baskervillehall.block_guard import BLOCKS_DISABLED, is_host_opted_out
 
 NORM, WARNING, URGENT = 'NORM', 'WARNING', 'URGENT'
@@ -156,6 +156,23 @@ QUERIES = {
         WHERE NOT EXISTS (SELECT 1 FROM catch_all c WHERE c.host = r.host AND c.bytes = r.bytes)
         ORDER BY f.first_day DESC, r.hits DESC LIMIT 40
     """,
+    'sqli': """
+        WITH r AS (SELECT * FROM sqli_daily WHERE day >= (now() AT TIME ZONE 'UTC')::date - 1),
+        m AS (SELECT host, url, array_agg(DISTINCT v ORDER BY v) AS sleep_matched
+              FROM r, unnest(r.sleep_matched) v GROUP BY host, url),
+        i AS (SELECT host, url, count(DISTINCT v) AS ips FROM r, unnest(r.ips) v GROUP BY host, url)
+        SELECT r.host, r.url, sum(r.attempts) AS attempts, sum(r.origin_answered) AS origin_answered,
+               sum(r.code_500) AS code_500, round(max(r.max_time)::numeric, 1) AS max_time,
+               coalesce(m.sleep_matched, '{}') AS sleep_matched, coalesce(i.ips, 0) AS ips
+        FROM r LEFT JOIN m USING (host, url) LEFT JOIN i USING (host, url)
+        GROUP BY r.host, r.url, m.sleep_matched, i.ips
+        ORDER BY (sum(r.code_500) > 0 OR m.sleep_matched IS NOT NULL) DESC, sum(r.attempts) DESC
+        LIMIT 30
+    """,
+    'sqli_total': """
+        SELECT sum(attempts) AS attempts, count(DISTINCT host) AS hosts
+        FROM sqli_daily WHERE day >= (now() AT TIME ZONE 'UTC')::date - 1
+    """,
     'llm_cost': """
         SELECT source, count(*) AS calls, sum(input_tokens) AS input_tokens,
                round(sum(cost_usd)::numeric, 2) AS cost_usd
@@ -201,6 +218,12 @@ learned to click; report it in Summary.
 page; catch-all responses removed), yesterday and today UTC. new = first seen yesterday or today.
 Scanners already downloaded them, so the site owner must remove the file AND rotate whatever it
 contained (keys, passwords). Never suggest downloading the files.
+- sqli: SQL injection attempts in URLs (no POST bodies), per host and path, yesterday and today
+UTC; sqli_total = all of them. Attempts alone are normal: every site gets them, and IPs with 3+
+attempts in 10 min get an IP challenge automatically. level = 'likely' when the origin answered
+2+ different SLEEP(N) payloads in about N seconds each (the database ran them), 'suspect' when
+it answered 500 or one SLEEP(N) matched (a person must check). Never say a site IS vulnerable;
+say "likely" or "check".
 - An FR action means the command was sent, not that banjax applied it. Judge the effect only by
 what banjax did during the incident (big_incidents: pct_challenged = share of the host's requests
 answered with a challenge page, pct_passed = share of challenges passed). ml_flagged_sessions
@@ -223,6 +246,8 @@ yesterday as still open.
 7. Cost.
 8. Exposed files (for support): new ones first, then still open; host, path, severity, what it is,
 size. One line per host if it has several. Say "none" if the list is empty.
+9. SQL injection (for support): first 'likely' and 'suspect' paths with the evidence (which
+SLEEP values matched, 500s), then one line with the total attempts and the top attacked hosts.
 If data is missing for a section, say so in one line."""
 
 
@@ -259,7 +284,7 @@ class DailyReport:
                     conn.rollback()
                     with conn.cursor() as c2:
                         c2.execute("SET statement_timeout = '120s'")
-                    if name in ('altcha_click', 'exposures') and 'does not exist' in str(e):
+                    if name in ('altcha_click', 'exposures', 'sqli', 'sqli_total') and 'does not exist' in str(e):
                         data[name] = []  # created by the session pipeline on its first click count
                         continue
                     self.logger.warning(f"[DAILY_REPORT] query {name} failed: {e}")
@@ -270,6 +295,9 @@ class DailyReport:
                 sev = exposures.sensitive_path(row.get('url')) or ('medium', '')
                 row['severity'], row['what'] = sev
                 row['new'] = row.get('first_day') is not None and row['first_day'] >= yesterday
+        if isinstance(data.get('sqli'), list):
+            for row in data['sqli']:
+                row['level'] = sqli.level(_f(row.get('code_500')), row.get('sleep_matched') or [])
         if isinstance(data.get('big_incidents'), list):
             for row in data['big_incidents']:
                 row['opted_out'] = is_host_opted_out(row.get('host'))
@@ -340,6 +368,11 @@ class DailyReport:
         for r in data.get('exposures') or []:
             if isinstance(r, dict) and r.get('new') and r.get('severity') == 'high':
                 add(WARNING, f"{r['host']}{r['url']} is served to anyone ({r['what']})")
+
+        for r in data.get('sqli') or []:
+            if isinstance(r, dict) and r.get('level') == 'likely':
+                add(WARNING, f"{r['host']}{r['url']}: SQL injection likely worked (origin answered "
+                             f"SLEEP({', '.join(str(v) for v in r['sleep_matched'])}) in about that time)")
 
         cost = sum(_f(r.get('cost_usd')) for r in data.get('llm_cost') or [] if isinstance(r, dict))
         prev = (data.get('llm_cost_prev7') or [{}])[0] if isinstance(data.get('llm_cost_prev7'), list) else {}
