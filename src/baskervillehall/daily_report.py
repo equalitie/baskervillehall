@@ -222,7 +222,8 @@ contained (keys, passwords). Never suggest downloading the files.
 UTC; sqli_total = all of them. Attempts alone are normal: every site gets them, and IPs with 3+
 attempts in 10 min get an IP challenge automatically. level = 'likely' when the origin answered
 2+ different SLEEP(N) payloads in about N seconds each (the database ran them), 'suspect' when
-it answered 500 or one SLEEP(N) matched (a person must check). Never say a site IS vulnerable;
+it answered 500 or one SLEEP(N) matched (a person must check). max_time = 0 means the edge log
+gave no response time (the Kafka log has none so far), so the time check could not run. Never say a site IS vulnerable;
 say "likely" or "check".
 - An FR action means the command was sent, not that banjax applied it. Judge the effect only by
 what banjax did during the incident (big_incidents: pct_challenged = share of the host's requests

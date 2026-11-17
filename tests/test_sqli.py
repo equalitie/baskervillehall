@@ -64,3 +64,24 @@ def test_counter_sleep_match_only_for_origin_answers():
     assert snap[('b.org', '/')]['sleep_matched'] == set() and snap[('b.org', '/')]['origin'] == 0
     assert snap[('c.org', '/')]['code_500'] == 1
     assert c.snapshot() == {}
+
+
+import pytest
+
+needs_lib = pytest.mark.skipif(sqli._lib is None, reason='libinjection not built (LIBINJECTION_PATH)')
+
+
+@needs_lib
+def test_libinjection_catches_obfuscation_regexes_miss():
+    for q in ['id=1/*!50000UNION*/+/*!50000SELECT*/+1', "id=1%27%7C%7C(SELECT+CHAR(113)%7C%7CCHAR(120))",
+              'id=1+AND+ASCII(SUBSTRING((SELECT+database()),1,1))>64', 'id=1;DROP+TABLE+users--',
+              'id=1%20AnD%208%3d8', 'id=1+or+true--', "sb_category=%27)+AND+false--+-"]:
+        assert (sqli.detect('/', q) or '').startswith('libinjection:'), q
+
+
+@needs_lib
+def test_libinjection_ordinary_values():
+    for q in ['s=O%27Reilly', 'q=Hello+(world);+%22quoted%22+--+note', 'data=%7B%22a%22:1,%22b%22:[1,2]%7D',
+              'h=e3b0c44298fc1c149afbf4c8996fb924', 'email=user@example.com', 'd=2026-11-17+10:00',
+              'r=https://x.org/a?b=1%26c=2', 't=dGVzdA==', 'n=-1', 'q=1+or+2']:
+        assert sqli.detect('/', q) is None, q

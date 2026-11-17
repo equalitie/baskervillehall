@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Ultra-simple approach - just copy the code without setup.py
 FROM python:3.11-slim
 
@@ -6,6 +7,13 @@ RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# libinjection (SQL injection detection, sqli.py): official source, pinned tag and checksum
+ADD --checksum=sha256:7582aac84b4ea8e2861805534d1f83c36b25d88a1e8133b3fb99fbb3611eb2f6 \
+    https://github.com/libinjection/libinjection/archive/refs/tags/v4.0.2.tar.gz /tmp/libinjection.tar.gz
+RUN tar xzf /tmp/libinjection.tar.gz -C /tmp && \
+    gcc -O2 -fPIC -shared -o /usr/local/lib/libinjection.so /tmp/libinjection-4.0.2/src/libinjection_sqli.c && \
+    rm -rf /tmp/libinjection*
 
 # Set working directory
 WORKDIR /usr/bin/baskervillehall
