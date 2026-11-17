@@ -68,6 +68,11 @@ def _load_libinjection():
 _lib = _load_libinjection()
 
 
+# One token and a comment ("1c": bankwatch.org's apc=147581-----1) is a value with dashes, not an attack.
+_WEAK_FINGERPRINT = re.compile(r'^.c$')
+DECODE_ROUNDS = 3  # sqlmap's tamper scripts encode up to three times (%252527 = ')
+
+
 def libinjection_fingerprint(value):
     """libinjection's fingerprint when value is SQL injection, else None (also without the library)."""
     if _lib is None or not value or len(value) < 2:
@@ -75,13 +80,14 @@ def libinjection_fingerprint(value):
     b = value.encode('utf-8', 'surrogateescape')
     fp = ctypes.create_string_buffer(8)
     if _lib.libinjection_sqli(b, len(b), fp) == 1:
-        return fp.value.decode('ascii', 'replace')
+        f = fp.value.decode('ascii', 'replace')
+        return None if _WEAK_FINGERPRINT.match(f) else f
     return None
 
 
 def _decode(text):
     text = text or ''
-    for _ in range(2):  # payloads are often encoded twice
+    for _ in range(DECODE_ROUNDS):
         decoded = unquote_plus(text)
         if decoded == text:
             break
@@ -101,7 +107,9 @@ def detect(url, query):
     if query:
         for k, v in parse_qsl(query, keep_blank_values=True):
             for part in (v, k):
-                if '%' in part:
+                for _ in range(DECODE_ROUNDS - 1):  # parse_qsl decoded once
+                    if '%' not in part:
+                        break
                     part = unquote_plus(part)
                 fp = libinjection_fingerprint(part)
                 if fp:

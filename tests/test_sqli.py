@@ -98,3 +98,14 @@ def test_counter_keeps_times_sample_signature_and_challenges():
     assert (row['first'], row['last']) == (t1, t2)
     assert row['sample'] == PMPRO and row['signature'] == 'time_based'
     assert row['challenged'] == 1
+
+
+@needs_lib
+def test_dashes_in_a_value_are_not_a_comment_attack():
+    assert sqli.detect('/project.shtml', 'apc=147581-----1&w=147581&s=190365') is None  # bankwatch.org
+
+
+def test_triple_encoded():
+    q = ('lang=%252527%29%2F**%2FAND%2F**%2F%28%252527ZQXoaJ%252527%3D%252527zQXOaj%252527AND%2F**%2F'
+         'EXTRACTVALUE%283370%2CCONCAT%280x7e%2C%28%28SELECT%2F**%2F%28ELT%283370%3D3370%2C1%29%29%29%29%2C0x7e%29%29')
+    assert sqli.detect('/hebergement-fsm-2026/', q)  # fsm2026benin.org, sqlmap
