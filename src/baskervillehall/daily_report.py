@@ -408,10 +408,11 @@ class DailyReport:
             headers={"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             # Output tokens include the model's thinking, which is not part of the text: with 4000 the
-            # report was cut after ~1,900 characters.
-            json={"model": self.model, "max_tokens": 16000, "system": SYSTEM_PROMPT,
+            # report was cut after ~1,900 characters, with 16000 after ~3,500 (Nov 18: 29 warnings,
+            # 30k input tokens; a full report is 10k characters, ~3k tokens).
+            json={"model": self.model, "max_tokens": 48000, "system": SYSTEM_PROMPT,
                   "messages": [{"role": "user", "content": user}]},
-            timeout=300,
+            timeout=900,
         )
         resp.raise_for_status()
         body = resp.json()
