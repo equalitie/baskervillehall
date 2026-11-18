@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from baskervillehall.site_dossier import build_profiles, group_ids, normalize_host, root_domain
+from baskervillehall.site_dossier import baseline_overrides, build_profiles, group_ids, normalize_host, root_domain
 
 
 def test_normalize_host():
@@ -19,7 +19,7 @@ def test_profile_from_rows():
                     {'h': 'a.org', 'action': 'challenge_all', 'n': 5}],
         'sqli': [{'h': 'a.org', 'n': 7}],
     }
-    p = build_profiles(['a.org', 'quiet.org'], rows, now)
+    p = build_profiles(['a.org', 'quiet.org'], rows, now, {'a.org': 1100.0})
     a = p['a.org']
     assert a['traffic']['days_seen'] == 2.0
     assert a['traffic']['peak_hour_utc'] == 15 and a['traffic']['quiet_hour_utc'] == 3
@@ -27,6 +27,7 @@ def test_profile_from_rows():
     assert list(a['fr_actions_30d']) == ['challenge_all', 'monitor_only']
     assert a['sqli_7d'] == 7
     assert 'group' not in a
+    assert a['manual_baseline'] == 1100.0 and 'manual_baseline' not in p['quiet.org']
     assert 'traffic' not in p['quiet.org']
 
 
@@ -42,3 +43,9 @@ def test_groups_by_root_domain():
                    'a.org.co', 'b.org.co', 'fergana.ru', 'fergana.news',
                    'apca.deflect.network', 'balochcampaign.deflect.network', 'alone.org'])
     assert g == {'kavkaz-uzel.eu': 'kavkaz-uzel.eu', 'eng.kavkaz-uzel.eu': 'kavkaz-uzel.eu'}
+
+
+def test_baseline_overrides():
+    assert baseline_overrides('v2026.org:500, www.tapol.org:1100,bad,x.org:abc') == \
+        {'v2026.org': 500.0, 'tapol.org': 1100.0}
+    assert baseline_overrides('') == {}

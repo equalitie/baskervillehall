@@ -67,9 +67,11 @@ stat("Incidents 30 d", f"SELECT coalesce(({P}->'incidents'->>'n_30d')::int, 0)",
 stat("Days with incidents (30 d)", f"SELECT coalesce(({P}->'incidents'->>'days_with_incidents_30d')::int, 0)", 14, y, 3,
      thresholds=red_after(3))
 stat("Max spike 30 d", f"SELECT ({P}->'incidents'->>'max_spike_30d')::numeric", 17, y, 3, unit="x", decimals=0)
+stat("Manual baseline", f"SELECT ({P}->>'manual_baseline')::numeric", 20, y, 2,
+     thresholds=[{"color": "orange", "value": None}])
 panel("stat", "Status", f"""
 SELECT CASE WHEN ({P}->>'opted_out_or_whitelisted')::boolean THEN 'opted out / whitelisted' ELSE 'protected' END AS status""",
-      20, y, 4, 4, options={"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value",
+      22, y, 2, 4, options={"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value",
                             "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/", "values": False}},
       fieldConfig={"defaults": {"mappings": [
           {"type": "value", "options": {"protected": {"color": "green"}, "opted out / whitelisted": {"color": "orange"}}}]},
@@ -99,6 +101,7 @@ SELECT k AS fact, v AS value FROM (VALUES
   ('peak hour UTC', {P}->'traffic'->>'peak_hour_utc'),
   ('quiet hour UTC', {P}->'traffic'->>'quiet_hour_utc'),
   ('traffic seen since', {P}->'traffic'->>'since'),
+  ('manual baseline', coalesce(({P}->>'manual_baseline') || ' (deflect_alerts INCIDENT_BASELINE_OVERRIDES)', 'none')),
   ('baseline req/min (p50)', {P}->'incidents'->>'baseline_req_min_p50'),
   ('last incident', {P}->'incidents'->>'last'),
   ('exposed files 7 d', coalesce({P}->>'exposures_7d', '0')),
@@ -118,6 +121,13 @@ FROM site_dossier d
 WHERE d.group_id = (SELECT group_id FROM site_dossier WHERE host = {H}) AND d.host <> {H}
 ORDER BY 2 DESC, 1""", 16, y, 8, 6, overrides=[link_host("site")])
 y += 6
+
+table("All manual baselines (deflect_alerts INCIDENT_BASELINE_OVERRIDES)", """
+SELECT host AS site, (profile->>'manual_baseline')::numeric AS baseline,
+       (profile->'incidents'->>'baseline_req_min_p50')::numeric AS "incident baseline p50",
+       (profile->'incidents'->>'n_30d')::int AS "incidents 30 d"
+FROM site_dossier WHERE profile ? 'manual_baseline' ORDER BY host""", 0, y, 24, 4, overrides=[link_host("site")])
+y += 4
 
 row("Incidents and First Responder", y); y += 1
 table("Incidents (time range)", f"""

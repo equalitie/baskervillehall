@@ -2,7 +2,8 @@
 """Site dossiers, step 2 of BASKERVILLE_AGENT_DESIGN.md: one row per site that persists between days.
 
 This job fills only what code can compute: `profile` (normal traffic, top countries/ASNs/UAs/URLs,
-incident and First Responder history). `known_clients`, `campaigns`, `open_questions` and
+incident and First Responder history, the manual baseline from deflect_alerts'
+INCIDENT_BASELINE_OVERRIDES, so nobody forgets it is there). `known_clients`, `campaigns`, `open_questions` and
 `narrative` are for the LLM step and for people; a field listed in `human_fields` was set by a person and no job overwrites it.
 
 Hosts are stored without "www." (incidents already are). A site gets a dossier when it had
@@ -133,11 +134,27 @@ def group_ids(hosts):
     return {h: r for r, hs in by_root.items() if len(hs) > 1 for h in hs}
 
 
+def baseline_overrides(value=None):
+    """{host: baseline} from INCIDENT_BASELINE_OVERRIDES ("v2026.org:500,tapol.org:1100"), parsed as
+    deflect_alerts parses it."""
+    value = os.environ.get('INCIDENT_BASELINE_OVERRIDES', '') if value is None else value
+    out = {}
+    for part in value.split(','):
+        if ':' not in part:
+            continue
+        k, v = part.strip().split(':', 1)
+        try:
+            out[normalize_host(k)] = float(v)
+        except ValueError:
+            continue
+    return out
+
+
 def _num(v):
     return round(float(v), 2) if v is not None else None
 
 
-def build_profiles(hosts, rows, now=None):
+def build_profiles(hosts, rows, now=None, overrides=None):
     """Profile dict per host from the QUERIES results (rows: name -> list of dicts)."""
     now = now or datetime.now(timezone.utc)
     by = {name: {} for name in rows}
@@ -184,6 +201,8 @@ def build_profiles(hosts, rows, now=None):
         dn = sorted({r['dnet'] for r in by.get('dnet', {}).get(h, []) if r['dnet']})
         if dn:
             p['dnet'] = dn
+        if h in (overrides or {}):
+            p['manual_baseline'] = overrides[h]
         p['opted_out_or_whitelisted'] = is_host_whitelisted(h)
         profiles[h] = p
     return profiles
@@ -224,15 +243,16 @@ class SiteDossier:
                 cur.execute(CREATE_SQL)
             conn.commit()
             rows = self._query(conn, params)
-            hosts = sorted({r['h'] for r in rows['hosts'] if r['h']})
-            profiles = build_profiles(hosts, rows, now)
+            overrides = baseline_overrides()
+            hosts = sorted({r['h'] for r in rows['hosts'] if r['h']} | set(overrides))
+            profiles = build_profiles(hosts, rows, now, overrides)
             groups = group_ids(hosts)
             new, bumped = self._write_dossiers(conn, profiles, groups)
             conn.commit()
         finally:
             conn.close()
         self.logger.info(f'[DOSSIER] {len(profiles)} dossiers ({new} new, {bumped} new versions), '
-                         f'{len(groups)} sites in {len(set(groups.values()))} groups')
+                         f'{len(groups)} sites in {len(set(groups.values()))} groups, manual baselines: {overrides}')
 
     def _write_dossiers(self, conn, profiles, groups):
         new = bumped = 0

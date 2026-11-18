@@ -438,7 +438,7 @@
     {
       "id": 7,
       "type": "stat",
-      "title": "Status",
+      "title": "Manual baseline",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "PCC52D03280B7034C"
@@ -446,7 +446,66 @@
       "gridPos": {
         "x": 20,
         "y": 0,
-        "w": 4,
+        "w": 2,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->>'manual_baseline')::numeric",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Status",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "gridPos": {
+        "x": 22,
+        "y": 0,
+        "w": 2,
         "h": 4
       },
       "targets": [
@@ -495,7 +554,7 @@
       }
     },
     {
-      "id": 8,
+      "id": 9,
       "type": "timeseries",
       "title": "Requests per hour (red: incidents)",
       "datasource": {
@@ -541,7 +600,7 @@
       }
     },
     {
-      "id": 9,
+      "id": 10,
       "type": "row",
       "title": "Profile",
       "collapsed": false,
@@ -554,7 +613,7 @@
       "panels": []
     },
     {
-      "id": 10,
+      "id": 11,
       "type": "table",
       "title": "Top countries (current snapshot)",
       "datasource": {
@@ -610,7 +669,7 @@
       }
     },
     {
-      "id": 11,
+      "id": 12,
       "type": "table",
       "title": "Top ASNs (current snapshot)",
       "datasource": {
@@ -666,7 +725,7 @@
       }
     },
     {
-      "id": 12,
+      "id": 13,
       "type": "table",
       "title": "Top URLs (current snapshot)",
       "datasource": {
@@ -722,7 +781,7 @@
       }
     },
     {
-      "id": 13,
+      "id": 14,
       "type": "table",
       "title": "Dossier facts",
       "datasource": {
@@ -744,7 +803,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT k AS fact, v AS value FROM (VALUES\n  ('group', coalesce((SELECT group_id FROM site_dossier WHERE host = ${host:sqlstring}), '—')),\n  ('dnet', coalesce((SELECT string_agg(d, ', ') FROM jsonb_array_elements_text((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'dnet') d), '—')),\n  ('peak hour UTC', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'traffic'->>'peak_hour_utc'),\n  ('quiet hour UTC', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'traffic'->>'quiet_hour_utc'),\n  ('traffic seen since', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'traffic'->>'since'),\n  ('baseline req/min (p50)', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'incidents'->>'baseline_req_min_p50'),\n  ('last incident', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'incidents'->>'last'),\n  ('exposed files 7 d', coalesce((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->>'exposures_7d', '0')),\n  ('SQLi attempts 7 d', coalesce((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->>'sqli_7d', '0')),\n  ('dossier version', (SELECT version || ' (' || to_char(updated_at, 'YYYY-MM-DD HH24:MI') || ' UTC, ' || updated_by || ')'\n                       FROM site_dossier WHERE host = ${host:sqlstring}))\n) t(k, v)",
+          "rawSql": "SELECT k AS fact, v AS value FROM (VALUES\n  ('group', coalesce((SELECT group_id FROM site_dossier WHERE host = ${host:sqlstring}), '—')),\n  ('dnet', coalesce((SELECT string_agg(d, ', ') FROM jsonb_array_elements_text((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'dnet') d), '—')),\n  ('peak hour UTC', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'traffic'->>'peak_hour_utc'),\n  ('quiet hour UTC', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'traffic'->>'quiet_hour_utc'),\n  ('traffic seen since', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'traffic'->>'since'),\n  ('manual baseline', coalesce(((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->>'manual_baseline') || ' (deflect_alerts INCIDENT_BASELINE_OVERRIDES)', 'none')),\n  ('baseline req/min (p50)', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'incidents'->>'baseline_req_min_p50'),\n  ('last incident', (SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->'incidents'->>'last'),\n  ('exposed files 7 d', coalesce((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->>'exposures_7d', '0')),\n  ('SQLi attempts 7 d', coalesce((SELECT profile FROM site_dossier WHERE host = ${host:sqlstring})->>'sqli_7d', '0')),\n  ('dossier version', (SELECT version || ' (' || to_char(updated_at, 'YYYY-MM-DD HH24:MI') || ' UTC, ' || updated_by || ')'\n                       FROM site_dossier WHERE host = ${host:sqlstring}))\n) t(k, v)",
           "refId": "A"
         }
       ],
@@ -778,7 +837,7 @@
       }
     },
     {
-      "id": 14,
+      "id": 15,
       "type": "table",
       "title": "Top user agents (current snapshot)",
       "datasource": {
@@ -834,7 +893,7 @@
       }
     },
     {
-      "id": 15,
+      "id": 16,
       "type": "table",
       "title": "Same group (registrable domain)",
       "datasource": {
@@ -895,20 +954,81 @@
       }
     },
     {
-      "id": 16,
+      "id": 17,
+      "type": "table",
+      "title": "All manual baselines (deflect_alerts INCIDENT_BASELINE_OVERRIDES)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "PCC52D03280B7034C"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "PCC52D03280B7034C"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT host AS site, (profile->>'manual_baseline')::numeric AS baseline,\n       (profile->'incidents'->>'baseline_req_min_p50')::numeric AS \"incident baseline p50\",\n       (profile->'incidents'->>'n_30d')::int AS \"incidents 30 d\"\nFROM site_dossier WHERE profile ? 'manual_baseline' ORDER BY host",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "inspect": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "site"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Dossier",
+                    "url": "/d/site-dossier-v1/site-dossier?var-host=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 18,
       "type": "row",
       "title": "Incidents and First Responder",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 29,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 17,
+      "id": 19,
       "type": "table",
       "title": "Incidents (time range)",
       "datasource": {
@@ -917,7 +1037,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 30,
         "w": 14,
         "h": 9
       },
@@ -951,7 +1071,7 @@
       }
     },
     {
-      "id": 18,
+      "id": 20,
       "type": "barchart",
       "title": "First Responder actions (time range)",
       "datasource": {
@@ -960,7 +1080,7 @@
       },
       "gridPos": {
         "x": 14,
-        "y": 26,
+        "y": 30,
         "w": 10,
         "h": 9
       },
@@ -991,7 +1111,7 @@
       }
     },
     {
-      "id": 19,
+      "id": 21,
       "type": "table",
       "title": "First Responder actions with reasoning (time range)",
       "datasource": {
@@ -1000,7 +1120,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 39,
         "w": 24,
         "h": 10
       },
@@ -1107,20 +1227,20 @@
       }
     },
     {
-      "id": 20,
+      "id": 22,
       "type": "row",
       "title": "Support: exposed files and SQL injection (7 days)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 49,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 21,
+      "id": 23,
       "type": "table",
       "title": "Exposed files",
       "datasource": {
@@ -1129,7 +1249,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 50,
         "w": 10,
         "h": 7
       },
@@ -1163,7 +1283,7 @@
       }
     },
     {
-      "id": 22,
+      "id": 24,
       "type": "table",
       "title": "SQL injection attempts",
       "datasource": {
@@ -1172,7 +1292,7 @@
       },
       "gridPos": {
         "x": 10,
-        "y": 46,
+        "y": 50,
         "w": 14,
         "h": 7
       },
@@ -1206,20 +1326,20 @@
       }
     },
     {
-      "id": 23,
+      "id": 25,
       "type": "row",
       "title": "Knowledge (filled by the LLM step and by people)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 53,
+        "y": 57,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "id": 24,
+      "id": 26,
       "type": "table",
       "title": "Campaigns",
       "datasource": {
@@ -1228,7 +1348,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 58,
         "w": 12,
         "h": 6
       },
@@ -1262,7 +1382,7 @@
       }
     },
     {
-      "id": 25,
+      "id": 27,
       "type": "table",
       "title": "Known clients",
       "datasource": {
@@ -1271,7 +1391,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 54,
+        "y": 58,
         "w": 12,
         "h": 6
       },
@@ -1305,7 +1425,7 @@
       }
     },
     {
-      "id": 26,
+      "id": 28,
       "type": "table",
       "title": "Open questions",
       "datasource": {
@@ -1314,7 +1434,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 60,
+        "y": 64,
         "w": 8,
         "h": 6
       },
@@ -1348,7 +1468,7 @@
       }
     },
     {
-      "id": 27,
+      "id": 29,
       "type": "table",
       "title": "Narrative",
       "datasource": {
@@ -1357,7 +1477,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 60,
+        "y": 64,
         "w": 16,
         "h": 6
       },

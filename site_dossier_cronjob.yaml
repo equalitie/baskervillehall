@@ -37,3 +37,11 @@ spec:
                     name: baskervillehall
                 - secretRef:
                     name: baskervillehall-secrets
+              env:
+                # The manual baselines live in deflect_alerts' config; the dossier shows them
+                - name: INCIDENT_BASELINE_OVERRIDES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: alerts
+                      key: INCIDENT_BASELINE_OVERRIDES
+                      optional: true
