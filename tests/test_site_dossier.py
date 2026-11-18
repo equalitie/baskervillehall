@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from baskervillehall.site_dossier import build_profiles, normalize_host
+from baskervillehall.site_dossier import build_profiles, group_ids, normalize_host, root_domain
 
 
 def test_normalize_host():
@@ -29,3 +29,16 @@ def test_profile_from_rows():
     assert 'group' not in a
     assert 'traffic' not in p['quiet.org']
 
+
+
+def test_root_domain():
+    assert root_domain('amp.eng.kavkaz-uzel.eu') == 'kavkaz-uzel.eu'
+    assert root_domain('www.comunidad.ens.org.co') == 'ens.org.co'
+    assert root_domain('a.github.io') == 'a.github.io'  # PSL private suffix: one site per user
+
+
+def test_groups_by_root_domain():
+    g = group_ids(['kavkaz-uzel.eu', 'eng.kavkaz-uzel.eu', 'kavkaz-uzel.ru',
+                   'a.org.co', 'b.org.co', 'fergana.ru', 'fergana.news',
+                   'apca.deflect.network', 'balochcampaign.deflect.network', 'alone.org'])
+    assert g == {'kavkaz-uzel.eu': 'kavkaz-uzel.eu', 'eng.kavkaz-uzel.eu': 'kavkaz-uzel.eu'}

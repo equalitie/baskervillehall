@@ -8,11 +8,14 @@ incident and First Responder history). `known_clients`, `campaigns`, `open_quest
 Hosts are stored without "www." (incidents already are). A site gets a dossier when it had
 DOSSIER_MIN_REQUESTS requests in the last 7 days or an incident in the last 30.
 
-Site groups (sites of one client): group_id stays empty until we get them from the Deflect
-dashboard. Not from origin IPs: one IP is often a shared server, and merging two clients is worse
-than having no groups.
+Site groups (sites of one client): group_id is the registrable domain (Public Suffix List, so
+a.org.co and b.org.co stay apart) when 2+ dossier sites share it: eng.kavkaz-uzel.eu and
+kavkaz-uzel.eu. Not across TLDs (fergana.ru and fergana.news stay apart) and not under the
+DOSSIER_SHARED_ROOTS domains, whose subdomains belong to different clients. Not from origin IPs
+either: one IP is often a shared server. Merging two clients is worse than having no group; the
+Deflect dashboard may give us real owners later.
 
-Versions: `version` goes up when the last version is older than HISTORY_EVERY_DAYS; each version
+Versions: `version` goes up when the group changes or the last version is older than HISTORY_EVERY_DAYS; each version
 is copied to site_dossier_history. The profile in site_dossier itself is refreshed on every run.
 """
 import json
@@ -21,6 +24,7 @@ import os
 from datetime import datetime, timezone
 
 import psycopg2
+import tldextract
 
 from baskervillehall.block_guard import is_host_whitelisted
 
@@ -29,6 +33,11 @@ TRAFFIC_DAYS = 28  # host_hourly_traffic keeps ~10 days today; the profile says 
 HISTORY_EVERY_DAYS = 7
 TOP_N = 5
 UA_CHARS = 200
+# Subdomains of these are different clients: Deflect-hosted client sites, Hetzner reverse DNS
+SHARED_ROOTS = frozenset(d.strip().lower() for d in os.environ.get(
+    'DOSSIER_SHARED_ROOTS', 'deflect.network,your-server.de,digsec.org').split(',') if d.strip())
+# The PSL snapshot bundled with tldextract: no download at run time
+_tld = tldextract.TLDExtract(suffix_list_urls=(), include_psl_private_domains=True)
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS site_dossier (
@@ -107,6 +116,21 @@ _OPTIONAL = ('exposures', 'sqli', 'dnet', 'countries', 'asns', 'uas', 'urls')
 def normalize_host(host):
     host = (host or '').strip().lower()
     return host[4:] if host.startswith('www.') else host
+
+
+def root_domain(host):
+    """Registrable domain of host ('kavkaz-uzel.eu' for amp.eng.kavkaz-uzel.eu), or None."""
+    return _tld(normalize_host(host)).top_domain_under_public_suffix or None
+
+
+def group_ids(hosts):
+    """{host: group_id} for hosts whose registrable domain at least one other host shares."""
+    by_root = {}
+    for h in hosts:
+        r = root_domain(h)
+        if r and r not in SHARED_ROOTS:
+            by_root.setdefault(r, []).append(h)
+    return {h: r for r, hs in by_root.items() if len(hs) > 1 for h in hs}
 
 
 def _num(v):
@@ -202,30 +226,34 @@ class SiteDossier:
             rows = self._query(conn, params)
             hosts = sorted({r['h'] for r in rows['hosts'] if r['h']})
             profiles = build_profiles(hosts, rows, now)
-            new, bumped = self._write_dossiers(conn, profiles)
+            groups = group_ids(hosts)
+            new, bumped = self._write_dossiers(conn, profiles, groups)
             conn.commit()
         finally:
             conn.close()
-        self.logger.info(f'[DOSSIER] {len(profiles)} dossiers ({new} new, {bumped} new versions)')
+        self.logger.info(f'[DOSSIER] {len(profiles)} dossiers ({new} new, {bumped} new versions), '
+                         f'{len(groups)} sites in {len(set(groups.values()))} groups')
 
-    def _write_dossiers(self, conn, profiles):
+    def _write_dossiers(self, conn, profiles, groups):
         new = bumped = 0
         with conn.cursor() as cur:
-            cur.execute("SELECT host, version_at FROM site_dossier")
-            current = dict(cur.fetchall())
+            cur.execute("SELECT host, group_id, version_at FROM site_dossier")
+            current = {h: (gid, vat) for h, gid, vat in cur.fetchall()}
             now = datetime.now(timezone.utc)
             for h, p in profiles.items():
+                gid = groups.get(h)
                 if h not in current:
-                    cur.execute("""INSERT INTO site_dossier (host, updated_by, profile)
-                                   VALUES (%s, 'dossier_job', %s)""", (h, json.dumps(p)))
+                    cur.execute("""INSERT INTO site_dossier (host, updated_by, group_id, profile)
+                                   VALUES (%s, 'dossier_job', %s, %s)""", (h, gid, json.dumps(p)))
                     new += 1
                     snapshot = True
                 else:
-                    snapshot = (now - current[h]).days >= HISTORY_EVERY_DAYS
-                    cur.execute("""UPDATE site_dossier SET profile = %s, updated_at = now(),
+                    old_gid, vat = current[h]
+                    snapshot = old_gid != gid or (now - vat).days >= HISTORY_EVERY_DAYS
+                    cur.execute("""UPDATE site_dossier SET profile = %s, group_id = %s, updated_at = now(),
                                      updated_by = 'dossier_job',
                                      version = version + %s, version_at = CASE WHEN %s THEN now() ELSE version_at END
-                                   WHERE host = %s""", (json.dumps(p), int(snapshot), snapshot, h))
+                                   WHERE host = %s""", (json.dumps(p), gid, int(snapshot), snapshot, h))
                     bumped += snapshot
                 if snapshot:
                     cur.execute("""INSERT INTO site_dossier_history SELECT * FROM site_dossier WHERE host = %s
