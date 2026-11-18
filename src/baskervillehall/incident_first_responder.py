@@ -585,7 +585,7 @@ class IncidentFirstResponder:
                        traffic_peak_ratio, traffic_close_ratio, traffic_recent_ratio,
                        traffic_peak_count, traffic_close_count, traffic_recent_count,
                        COALESCE(source, 'spike_detector'), block_criteria,
-                       immature_ratio
+                       immature_ratio, COALESCE(baseline_manual, FALSE)
                 FROM incidents
                 WHERE started_at > NOW() - INTERVAL '24 hours'
                   AND (
@@ -620,6 +620,7 @@ class IncidentFirstResponder:
                     json.loads(r[19]) if isinstance(r[19], str) else (r[19] or [])
                 ),
                 'immature_ratio': float(r[20]) if r[20] is not None else None,
+                'baseline_manual': bool(r[21]),
             }
             for r in rows
         ]
@@ -1662,19 +1663,17 @@ class IncidentFirstResponder:
 
         baseline_avg = incident['baseline_avg']
         spike_ratio = incident['spike_ratio']
-        synthetic_baseline = (
-            baseline_avg < 1000 and
-            traffic_peak_count > 0 and
-            traffic_peak_count > 10 * baseline_avg
-        )
+        # The detector marks a baseline set by hand (deflect_alerts INCIDENT_BASELINE_OVERRIDES).
+        # Before Nov 18 it was guessed (baseline < 1000 and peak > 10x), which also hit real attacks
+        # on small sites, and baseline_avg held the computed baseline, not the override.
         baseline_line = (
             f"Baseline avg: {baseline_avg:.1f}  "
             f"Spike ratio: {spike_ratio:.1f}x"
         )
-        if synthetic_baseline:
+        if incident.get('baseline_manual'):
             baseline_line += (
-                f"\n⚠ SYNTHETIC BASELINE: baseline_avg={baseline_avg:.0f} is likely a manual override, "
-                f"not the site's real organic traffic level. "
+                f"\n⚠ MANUAL BASELINE: baseline_avg={baseline_avg:.0f} was set by hand for this site, "
+                f"not measured from its organic traffic. "
                 f"spike_ratio={spike_ratio:.0f}x means traffic/{baseline_avg:.0f}, "
                 f"NOT {spike_ratio:.0f}× real normal traffic. "
                 f"Do not use spike_ratio alone to gauge severity — "

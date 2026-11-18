@@ -102,7 +102,7 @@ SELECT k AS fact, v AS value FROM (VALUES
   ('quiet hour UTC', {P}->'traffic'->>'quiet_hour_utc'),
   ('traffic seen since', {P}->'traffic'->>'since'),
   ('manual baseline', coalesce(({P}->>'manual_baseline') || ' (deflect_alerts INCIDENT_BASELINE_OVERRIDES)', 'none')),
-  ('baseline req/min (p50)', {P}->'incidents'->>'baseline_req_min_p50'),
+  ('incident baseline req/min (p50)', {P}->'incidents'->>'baseline_req_min_p50'),
   ('last incident', {P}->'incidents'->>'last'),
   ('exposed files 7 d', coalesce({P}->>'exposures_7d', '0')),
   ('SQLi attempts 7 d', coalesce({P}->>'sqli_7d', '0')),
@@ -123,8 +123,9 @@ ORDER BY 2 DESC, 1""", 16, y, 8, 6, overrides=[link_host("site")])
 y += 6
 
 table("All manual baselines (deflect_alerts INCIDENT_BASELINE_OVERRIDES)", """
-SELECT host AS site, (profile->>'manual_baseline')::numeric AS baseline,
-       (profile->'incidents'->>'baseline_req_min_p50')::numeric AS "incident baseline p50",
+SELECT host AS site, (profile->>'manual_baseline')::numeric AS "manual baseline",
+       (profile->'traffic'->>'req_per_hour_p50')::numeric / 60 AS "real req/min (p50 of hours)",
+       (profile->'incidents'->>'n_7d')::int AS "incidents 7 d",
        (profile->'incidents'->>'n_30d')::int AS "incidents 30 d"
 FROM site_dossier WHERE profile ? 'manual_baseline' ORDER BY host""", 0, y, 24, 4, overrides=[link_host("site")])
 y += 4
