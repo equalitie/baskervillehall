@@ -271,8 +271,6 @@ def main():
         from baskervillehall.site_dossier import SiteDossier
         SiteDossier(
             postgres_connection=postgres_connection,
-            origin_ips_url=os.environ.get('DEFLECT_CONFIG_URL_ORIGIN_IPS'),
-            origin_ips_auth=os.environ.get('DEFLECT_CONFIG_AUTH_ORIGIN_IPS'),
             logger=logger,
         ).run()
     else:

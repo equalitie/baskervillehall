@@ -2,21 +2,18 @@
 """Site dossiers, step 2 of BASKERVILLE_AGENT_DESIGN.md: one row per site that persists between days.
 
 This job fills only what code can compute: `profile` (normal traffic, top countries/ASNs/UAs/URLs,
-incident and First Responder history) and the site group (sites sharing an origin IP, usually one
-client). `known_clients`, `campaigns`, `open_questions` and `narrative` are for the LLM step and for
-people; a field listed in `human_fields` was set by a person and no job overwrites it.
+incident and First Responder history). `known_clients`, `campaigns`, `open_questions` and
+`narrative` are for the LLM step and for people; a field listed in `human_fields` was set by a person and no job overwrites it.
 
 Hosts are stored without "www." (incidents already are). A site gets a dossier when it had
 DOSSIER_MIN_REQUESTS requests in the last 7 days or an incident in the last 30.
 
-Groups: one origin IP can be one client (fergana: 54 domains) or a shared server with hundreds of
-unrelated sites (Nov 18: 246, 161, 94 sites on one IP each). A group is kind 'client' when it has at
-most CLIENT_GROUP_MAX sites or most of its domains share a name ("fergana" in fergana.news,
-de.fergana.me); otherwise 'shared_hosting', which site_group keeps but the dossier ignores.
+Site groups (sites of one client): group_id stays empty until we get them from the Deflect
+dashboard. Not from origin IPs: one IP is often a shared server, and merging two clients is worse
+than having no groups.
 
-Versions: `version` goes up when the group changes or the last version is older than
-HISTORY_EVERY_DAYS; each version is copied to site_dossier_history. The profile in site_dossier
-itself is refreshed on every run.
+Versions: `version` goes up when the last version is older than HISTORY_EVERY_DAYS; each version
+is copied to site_dossier_history. The profile in site_dossier itself is refreshed on every run.
 """
 import json
 import logging
@@ -24,8 +21,6 @@ import os
 from datetime import datetime, timezone
 
 import psycopg2
-import psycopg2.extras
-import requests
 
 from baskervillehall.block_guard import is_host_whitelisted
 
@@ -34,9 +29,6 @@ TRAFFIC_DAYS = 28  # host_hourly_traffic keeps ~10 days today; the profile says 
 HISTORY_EVERY_DAYS = 7
 TOP_N = 5
 UA_CHARS = 200
-CLIENT_GROUP_MAX = 10
-_SECOND_LEVEL = {'com', 'org', 'net', 'gov', 'edu', 'ac', 'co', 'or', 'ne', 'go', 'mil', 'nic', 'in',
-                 'rv', 'kiev', 'kyiv', 'msk', 'spb'}
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS site_dossier (
@@ -55,16 +47,6 @@ CREATE TABLE IF NOT EXISTS site_dossier (
 );
 CREATE TABLE IF NOT EXISTS site_dossier_history (LIKE site_dossier INCLUDING DEFAULTS,
                                                  PRIMARY KEY (host, version));
-CREATE TABLE IF NOT EXISTS site_group (
-    host        text PRIMARY KEY,
-    group_id    text NOT NULL,
-    origin_ips  text[] NOT NULL,
-    group_size  int  NOT NULL,
-    group_kind  text NOT NULL DEFAULT 'client',
-    updated_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS site_group_group_id ON site_group (group_id);
-ALTER TABLE site_group ADD COLUMN IF NOT EXISTS group_kind text NOT NULL DEFAULT 'client';
 """
 
 _H = r"regexp_replace(lower(host), '^www\.', '')"
@@ -127,70 +109,11 @@ def normalize_host(host):
     return host[4:] if host.startswith('www.') else host
 
 
-def site_name(host):
-    """The name part of a domain: 'fergana' for de.fergana.news, '7dniv' for 7dniv.rv.ua."""
-    parts = normalize_host(host).split('.')
-    if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL:
-        return parts[-3]
-    return parts[-2] if len(parts) >= 2 else parts[0]
-
-
-def group_kind(hosts):
-    if len(hosts) <= CLIENT_GROUP_MAX:
-        return 'client'
-    names = {}
-    for h in hosts:
-        n = site_name(h)
-        names[n] = names.get(n, 0) + 1
-    return 'client' if max(names.values()) * 2 >= len(hosts) else 'shared_hosting'
-
-
-def group_by_origin_ips(origin_ips):
-    """{host: [ip, ...]} -> {host: (group_id, sorted ips, group size, kind)}: hosts that share an
-    origin IP, directly or through other hosts, form one group named after its first host
-    alphabetically; kind is group_kind()."""
-    parent = {}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    host_ips = {}
-    for host, ips in (origin_ips or {}).items():
-        if isinstance(ips, str):
-            ips = [ips]
-        if not isinstance(ips, list):
-            continue
-        h = normalize_host(host)
-        ips = {str(ip).strip() for ip in ips if str(ip).strip()}
-        if not h or not ips:
-            continue
-        host_ips.setdefault(h, set()).update(ips)
-    for h, ips in host_ips.items():
-        parent.setdefault('h:' + h, 'h:' + h)
-        for ip in ips:
-            parent.setdefault('i:' + ip, 'i:' + ip)
-            a, b = find('h:' + h), find('i:' + ip)
-            if a != b:
-                parent[a] = b
-    members = {}
-    for h in host_ips:
-        members.setdefault(find('h:' + h), []).append(h)
-    out = {}
-    for hosts in members.values():
-        gid, kind = min(hosts), group_kind(hosts)
-        for h in hosts:
-            out[h] = (gid, sorted(host_ips[h]), len(hosts), kind)
-    return out
-
-
 def _num(v):
     return round(float(v), 2) if v is not None else None
 
 
-def build_profiles(hosts, rows, groups, now=None):
+def build_profiles(hosts, rows, now=None):
     """Profile dict per host from the QUERIES results (rows: name -> list of dicts)."""
     now = now or datetime.now(timezone.utc)
     by = {name: {} for name in rows}
@@ -237,35 +160,15 @@ def build_profiles(hosts, rows, groups, now=None):
         dn = sorted({r['dnet'] for r in by.get('dnet', {}).get(h, []) if r['dnet']})
         if dn:
             p['dnet'] = dn
-        g = groups.get(h)
-        if g and g[2] > 1:
-            p['group'] = {'id': g[0], 'size': g[2]} if g[3] == 'client' else \
-                {'shared_hosting': True, 'sites_on_origin': g[2]}
         p['opted_out_or_whitelisted'] = is_host_whitelisted(h)
         profiles[h] = p
     return profiles
 
 
 class SiteDossier:
-    def __init__(self, postgres_connection, origin_ips_url=None, origin_ips_auth=None, logger=None):
+    def __init__(self, postgres_connection, logger=None):
         self.pg = postgres_connection
-        self.origin_ips_url = origin_ips_url
-        self.origin_ips_auth = origin_ips_auth
         self.logger = logger or logging.getLogger(__name__)
-
-    def _origin_ips(self):
-        if not self.origin_ips_url or not self.origin_ips_auth:
-            self.logger.warning('[DOSSIER] no origin_ips URL/auth: no site groups')
-            return {}
-        try:
-            r = requests.get(self.origin_ips_url, headers={'Authorization': f'Bearer {self.origin_ips_auth}'},
-                             timeout=60)
-            r.raise_for_status()
-            data = r.json()
-            return data if isinstance(data, dict) else {}
-        except Exception as e:
-            self.logger.error(f'[DOSSIER] origin_ips failed: {e}')
-            return {}
 
     def _query(self, conn, params):
         rows = {}
@@ -291,7 +194,6 @@ class SiteDossier:
         now = datetime.now(timezone.utc)
         hour = int(now.timestamp() // 3600)
         params = {'since_h': hour - TRAFFIC_DAYS * 24, 'since_7d_h': hour - 7 * 24, 'min_req': MIN_REQUESTS}
-        groups = group_by_origin_ips(self._origin_ips())
         conn = psycopg2.connect(**self.pg)
         try:
             with conn.cursor() as cur:
@@ -299,53 +201,31 @@ class SiteDossier:
             conn.commit()
             rows = self._query(conn, params)
             hosts = sorted({r['h'] for r in rows['hosts'] if r['h']})
-            profiles = build_profiles(hosts, rows, groups, now)
-            self._write_groups(conn, groups)
-            new, bumped = self._write_dossiers(conn, profiles, groups)
+            profiles = build_profiles(hosts, rows, now)
+            new, bumped = self._write_dossiers(conn, profiles)
             conn.commit()
         finally:
             conn.close()
-        n_groups = len({g[0] for g in groups.values() if g[2] > 1 and g[3] == 'client'})
-        self.logger.info(f'[DOSSIER] {len(profiles)} dossiers ({new} new, {bumped} new versions), '
-                         f'{len(groups)} hosts with origin IPs, {n_groups} client groups of 2+')
+        self.logger.info(f'[DOSSIER] {len(profiles)} dossiers ({new} new, {bumped} new versions)')
 
-    def _write_groups(self, conn, groups):
-        if not groups:
-            return  # keep the last known groups when the feed is down
-        with conn.cursor() as cur:
-            cur.execute("CREATE TEMP TABLE sg (LIKE site_group) ON COMMIT DROP")
-            psycopg2.extras.execute_values(
-                cur, "INSERT INTO sg (host, group_id, origin_ips, group_size, group_kind, updated_at) VALUES %s",
-                [(h, g[0], g[1], g[2], g[3], datetime.now(timezone.utc)) for h, g in groups.items()])
-            cur.execute("DELETE FROM site_group WHERE host NOT IN (SELECT host FROM sg)")
-            cur.execute("""INSERT INTO site_group (host, group_id, origin_ips, group_size, group_kind, updated_at)
-                           SELECT host, group_id, origin_ips, group_size, group_kind, updated_at FROM sg
-                           ON CONFLICT (host) DO UPDATE SET
-                             group_id = EXCLUDED.group_id, origin_ips = EXCLUDED.origin_ips,
-                             group_size = EXCLUDED.group_size, group_kind = EXCLUDED.group_kind,
-                             updated_at = EXCLUDED.updated_at""")
-
-    def _write_dossiers(self, conn, profiles, groups):
+    def _write_dossiers(self, conn, profiles):
         new = bumped = 0
         with conn.cursor() as cur:
-            cur.execute("SELECT host, group_id, version_at FROM site_dossier")
-            current = {h: (gid, vat) for h, gid, vat in cur.fetchall()}
+            cur.execute("SELECT host, version_at FROM site_dossier")
+            current = dict(cur.fetchall())
             now = datetime.now(timezone.utc)
             for h, p in profiles.items():
-                g = groups.get(h)
-                gid = g[0] if g and g[2] > 1 and g[3] == 'client' else None
                 if h not in current:
-                    cur.execute("""INSERT INTO site_dossier (host, updated_by, group_id, profile)
-                                   VALUES (%s, 'dossier_job', %s, %s)""", (h, gid, json.dumps(p)))
+                    cur.execute("""INSERT INTO site_dossier (host, updated_by, profile)
+                                   VALUES (%s, 'dossier_job', %s)""", (h, json.dumps(p)))
                     new += 1
                     snapshot = True
                 else:
-                    old_gid, vat = current[h]
-                    snapshot = old_gid != gid or (now - vat).days >= HISTORY_EVERY_DAYS
-                    cur.execute("""UPDATE site_dossier SET profile = %s, group_id = %s, updated_at = now(),
+                    snapshot = (now - current[h]).days >= HISTORY_EVERY_DAYS
+                    cur.execute("""UPDATE site_dossier SET profile = %s, updated_at = now(),
                                      updated_by = 'dossier_job',
                                      version = version + %s, version_at = CASE WHEN %s THEN now() ELSE version_at END
-                                   WHERE host = %s""", (json.dumps(p), gid, int(snapshot), snapshot, h))
+                                   WHERE host = %s""", (json.dumps(p), int(snapshot), snapshot, h))
                     bumped += snapshot
                 if snapshot:
                     cur.execute("""INSERT INTO site_dossier_history SELECT * FROM site_dossier WHERE host = %s

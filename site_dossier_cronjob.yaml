@@ -1,5 +1,5 @@
 # Site dossiers, 05:00 UTC, before the daily report (src/baskervillehall/site_dossier.py).
-# Fills site_dossier / site_dossier_history / site_group; no LLM.
+# Fills site_dossier / site_dossier_history; no LLM.
 #
 # Run once by hand: kubectl create job --from=cronjob/baskerville-site-dossier site-dossier-manual
 apiVersion: batch/v1
