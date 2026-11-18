@@ -1,0 +1,39 @@
+# Site dossiers, 05:00 UTC, before the daily report (src/baskervillehall/site_dossier.py).
+# Fills site_dossier / site_dossier_history / site_group; no LLM.
+#
+# Run once by hand: kubectl create job --from=cronjob/baskerville-site-dossier site-dossier-manual
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: baskerville-site-dossier
+spec:
+  schedule: "0 5 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: site-dossier
+              image: "equalitie/baskervillehall:latest"
+              imagePullPolicy: Always
+              command: ["python"]
+              args: ["/usr/bin/baskervillehall/src/baskervillehall/main.py", "site_dossier"]
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "500m"
+              envFrom:
+                - configMapRef:
+                    name: baskervillehall
+                - secretRef:
+                    name: baskervillehall-secrets

@@ -267,6 +267,14 @@ def main():
             },
             logger=logger,
         ).run(send_email=os.environ.get('DAILY_REPORT_SEND_EMAIL', 'true').lower() == 'true')
+    elif args.pipeline == 'site_dossier':
+        from baskervillehall.site_dossier import SiteDossier
+        SiteDossier(
+            postgres_connection=postgres_connection,
+            origin_ips_url=os.environ.get('DEFLECT_CONFIG_URL_ORIGIN_IPS'),
+            origin_ips_auth=os.environ.get('DEFLECT_CONFIG_AUTH_ORIGIN_IPS'),
+            logger=logger,
+        ).run()
     else:
         logger.error(f'Pipeline "{args.pipeline}" is not supported.')
 
