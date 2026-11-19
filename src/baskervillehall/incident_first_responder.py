@@ -159,6 +159,12 @@ ALTCHA_CLICK_MIN_BOT_PCT = 20.0      # % of the incident's bot commands with thi
 ALTCHA_CLICK_MIN_PASSED = 100
 ALTCHA_CLICK_MIN_PASS_RATE = 0.5     # passed / (passed + challenged)
 ALTCHA_CLICK_COOLDOWN_MINUTES = 15   # per host + UA; a re-send resets the visitors' cookies
+# banjax ignores a challenge_all that repeats the active one and does not extend its TTL, and it
+# starts the TTL when the command arrives, a little after we send it. A renewal sent around our
+# expiry can land while the old decision still lives on the edge: dropped, and the site is open
+# until the next renewal (tapol.org, Nov 16 05:53: an hour without the challenge). So a renewal
+# within this many seconds after the previous expiry waits until then.
+CHALLENGE_ALL_RENEW_GAP_SECONDS = int(os.environ.get('FIRST_RESPONDER_CHALLENGE_ALL_RENEW_GAP_SECONDS', '120'))
 ALTCHA_CLICK_MAX_UAS = 2
 ALTCHA_CLICK_ACTION = 'altcha_click_ua'  # also excluded from the LLM re-analysis timer
 # Each re-send carries force_new and resets the visitors' cookies. When the UA still passes
@@ -593,6 +599,7 @@ class IncidentFirstResponder:
         self.challenge_all_immature_ratio = challenge_all_immature_ratio
         self.challenge_all_ttl_minutes = challenge_all_ttl_minutes
         self._llm_last_called: dict = {}   # host → timestamp of last LLM call
+        self._deferred_challenge_all: dict = {}  # host → (send_at, kwargs for _send_banjax_command)
         self._llm_last_action: dict = {}   # host → last LLM action (for extended cooldown)
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self._producer = KafkaProducer(**kafka_connection) if kafka_connection else None
@@ -1029,14 +1036,7 @@ class IncidentFirstResponder:
         action = rec.get('action')
         ttl_sec = rec.get('ttl_minutes', self.ttl_minutes) * 60
         if action == 'challenge_all':
-            self._send_banjax_command(
-                host=host,
-                command_name='challenge_all',
-                value=host,
-                ttl_seconds=ttl_sec,
-                reason=f'incident_id={incident_id} llm_escalation',
-                conn=conn,
-            )
+            self._send_challenge_all(conn, host, ttl_sec, f'incident_id={incident_id} llm_escalation')
             return
         if action in ('block_subnet', 'challenge_subnet'):
             targets = rec.get('target') or []
@@ -1098,6 +1098,45 @@ class IncidentFirstResponder:
                 LIMIT 1
             """, (host, incident_id, ended_at, ended_at))
             return cur.fetchone() is not None
+
+    def _challenge_all_renew_at(self, conn, host):
+        """When a new challenge_all for host must wait (see CHALLENGE_ALL_RENEW_GAP_SECONDS): the
+        previous one's expiry + the gap, if that is still ahead, else None. The decision being
+        dispatched is already saved, so only actions older than 30 s count."""
+        if conn is None or CHALLENGE_ALL_RENEW_GAP_SECONDS <= 0:
+            return None
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT max(expires_at) FROM first_responder_actions
+                WHERE host = %s AND action = 'challenge_all'
+                  AND created_at < NOW() - INTERVAL '30 seconds'
+                  AND expires_at > NOW() - INTERVAL '1 second' * %s""",
+                (host, CHALLENGE_ALL_RENEW_GAP_SECONDS))
+            prev = cur.fetchone()[0]
+        if prev is None:
+            return None
+        send_at = prev + timedelta(seconds=CHALLENGE_ALL_RENEW_GAP_SECONDS)
+        return send_at if send_at > datetime.now(timezone.utc) else None
+
+    def _send_challenge_all(self, conn, host, ttl_seconds, reason):
+        """challenge_all now, or after the previous one's expiry (see CHALLENGE_ALL_RENEW_GAP_SECONDS)."""
+        kwargs = dict(host=host, command_name='challenge_all', value=host, ttl_seconds=ttl_seconds,
+                      reason=reason)
+        send_at = self._challenge_all_renew_at(conn, host)
+        if send_at is not None:
+            self._deferred_challenge_all[host] = (send_at, kwargs)
+            self.logger.warning(
+                f"[FIRST_RESPONDER] challenge_all for {host} deferred to {send_at:%H:%M:%S} UTC: "
+                f"the previous one may still be active on the edge")
+            return
+        self._send_banjax_command(conn=conn, **kwargs)
+
+    def _send_deferred_challenge_all(self, conn):
+        now = datetime.now(timezone.utc)
+        for host, (send_at, kwargs) in list(self._deferred_challenge_all.items()):
+            if send_at <= now:
+                del self._deferred_challenge_all[host]
+                self._send_banjax_command(conn=conn, **kwargs)
 
     def _get_active_actions(self, conn, host):
         """Return list of active (not-yet-expired) actions for this host, excluding monitor_only."""
@@ -1466,14 +1505,9 @@ class IncidentFirstResponder:
                         ),
                         'ttl_minutes': self.challenge_all_ttl_minutes,
                     })
-                    self._send_banjax_command(
-                        host=host,
-                        command_name='challenge_all',
-                        value=host,
-                        ttl_seconds=ttl_sec,
-                        reason=f'incident_id={incident_id} persistent_cluster={recent_cluster_count}',
-                        conn=conn,
-                    )
+                    self._send_challenge_all(
+                        conn, host, ttl_sec,
+                        f'incident_id={incident_id} persistent_cluster={recent_cluster_count}')
         except Exception:
             self.logger.exception(
                 f"[CLUSTER_RESPONDER] Persistent cluster check failed for incident_id={incident_id}"
@@ -2746,14 +2780,9 @@ class IncidentFirstResponder:
                     ),
                     'ttl_minutes': self.challenge_all_ttl_minutes,
                 })
-                self._send_banjax_command(
-                    host=host,
-                    command_name='challenge_all',
-                    value=host,
-                    ttl_seconds=ttl_sec,
-                    reason=f'incident_id={incident_id} spike={spike_ratio:.1f}x immature={immature_ratio*100:.0f}%',
-                    conn=conn,
-                )
+                self._send_challenge_all(
+                    conn, host, ttl_sec,
+                    f'incident_id={incident_id} spike={spike_ratio:.1f}x immature={immature_ratio*100:.0f}%')
                 self._mark_processed(conn, incident_id)
                 return
 
@@ -3117,6 +3146,7 @@ class IncidentFirstResponder:
                     conn = self._pg_connect()
                     self._ensure_tables(conn)
 
+                self._send_deferred_challenge_all(conn)
                 incidents = self._get_unprocessed_incidents(conn)
                 if ALTCHA_CLICK_ENABLED:
                     try:
