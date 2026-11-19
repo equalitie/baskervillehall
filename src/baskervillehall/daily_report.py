@@ -9,11 +9,13 @@ choose the severity.
 import json
 import logging
 import os
+import re
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
+from urllib.parse import urlsplit
 
 import psycopg2
 import requests
@@ -22,6 +24,41 @@ from baskervillehall import exposures, sqli
 from baskervillehall.block_guard import BLOCKS_DISABLED, is_host_opted_out
 
 NORM, WARNING, URGENT = 'NORM', 'WARNING', 'URGENT'
+
+# Links the report may keep clickable. Any other link in the LLM text may come from attacker
+# strings (prompt injection): an image would be fetched by the mail client on open, with whatever
+# data the URL carries, and a link invites a click. So images are dropped and other links shown as
+# defanged text (hxxps://).
+LINK_DOMAINS = tuple(d.strip().lower() for d in os.environ.get(
+    'DAILY_REPORT_LINK_DOMAINS', 'equalit.ie,deflect.network,deflect.ca,baskerville.ai').split(',') if d.strip())
+_MD_IMAGE = re.compile(r'!\[([^\]]*)\]\([^)]*\)')
+_MD_LINK = re.compile(r'\[([^\]]+)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)')
+_BARE_URL = re.compile(r'\b(?:https?|ftp)://[^\s<>()\[\]`"\']+', re.IGNORECASE)
+
+
+def _link_allowed(url):
+    try:
+        host = (urlsplit(url).hostname or '').lower()
+    except ValueError:
+        return False
+    return urlsplit(url).scheme.lower() == 'https' and any(
+        host == d or host.endswith('.' + d) for d in LINK_DOMAINS)
+
+
+def _defang(url):
+    """hxxps://example[.]com/path: readable, not clickable, not auto-linked by mail clients."""
+    return re.sub(r'^http', 'hxxp', re.sub(r'^ftp', 'fxp', url, flags=re.I), flags=re.I).replace('.', '[.]')
+
+
+def defang_links(md):
+    """Report Markdown with images removed and links outside LINK_DOMAINS turned into plain text."""
+    md = _MD_IMAGE.sub(lambda m: f'{m.group(1)} (image removed)'.strip(), md or '')
+
+    def link(m):
+        text, url = m.group(1), m.group(2)
+        return m.group(0) if _link_allowed(url) else f'{text} ({_defang(url)})'
+    md = _MD_LINK.sub(link, md)
+    return _BARE_URL.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else _defang(m.group(0)), md)
 _LEVEL_ORDER = {NORM: 0, WARNING: 1, URGENT: 2}
 
 # Sonnet pricing ($/MTok) for llm_usage_log
@@ -447,9 +484,11 @@ class DailyReport:
     def html(cls, level, reasons, report_md):
         import markdown
         color = {NORM: '#1a7f37', WARNING: '#b35900', URGENT: '#c62828'}[level]
-        items = "".join(f"<li><b>{escape(r['level'])}</b>: {escape(r['reason'])}</li>" for r in reasons)
-        # The LLM text can quote attacker-controlled strings: escape raw HTML before rendering.
-        body = markdown.markdown(escape(report_md, quote=False),
+        items = "".join(f"<li><b>{escape(r['level'])}</b>: {escape(defang_links(r['reason']))}</li>"
+                        for r in reasons)
+        # The LLM text can quote attacker-controlled strings: escape raw HTML before rendering,
+        # drop images and defang links to other domains.
+        body = markdown.markdown(escape(defang_links(report_md), quote=False),
                                  extensions=['tables', 'fenced_code', 'sane_lists'])
         for tag, styled in cls._INLINE_STYLES:
             body = body.replace(tag, styled)
@@ -519,6 +558,6 @@ class DailyReport:
             conn.close()
         subject = self.subject(level, reasons, day)
         if send_email:
-            self.send(subject, report_md, self.html(level, reasons, report_md))
+            self.send(subject, defang_links(report_md), self.html(level, reasons, report_md))
             self.logger.info(f"[DAILY_REPORT] sent: {subject}")
         return subject, reasons, report_md
