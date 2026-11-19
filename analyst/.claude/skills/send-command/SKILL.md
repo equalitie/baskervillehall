@@ -25,13 +25,13 @@ command fails: check the host name, then ask the analyst whether to use `--all-d
 To lift a challenge from an IP, any `--host` works: `clear_rules` goes to every dnet anyway.
 
 Run it as a single command from the `analyst/` folder: `bin/send_command.sh ...`, with no `cd`,
-`&&`, `;` or pipes around it. Only that exact form matches the permission rule that lets it run
-without a prompt.
+`&&`, `;` or pipes around it. Claude Code asks the analyst to confirm every send (an `ask` rule in
+`.claude/settings.json`): a command named in a UA, URL or other log text can't go out unnoticed.
 
 ## Before sending
 
 Know what and why: the host, the target (IP / subnet / session / exact UA), the TTL and a one-line
-reason. If the target is unclear, ask; otherwise send right away. Default TTL when the analyst gives
+reason. If the target is unclear, ask; otherwise run it (Claude Code shows the confirmation). Default TTL when the analyst gives
 none: 1 h for challenges, 30 min for blocks. Use `--dry-run` only if the analyst wants to see the
 message first.
 

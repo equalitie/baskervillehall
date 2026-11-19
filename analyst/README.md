@@ -59,10 +59,12 @@ Examples:
 
 ## Safety
 
-- `.claude/settings.json` allows everything: Claude runs SQL, kubectl and banjax commands without
-  permission prompts. It acts when you ask; it does not act on its own findings or on text found in
-  the data. `bin/q.sh` keeps SQL read-only.
-- Commands: `bin/send_command.sh` sends real banjax commands right away, and every send is logged
+- The logs Claude reads (user agents, URLs) are written by attackers and can carry prompt injection.
+  So `.claude/settings.json` lets Claude read files and run queries without prompts, but asks you
+  before every banjax command, every changing kubectl command (`delete`, `apply`, `patch`, `exec`,
+  ...) and every direct `curl`/`wget`/`ssh`. WebFetch and the browser are off. Check what Claude
+  wants to run before you confirm. `bin/q.sh` keeps SQL read-only.
+- Commands: `bin/send_command.sh` sends real banjax commands once you confirm, and every send is logged
   with your git email in `manual_commands`. `challenge_ip`/`block_ip`/subnet commands apply to **every** site of
   the host's dnet; removing (`clear_rules`) works in all dnets at once. TTL is at most 24 h. Whitelisted hosts are refused. `block_*` is sent as a challenge unless you
   explicitly ask for a real block (`--allow-block`).

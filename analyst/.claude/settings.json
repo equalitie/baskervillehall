@@ -4,9 +4,31 @@
       "Bash",
       "Read",
       "Edit",
-      "Write",
+      "Write"
+    ],
+    "ask": [
+      "Bash(bin/send_command.sh:*)",
+      "Bash(./bin/send_command.sh:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(kubectl patch:*)",
+      "Bash(kubectl edit:*)",
+      "Bash(kubectl replace:*)",
+      "Bash(kubectl create:*)",
+      "Bash(kubectl scale:*)",
+      "Bash(kubectl rollout:*)",
+      "Bash(kubectl exec:*)",
+      "Bash(kubectl cp:*)",
+      "Bash(kubectl port-forward:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "WebSearch"
+    ],
+    "deny": [
       "WebFetch",
-      "WebSearch",
       "mcp__claude-in-chrome"
     ]
   }
