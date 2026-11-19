@@ -167,6 +167,9 @@ data:
     # First Responder: one-click AltCha (+ force_new) on attack UAs that pass the challenge
     FIRST_RESPONDER_ALTCHA_CLICK: "true"
     FIRST_RESPONDER_ALTCHA_CLICK_TTL_MINUTES: "360"
+    # Native challenge_ua / block_ua for tool UAs (curl, python-requests...): banjax keys UA
+    # decisions by (UA, host) now, so they no longer hit every Deflect site.
+    FIRST_RESPONDER_NATIVE_UA_COMMANDS_ENABLED: "true"
     SESSION_LLM_QUEUE_SIZE: "200"
     CLUSTER_LLM_PROVIDER: "anthropic"
     CLUSTER_LLM_MODEL: "claude-haiku-4-5-20251001"
