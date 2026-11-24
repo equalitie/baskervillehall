@@ -90,7 +90,11 @@ PROTECTED_ASNS = {
 # Yandex is a legitimate search engine — blocking its UA causes search ranking damage.
 # Deflect's own health check, uptime monitors, Facebook link previews and the WP Rocket cache
 # preloader are service traffic: absence from the baseline does not make blocking them harmless.
+# Jetpack and WordPress.com (Automattic) fetch stats, backups and previews for WordPress sites;
+# the LLM challenged them six hours in a row during an incident (Nov 21, 2026).
 PROTECTED_UA_PATTERNS = {
+    "jetpack by wordpress.com",
+    "wordpress.com; https://wordpress.com",
     "yandex",
     "deflecthealthcheck",
     "projectshield",
@@ -120,6 +124,22 @@ def is_protected_ua(ua: str, host: str = '') -> bool:
         site = site[4:] if site.startswith('www.') else site
         return site in ua_lower
     return False
+
+# Browsers inside apps (Facebook, Instagram, TikTok, ...) put the app build into the UA, so each
+# app release is a "new" UA that is never in the baseline: "absent from normal traffic" says
+# nothing about them. The LLM targeted a Facebook iPhone UA at 7.7% of an attack (Nov 21, 2026).
+# A UA action on one needs IN_APP_UA_MIN_PCT % of the incident's bot commands.
+_IN_APP_UA_RE = re.compile(
+    r'FBAN/|FBAV/|FB_IAB/|Instagram \d|musical_ly|BytedanceWebview|TikTok|\bLine/\d|'
+    r'Snapchat|Pinterest/|LinkedInApp|Twitter for|GSA/\d|WhatsApp/',
+    re.IGNORECASE,
+)
+IN_APP_UA_MIN_PCT = 20.0
+
+
+def is_in_app_ua(ua: str) -> bool:
+    return bool(_IN_APP_UA_RE.search(ua or ''))
+
 
 # A UA that looks like an ordinary browser is shared by many real people: Chrome/156 on
 # Windows is the most common UA on the internet. Blocking it by UA blocks the site's readers
@@ -177,13 +197,13 @@ ALTCHA_CLICK_GIVE_UP_HOURS = 2
 
 
 def is_browser_ua(ua: str) -> bool:
-    """True if the UA looks like a real desktop/mobile browser rather than a tool or crawler."""
-    return (
-        ua.startswith('Mozilla/5.0 (')
-        and ('Safari/' in ua or 'Gecko/' in ua)
-        and bool(_BROWSER_ENGINE_RE.search(ua))
-        and not _NON_BROWSER_RE.search(ua)
-    )
+    """True if the UA looks like a real desktop/mobile browser rather than a tool or crawler.
+    Browsers inside apps count too: on iOS they often carry no Chrome/Version/Safari token."""
+    if not ua.startswith('Mozilla/5.0 (') or _NON_BROWSER_RE.search(ua):
+        return False
+    if is_in_app_ua(ua):
+        return True
+    return ('Safari/' in ua or 'Gecko/' in ua) and bool(_BROWSER_ENGINE_RE.search(ua))
 
 
 # A browser UA is blocked only together with the attack's TLS fingerprints
@@ -2305,6 +2325,19 @@ class IncidentFirstResponder:
                 f' [auto-removed {len(protected)} protected service UA(s): never block]'
             )
             resolved = [ua for ua in resolved if ua not in protected]
+        pct = {st['ua']: float(st.get('pct') or 0) for st in ua_stats or [] if st.get('ua')}
+        in_app = [ua for ua in resolved if is_in_app_ua(ua) and pct.get(ua, 0.0) < IN_APP_UA_MIN_PCT]
+        if in_app:
+            self.logger.warning(
+                f"[FIRST_RESPONDER] Dropping {rec['action']} for in-app browser UA(s) below "
+                f"{IN_APP_UA_MIN_PCT:.0f}% host={host}: {in_app}"
+            )
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [auto-removed {len(in_app)} in-app browser UA(s) under {IN_APP_UA_MIN_PCT:.0f}% '
+                f'of bot commands: app builds are never in the baseline]'
+            )
+            resolved = [ua for ua in resolved if ua not in in_app]
         browser = [ua for ua in resolved if is_browser_ua(ua)]
         attack_fps = [
             s['fingerprint'] for s in fingerprint_stats or []
