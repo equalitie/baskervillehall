@@ -9,6 +9,7 @@ import psycopg2
 import psycopg2.extras
 import requests
 from kafka import KafkaProducer
+from baskervillehall import chronic_click
 from baskervillehall.block_guard import (ALTCHA_MAX_NUMBER, BLOCKS_DISABLED, finalize_command,
                                          guard_command_name, host_variants, is_host_whitelisted)
 
@@ -931,6 +932,59 @@ class IncidentFirstResponder:
         for host, incident_id in rows:
             if host not in open_hosts:
                 self._altcha_click_escalation(conn, {'id': incident_id, 'host': host})
+
+    def _chronic_click_scan(self, conn):
+        """Once an hour (from minute 10, when deflect_alerts has written the last hour): browser UAs
+        that dominate a host and pass the challenge for the last chronic_click.HOURS hours with no
+        incident (see chronic_click). Dry run: logged and written to chronic_click_log, nothing sent."""
+        if chronic_click.MODE == 'off':
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        end = now.replace(minute=0, second=0, microsecond=0)
+        if now.minute < 10 or getattr(self, '_chronic_last_end', None) == end:
+            return
+        self._chronic_last_end = end
+        hours = [end - timedelta(hours=k) for k in range(chronic_click.HOURS, 0, -1)]
+        start = hours[0]
+        with conn.cursor() as cur:
+            cur.execute(chronic_click.CREATE_TABLE_SQL)
+            cur.execute("""SELECT host, hour, served, passed, challenged, blocked, rate_limited
+                           FROM host_mitigation_hour WHERE hour >= %s AND hour < %s""", (start, end))
+            host_rows = cur.fetchall()
+            cur.execute("""SELECT host, hour, ua, served, passed, challenged, blocked, rate_limited
+                           FROM host_ua_mitigation_hour WHERE hour >= %s AND hour < %s""", (start, end))
+            ua_rows = cur.fetchall()
+        found = chronic_click.find_candidates(
+            host_rows, ua_rows, hours,
+            is_candidate_ua=lambda ua: is_browser_ua(ua) and not is_verifiable_crawler_ua(ua))
+        self.logger.info(f"[CHRONIC_CLICK] {start:%m-%d %H}:00-{end:%H}:00 UTC: {len(host_rows)} host-hours, "
+                         f"{len(ua_rows)} ua-hours, {len(found)} candidate(s), mode={chronic_click.MODE}")
+        for c in found:
+            host, ua = c['host'], c['ua']
+            with conn.cursor() as cur:
+                cur.execute("""SELECT 1 FROM incidents WHERE host = %s AND ended_at IS NULL
+                               AND started_at > NOW() - INTERVAL '24 hours' LIMIT 1""", (host,))
+                open_incident = cur.fetchone() is not None
+                cur.execute("""SELECT 1 FROM first_responder_actions WHERE host = %s AND action = %s
+                               AND target = %s AND created_at > NOW() - INTERVAL '1 minute' * %s LIMIT 1""",
+                            (host, ALTCHA_CLICK_ACTION, ua, ALTCHA_CLICK_TTL_MINUTES))
+                click_active = cur.fetchone() is not None
+            skipped = ('whitelisted' if is_host_whitelisted(host) else
+                       'open incident' if open_incident else
+                       'click active' if click_active else None)
+            self.logger.warning(
+                f"[CHRONIC_CLICK] {'would click' if not skipped else 'skip (' + skipped + ')'} {host}: "
+                f"{c['requests']} req in {chronic_click.HOURS} h, share >= {c['share_min']:.0f}% every hour "
+                f"(typical {c['typical_share']:.1f}%), passed {c['passed']} vs challenged {c['challenged']}: "
+                f"{ua[:100]}")
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO chronic_click_log (window_start, window_end, host, ua, mode, skipped,
+                                   requests, share_min, typical_share, passed, challenged)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               ON CONFLICT DO NOTHING""",
+                            (start, end, host, ua, chronic_click.MODE, skipped, c['requests'],
+                             c['share_min'], c['typical_share'], c['passed'], c['challenged']))
+        conn.commit()
 
     def _altcha_click_escalation(self, conn, incident):
         """Put the one-click AltCha on attack UAs that pass the current challenge. The trigger is
@@ -3155,6 +3209,11 @@ class IncidentFirstResponder:
                     except Exception:
                         conn.rollback()
                         self.logger.exception("[ALTCHA_CLICK] follow-up failed")
+                try:
+                    self._chronic_click_scan(conn)
+                except Exception:
+                    conn.rollback()
+                    self.logger.exception("[CHRONIC_CLICK] scan failed")
                 if incidents:
                     self.logger.info(
                         f"[FIRST_RESPONDER] Found {len(incidents)} unprocessed incident(s)"
