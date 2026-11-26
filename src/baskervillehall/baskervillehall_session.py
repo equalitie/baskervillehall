@@ -18,6 +18,7 @@ from baskervillehall.asn_database import ASNDatabase
 from baskervillehall.asn_database2 import ASNDatabase2
 from baskervillehall import baskerville_rules
 from baskervillehall.bot_verificator import BotVerificator
+from baskervillehall.incident_first_responder import is_asn_verified_service
 from baskervillehall.ai_bot_verificator import AiBotVerificator
 from baskervillehall.country_blocker import CountryBlocker
 from baskervillehall.first_responder_blocker import FirstResponderBlocker
@@ -1642,7 +1643,9 @@ class BaskervillehallSession(object):
                             continue
 
                         # None = crawler verification skipped under lag: don't treat as unverified
-                        _verified = True if verified_bot else (None if self.skip_expensive_ops else False)
+                        # verified AI crawlers and services from their own ASN count as verified too
+                        _verified = True if (verified_bot or verified_ai_bot or is_asn_verified_service(ua, asn)) \
+                            else (None if self.skip_expensive_ops else False)
                         if self.first_responder_blocker.process(host, ip, country, asn_name, survey_country,
                                                                 dnet, ua, _fp_hash, verified_bot=_verified):
                             self.profile_stats['message_processing'] += (time_module.time() - msg_start)

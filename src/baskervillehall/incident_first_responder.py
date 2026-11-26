@@ -10,6 +10,7 @@ import psycopg2.extras
 import requests
 from kafka import KafkaProducer
 from baskervillehall import chronic_click
+from baskervillehall.baskerville_rules import is_verifiable_ai_bot_user_agent
 from baskervillehall.block_guard import (ALTCHA_MAX_NUMBER, BLOCKS_DISABLED, finalize_command,
                                          guard_command_name, host_variants, is_host_whitelisted)
 
@@ -86,18 +87,15 @@ PROTECTED_ASNS = {
     "Yandex",
 }
 
-# UA substrings (case-insensitive) that must never be blocked or challenged.
-# Yandex is a legitimate search engine — blocking its UA causes search ranking damage.
-# Deflect's own health check, uptime monitors, Facebook link previews and the WP Rocket cache
-# preloader are service traffic: absence from the baseline does not make blocking them harmless.
-# Jetpack and WordPress.com (Automattic) fetch stats, backups and previews for WordPress sites;
-# the LLM challenged them six hours in a row during an incident (Nov 21, 2026).
+# Monitors and service UAs that must not be blocked or challenged by UA. Nobody can verify these
+# (self-hosted monitors run anywhere, WP Rocket preloads from the site's own server), and anyone
+# can put them into a bot. So the protection holds only while the UA is small: a monitor sends
+# about a request a minute, and a UA with PROTECTED_UA_MAX_PCT % of an incident's bot commands is
+# a bot wearing it. Crawlers that can be checked (Yandex, Facebook previews, Project Shield,
+# Jetpack, ...) are not here but in the verifiable lists below: fakes from other networks get
+# per-IP challenges, the real ones pass.
 PROTECTED_UA_PATTERNS = {
-    "jetpack by wordpress.com",
-    "wordpress.com; https://wordpress.com",
-    "yandex",
     "deflecthealthcheck",
-    "projectshield",
     "uptimerobot",
     "uptime-kuma",
     "sentryuptimebot",
@@ -105,17 +103,21 @@ PROTECTED_UA_PATTERNS = {
     "siteuptime",
     "whatap url monitoring",
     "check_http/",
-    "facebookexternalhit",
     "wp rocket",
 }
+PROTECTED_UA_MAX_PCT = 5.0
 
 
-def is_protected_ua(ua: str, host: str = '') -> bool:
-    """True if the UA must never be blocked or challenged on this host.
+def is_protected_ua(ua: str, host: str = '', pct=None) -> bool:
+    """True if the UA must not be blocked or challenged on this host.
 
+    pct: the UA's % of the incident's bot commands, when known. At PROTECTED_UA_MAX_PCT or more
+    the UA is not protected (see PROTECTED_UA_PATTERNS).
     WordPress UAs are protected only for the site's requests to itself
     ("WordPress/6.x; https://<host>"): pingback floods use the same UA from other sites.
     """
+    if pct is not None and pct >= PROTECTED_UA_MAX_PCT:
+        return False
     ua_lower = ua.lower()
     if any(p in ua_lower for p in PROTECTED_UA_PATTERNS):
         return True
@@ -162,8 +164,38 @@ _VERIFIABLE_CRAWLER_RE = re.compile(
 )
 
 
+# Services that come only from their operator's network: verified by the ASN of the request.
+# Jetpack and WordPress.com (Automattic) fetch stats, backups and previews for WordPress sites;
+# the LLM challenged them six hours in a row during an incident (Nov 21, 2026). The Internet
+# Archive crawler got a native challenge_ua the day those were turned on (Nov 19, 2026).
+# Only the operator's own networks: rentable clouds (Yandex Cloud, Google Cloud) are left out.
+_ASN_VERIFIED_UAS = (
+    (re.compile(r'jetpack by wordpress\.com|wordpress\.com; https://wordpress\.com', re.IGNORECASE),
+     frozenset({'2635'})),                    # Automattic
+    (re.compile(r'archive\.org_bot|ia_archiver', re.IGNORECASE),
+     frozenset({'7941'})),                    # Internet Archive
+    (re.compile(r'yandex\.com/bots', re.IGNORECASE),  # robots only, not the Yandex apps' users
+     frozenset({'13238'})),                   # Yandex (not Yandex Cloud, 200350)
+    (re.compile(r'facebookexternalhit', re.IGNORECASE),
+     frozenset({'32934', '63293', '54115'})),  # Meta
+    (re.compile(r'projectshield', re.IGNORECASE),
+     frozenset({'15169', '19527'})),          # Google (not Google Cloud, 396982)
+)
+
+
+def is_asn_verified_service(ua: str, asn) -> bool:
+    """True if the UA is one of _ASN_VERIFIED_UAS and the request comes from its operator's ASN."""
+    asn = str(asn or '').strip()
+    return bool(ua) and any(r.search(ua) and asn in asns for r, asns in _ASN_VERIFIED_UAS)
+
+
 def is_verifiable_crawler_ua(ua: str) -> bool:
-    return bool(_VERIFIABLE_CRAWLER_RE.search(ua))
+    """A UA we can check per request (by IP list, reverse DNS or ASN). First Responder never sends a
+    UA-wide command for it; first_responder_blocker acts only on requests that fail the check."""
+    return bool(ua) and bool(
+        _VERIFIABLE_CRAWLER_RE.search(ua)
+        or any(r.search(ua) for r, _ in _ASN_VERIFIED_UAS)
+        or is_verifiable_ai_bot_user_agent(ua))
 
 
 # One-click AltCha escalation (rule-based, no LLM). The tapol.org botnet (Nov 13) solved sha-inv
@@ -1141,7 +1173,8 @@ class IncidentFirstResponder:
                 )
             return
         for ua in targets:
-            if is_protected_ua(ua, host) or is_browser_ua(ua) or is_verifiable_crawler_ua(ua):
+            if is_protected_ua(ua, host, rec.get('_ua_pct', {}).get(ua)) or is_browser_ua(ua) \
+                    or is_verifiable_crawler_ua(ua):
                 self.logger.warning(
                     f"[FIRST_RESPONDER] Skipping native {action} for protected, browser or "
                     f"verifiable crawler UA: {ua!r}"
@@ -1419,7 +1452,7 @@ class IncidentFirstResponder:
             is_scripted = criterion.get('is_scripted', False)
             if not ua:
                 return
-            if is_protected_ua(ua, host):
+            if is_protected_ua(ua, host, pct):
                 self.logger.warning(
                     f"[CLUSTER_RESPONDER] Skipping ua_exact for protected UA host={host}: {ua!r}"
                 )
@@ -2315,7 +2348,16 @@ class IncidentFirstResponder:
                     f"[FIRST_RESPONDER] Dropping {rec['action']} target {target!r} — "
                     f"matches {len(matches)} incident UAs (need exactly one)"
                 )
-        protected = [ua for ua in resolved if is_protected_ua(ua, host)]
+        pct = {st['ua']: float(st.get('pct') or 0) for st in ua_stats or [] if st.get('ua')}
+        rec['_ua_pct'] = pct
+        lifted = [ua for ua in resolved if is_protected_ua(ua, host) and not is_protected_ua(ua, host, pct.get(ua))]
+        if lifted:
+            rec['reasoning'] = (
+                rec.get('reasoning', '') +
+                f' [service UA(s) at {PROTECTED_UA_MAX_PCT:.0f}%+ of bot commands are not protected: '
+                f'a monitor sends about one request a minute]'
+            )
+        protected = [ua for ua in resolved if is_protected_ua(ua, host, pct.get(ua))]
         if protected:
             self.logger.warning(
                 f"[FIRST_RESPONDER] Dropping {rec['action']} for protected UA(s) host={host}: {protected}"
@@ -2325,7 +2367,6 @@ class IncidentFirstResponder:
                 f' [auto-removed {len(protected)} protected service UA(s): never block]'
             )
             resolved = [ua for ua in resolved if ua not in protected]
-        pct = {st['ua']: float(st.get('pct') or 0) for st in ua_stats or [] if st.get('ua')}
         in_app = [ua for ua in resolved if is_in_app_ua(ua) and pct.get(ua, 0.0) < IN_APP_UA_MIN_PCT]
         if in_app:
             self.logger.warning(
